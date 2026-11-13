@@ -138,3 +138,57 @@
   bound, byte bound and empty case. This does not make the underlying storage
   or full chat layout scalable; those are still explicit follow-up design work.
 - Native checks, APK build and connected-phone startup smoke check passed.
+
+## 2026-11-13–14: SQLite memory and live ChatGPT
+
+- Implemented pinned SQLite3.51.2 with verified upstream archive/source hashes,
+  transactional append-only messages, versioned typed memory, source joins,
+  durable extraction jobs and FTS5 trigram indexes. Unknown DB versions and
+  missing initialized markers on populated databases fail before legacy import.
+- Connected Pixel10Pro upgraded without clearing data. A pre-upgrade backup was
+  kept locally under ignored build/. All four original messages matched exactly
+  after migration; legacy notebook.json remained untouched. SQLite integrity
+  check passed. No personal data or connection state entered public Git.
+- Desktop core suite:9 tests plus C ABI write/read in separate processes. Cases
+  include20k messages and20k memories, source/scope/type rejection, revisions,
+  missing-marker failure, read-only write failure, atomic job rollback, replay
+  idempotence and segmented exports. Query-plan and statement-step checks guard
+  indexed lookup. The no-hit benchmark is a PC test, not phone latency proof.
+- Native CPU suite checks80-row bound with20k records, user/assistant layout,
+  paging anchors, source jumps, streaming without forced scroll, Unicode/fonts,
+  typography and GL-context state reconstruction. Real device loads the library.
+- Connection suite:44 synthetic OAuth/JWT/SSE/JSON checks, plus conversation
+  cancellation/evidence sequencing/long-current-input fixtures and backup ZIP
+  Unicode/path traversal/current-snapshot-only checks. No synthetic test token
+  was used for real authorization.
+- Independent review reproduced and fixed inferred-fact supersession, missing
+  migration marker corruption, current-user tail truncation, pre-save model HTTP,
+  destroyed-Activity login callbacks and rotated-token network gaps.
+- The first live OAuth callback succeeded but the token exchange hit Android
+  UnknownHostException at background importance400. Final flow waits for app
+  foreground; package-targeted return link and singleTask Activity avoid creating
+  a second login owner. Real token exchange and ID-token verification completed.
+- Live Responses returned HTTP200 with no Content-Type header. The receiver now
+  detects the body and requires response.completed or a completed response object.
+  Partial/failed/unknown bodies still fail closed. Regression fixtures cover this.
+- Real subscription inference answered the synthetic fictional Luna/blue-flower
+  recall. Automatic extraction stored an explicit fact scoped fiction and linked
+  it to the actual synthetic user message. A subsequent red-flower update created
+  a successor, retained blue as historical, and completed all three pending jobs.
+  SQLite integrity passed afterward. This is evidence of the live end-to-end
+  path, not a long-horizon companionship-quality score.
+- Final0.2.0 APK SHA256: `a015d31b21d3e0e951099ab935626d1d5897e7009ce648835111ea74ce43e800`.
+  After the final upgrade and process restart, the encrypted ChatGPT session was
+  retained and the connection/model controls remained available. Final real chat
+  display showed actual assistant replies on the left and user messages on the
+  right. The previous authentication error did not recur in the corrected flow.
+
+### Remaining boundaries
+
+Embedding search, graph reasoning, automatic private GitHub sync and in-app
+archive restore are not part of this minimal implementation. Short queries use
+indexed identity matches and a bounded recent fallback. Long extraction inputs
+can be marked partial; original content remains stored and searchable. Dedicated
+persona training was not performed. Japanese emotional/relational consistency,
+over-personalization, forced power-loss behavior, other phones, real token expiry
+rotation and long-running companion quality need further evaluation.

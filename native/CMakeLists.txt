@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(conversation LANGUAGES CXX)
+project(conversation LANGUAGES C CXX)
 
 if(NOT ANDROID)
     message(FATAL_ERROR "Configure with the Android NDK toolchain.")
@@ -10,6 +10,9 @@ if(NOT EXISTS "${CONVERSATION_CORE_LIBRARY}")
 endif()
 
 set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/imgui")
+add_library(sqlite3 STATIC "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/sqlite/sqlite3.c")
+target_compile_definitions(sqlite3 PRIVATE SQLITE_THREADSAFE=1 SQLITE_ENABLE_FTS5=1 SQLITE_OMIT_LOAD_EXTENSION=1)
+target_include_directories(sqlite3 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/sqlite")
 add_library(conversation_core STATIC IMPORTED)
 set_target_properties(conversation_core PROPERTIES IMPORTED_LOCATION "${CONVERSATION_CORE_LIBRARY}")
 add_library(conversation SHARED
@@ -23,5 +26,5 @@ add_library(conversation SHARED
 target_compile_features(conversation PRIVATE cxx_std_17)
 target_compile_definitions(conversation PRIVATE IMGUI_IMPL_OPENGL_ES3 IMGUI_USE_WCHAR32)
 target_include_directories(conversation PRIVATE "${IMGUI_DIR}" "${IMGUI_DIR}/backends")
-target_link_libraries(conversation PRIVATE conversation_core android log GLESv3 EGL)
+target_link_libraries(conversation PRIVATE conversation_core sqlite3 android log GLESv3 EGL m)
 target_link_options(conversation PRIVATE "-Wl,--no-undefined" "-Wl,-z,max-page-size=16384")

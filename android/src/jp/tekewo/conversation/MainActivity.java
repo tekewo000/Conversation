@@ -3,6 +3,8 @@ package jp.tekewo.conversation;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.content.Intent;
+import android.net.Uri;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Canvas;
@@ -39,6 +41,13 @@ import android.widget.TextView;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.json.JSONObject;
+import org.json.JSONArray;
 
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
@@ -50,12 +59,31 @@ public final class MainActivity extends Activity {
     private static native void nativeRender();
     private static native void nativeSetTypography(float pixels, float gapDp);
     private static native void nativeTouch(int action, float x, float y);
-    private static native String nativeSend(byte[] text);
+    private static native long nativeAddMessage(byte[] role, byte[] text);
+    private static native String nativeLastError();
+    private static native String nativeContext(byte[] query);
+    private static native String nativePendingJob();
+    private static native String nativeApplyJob(long id, byte[] payload);
+    private static native String nativeMemories(byte[] query);
+    private static native String nativeExport();
+    private static native void nativeJumpToMessage(long id);
+    private static native void nativeSetStreaming(byte[] text);
     private static native String nativeRecentTranscript();
     private static native void nativePause();
 
     private ChatSurface surface;
     private EditText input;
+    private ImageButton send;
+    private ChatGptConnection connection;
+    private ChatSession session;
+    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private boolean busy;
+    private String connectionStatus = "";
+    private volatile List<ChatGptConnection.Model> availableModels;
+    private static byte[] bytes(String value) { return value.getBytes(StandardCharsets.UTF_8); }
+    private void ui(Runnable action) {
+        runOnUiThread(() -> { if (!isDestroyed() && !isFinishing()) action.run(); });
+    }
     private boolean ready;
     private int textSize = 20;
     private int messageGap = 12;
@@ -143,7 +171,7 @@ public final class MainActivity extends Activity {
         input.setEnabled(ready);
         composer.addView(input, new LinearLayout.LayoutParams(0, -2, 1));
 
-        ImageButton send = iconButton(true, "送信");
+        send = iconButton(true, "送信");
         send.setEnabled(ready);
         send.setOnClickListener(view -> sendMessage());
         LinearLayout.LayoutParams sendLayout = new LinearLayout.LayoutParams(dp(48), dp(48));
@@ -153,6 +181,20 @@ public final class MainActivity extends Activity {
 
         input.setText(getPreferences(MODE_PRIVATE).getString("draft", ""));
         applyTypography();
+        connection = new ChatGptConnection(this);
+        session = new ChatSession(new ChatSession.Store() {
+            public long add(String role, String text) throws Exception {
+                long id = nativeAddMessage(bytes(role), bytes(text));
+                if (id <= 0) throw new java.io.IOException(nativeLastError());
+                return id;
+            }
+            public JSONObject context(String query) throws Exception { return new JSONObject(nativeContext(bytes(query))); }
+            public JSONObject pending() throws Exception { return new JSONObject(nativePendingJob()); }
+            public void apply(long id, String payload) throws Exception {
+                String error = nativeApplyJob(id, bytes(payload));
+                if (!error.isEmpty()) throw new java.io.IOException(error);
+            }
+        });
     }
 
     private byte[] asset(String name) throws Exception {
@@ -165,22 +207,98 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void setBusy(boolean value) {
+        busy = value;
+        input.setEnabled(ready);
+        send.setEnabled(ready && !value);
+        send.setAlpha(value ? 0.45f : 1.0f);
+    }
+
+    private String selectedModel() throws Exception {
+        String selected = getPreferences(MODE_PRIVATE).getString("model_slug", "");
+        List<ChatGptConnection.Model> models = availableModels;
+        if (models == null) availableModels = models = connection.listModels();
+        for (ChatGptConnection.Model model : models) if (model.slug.equals(selected)) return selected;
+        if (models.isEmpty()) throw new java.io.IOException("利用できるモデルがありません。接続状態を確認してください。");
+        selected = models.get(0).slug;
+        getPreferences(MODE_PRIVATE).edit().putString("model_slug", selected).apply();
+        return selected;
+    }
+
     private void sendMessage() {
+        if (busy) return;
+        if (!connection.hasSession()) { showConnection(); return; }
         String text = input.getText().toString();
-        String error = nativeSend(text.getBytes(StandardCharsets.UTF_8));
-        if (!error.isEmpty()) {
-            showError(error);
-            return;
-        }
-        BaseInputConnection.removeComposingSpans(input.getText());
-        input.setText("");
-        getPreferences(MODE_PRIVATE).edit().remove("draft").apply();
-        input.announceForAccessibility("メッセージを保存しました");
-        surface.renderBurst();
+        if (text.trim().isEmpty()) return;
+        runReply(text, true);
+    }
+
+    private void runReply(String text, boolean persistUser) {
+        setBusy(true);
+        session.begin();
+        connectionStatus = "応答を生成しています";
+        AtomicBoolean saved = new AtomicBoolean(!persistUser);
+        worker.execute(() -> {
+            try {
+                final String[] model = {null};
+                session.reply(text, persistUser, (instructions, turns, delta) -> {
+                    if (model[0] == null) model[0] = selectedModel();
+                    return connection.request(model[0], instructions, turns, delta);
+                }, new ChatSession.Listener() {
+                    private long lastRender;
+                    public void userSaved() {
+                        saved.set(true);
+                        ui(() -> {
+                            if (input.getText().toString().equals(text)) {
+                                BaseInputConnection.removeComposingSpans(input.getText());
+                                input.setText("");
+                                getPreferences(MODE_PRIVATE).edit().remove("draft").apply();
+                            }
+                            surface.renderBurst();
+                        });
+                    }
+                    public void streaming(String full) {
+                        nativeSetStreaming(bytes(full));
+                        long now = android.os.SystemClock.uptimeMillis();
+                        if (now - lastRender > 45) { lastRender = now; ui(() -> surface.requestRender()); }
+                    }
+                    public void replySaved() {
+                        nativeSetStreaming(bytes(""));
+                        ui(() -> { surface.renderBurst(); connectionStatus = "記憶を整理しています"; });
+                    }
+                    public void memoryStatus(String error) {
+                        ui(() -> connectionStatus = error == null ? "ChatGPTに接続しています" : error);
+                    }
+                });
+            } catch (Exception error) {
+                nativeSetStreaming(bytes(""));
+                if (session.isCancelled()) {
+                    ui(() -> { connectionStatus = "応答を停止しました"; surface.renderBurst(); });
+                    return;
+                }
+                final String detail = error instanceof org.json.JSONException
+                        ? "応答の形式を処理できませんでした。" : safeError(error);
+                ui(() -> {
+                    connectionStatus = detail;
+                    surface.renderBurst();
+                    AlertDialog.Builder dialog = new AlertDialog.Builder(this).setTitle("応答できませんでした")
+                            .setMessage(detail + (saved.get() ? "\n送信済みの会話原文は保存されています。" : ""));
+                    if (detail.contains("利用上限")) dialog.setPositiveButton("利用状況を確認", (view, which) ->
+                            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://chatgpt.com/settings/usage"))));
+                    else dialog.setPositiveButton("再試行", (view, which) -> runReply(text, !saved.get()));
+                    dialog.setNegativeButton("閉じる", null).show();
+                });
+            } finally { ui(() -> setBusy(false)); }
+        });
+    }
+
+    private String safeError(Exception error) {
+        if (error instanceof java.io.IOException && error.getMessage() != null) return error.getMessage();
+        return "処理に失敗しました。接続状態を確認して再試行してください。";
     }
 
     private void showError(String error) {
-        new AlertDialog.Builder(this).setTitle("保存を確認してください")
+        new AlertDialog.Builder(this).setTitle("処理を確認してください")
                 .setMessage(error).setPositiveButton("閉じる", null).show();
     }
 
@@ -191,23 +309,177 @@ public final class MainActivity extends Activity {
         input.clearFocus();
         Dialog sheet = newSheet();
         LinearLayout body = sheetBody(sheet, "メニュー");
-        String[] labels = {"会話", "記憶", "表示設定", "接続状態"};
-        int[] icons = {0, 2, 4, 5};
+        String[] labels = busy ? new String[]{"会話", "記憶", "表示設定", "ChatGPT", "バックアップ", "応答を停止"}
+                : new String[]{"会話", "記憶", "表示設定", "ChatGPT", "バックアップ"};
+        int[] icons = {0, 2, 4, 5, 1, 6};
         for (int i = 0; i < labels.length; ++i) {
             final int action = i;
             menuRow(body, labels[i], icons[i], () -> {
                 sheet.dismiss();
                 if (action == 0) surface.renderBurst();
-                else if (action == 1) new AlertDialog.Builder(this).setTitle("記憶")
-                        .setMessage("会話から記憶を自動で整理する機能は、まだ実装していません。現在は会話の原文を保存しています。")
-                        .setPositiveButton("閉じる", null).show();
+                else if (action == 1) showMemories();
                 else if (action == 2) showDisplaySettings();
-                else new AlertDialog.Builder(this).setTitle("接続状態")
-                        .setMessage("AIはまだ接続されていません。会話の全文は端末に保存されます。記憶の自動整理は未実装です。")
-                        .setPositiveButton("閉じる", null).show();
+                else if (action == 3) showConnection();
+                else if (action == 4) exportArchive();
+                else {
+                    session.cancel(); connection.cancel();
+                    nativeSetStreaming(bytes("")); surface.renderBurst();
+                }
             });
         }
         showSheet(sheet);
+    }
+
+    private void showConnection() {
+        Dialog dialog = newSheet();
+        LinearLayout body = sheetBody(dialog, "ChatGPT");
+        TextView status = sheetText(connection.hasSession()
+                ? connection.accountLabel() + "\nChatGPTの利用枠を使用します。\n" + connectionStatus
+                : "ChatGPTにログインして、このアプリでサブスクの利用枠を使います。\n" + connectionStatus, 17);
+        status.setPadding(dp(12), dp(12), dp(12), dp(20));
+        body.addView(status);
+        if (!connection.hasSession()) {
+            menuRow(body, "Continue with ChatGPT", 5, () -> {
+                if (busy) return;
+                dialog.dismiss();
+                connectionStatus = "ブラウザでの認証を待っています";
+                connection.signIn(error -> ui(() -> {
+                    availableModels = null;
+                    connectionStatus = error == null ? "ChatGPTに接続しました" : error;
+                    if (error != null) new AlertDialog.Builder(this).setTitle("ChatGPTに接続できませんでした")
+                            .setMessage(error).setPositiveButton("閉じる", null).show();
+                    else {
+                        if (!getPreferences(MODE_PRIVATE).getBoolean("plan_welcome", false)) {
+                            getPreferences(MODE_PRIVATE).edit().putBoolean("plan_welcome", true).apply();
+                            new AlertDialog.Builder(this).setTitle("ChatGPTに接続しました")
+                                    .setMessage("会話と記憶の整理にChatGPTの利用枠を使います。利用状況はメニューのChatGPTから確認できます。")
+                                    .setPositiveButton("会話を始める", (view, which) -> retryMemories()).show();
+                        } else retryMemories();
+                    }
+                }));
+            });
+        } else {
+            menuRow(body, "モデルを選ぶ", 4, () -> { dialog.dismiss(); showModels(); });
+            menuRow(body, "記憶の整理を再試行", 2, () -> { dialog.dismiss(); retryMemories(); });
+            menuRow(body, "ログアウト", 6, () -> {
+                if (busy) return;
+                dialog.dismiss();
+                worker.execute(() -> {
+                    connection.signOut(); availableModels = null;
+                    ui(() -> { connectionStatus = connection.signOutStatus(); showConnection(); });
+                });
+            });
+        }
+        if (!connection.hasSession()) menuRow(body, "保存した接続情報をリセット", 6, () -> {
+            if (busy) return;
+            dialog.dismiss();
+            worker.execute(() -> {
+                connection.signOut(); availableModels = null;
+                ui(() -> { connectionStatus = connection.signOutStatus(); showConnection(); });
+            });
+        });
+        menuRow(body, "利用状況を確認", 1, () -> startActivity(new Intent(Intent.ACTION_VIEW,
+                Uri.parse("https://chatgpt.com/settings/usage"))));
+        showSheet(dialog);
+    }
+
+    private void showModels() {
+        if (busy) return;
+        worker.execute(() -> {
+            try {
+                List<ChatGptConnection.Model> models = connection.listModels();
+                availableModels = models;
+                String[] names = new String[models.size()];
+                for (int i = 0; i < names.length; ++i) names[i] = models.get(i).displayName;
+                ui(() -> new AlertDialog.Builder(this).setTitle("モデル · ChatGPTの利用枠")
+                        .setItems(names, (dialog, index) -> getPreferences(MODE_PRIVATE).edit()
+                                .putString("model_slug", models.get(index).slug).apply())
+                        .setNegativeButton("閉じる", null).show());
+            } catch (Exception error) { ui(() -> showError(safeError(error))); }
+        });
+    }
+
+    private void retryMemories() {
+        if (busy || !connection.hasSession()) return;
+        setBusy(true); session.begin(); connectionStatus = "記憶を整理しています";
+        worker.execute(() -> {
+            try {
+                final String model = selectedModel();
+                session.processMemories((instructions, turns, delta) -> connection.request(model, instructions, turns, delta));
+                ui(() -> connectionStatus = "記憶の整理を進めました");
+            } catch (Exception error) { ui(() -> connectionStatus = "記憶の整理は再試行待ちです。" + safeError(error)); }
+            finally { ui(() -> setBusy(false)); }
+        });
+    }
+
+    private void showMemories() {
+        worker.execute(() -> {
+            try {
+                JSONArray memories = new JSONObject(nativeMemories(bytes(""))).getJSONArray("memories");
+                ui(() -> {
+                    Dialog dialog = newSheet();
+                    LinearLayout body = sheetBody(dialog, "記憶");
+                    if (memories.length() == 0) {
+                        TextView empty = sheetText("会話から整理した記憶がここに表示されます。", 17);
+                        empty.setPadding(dp(12), dp(16), dp(12), dp(24)); body.addView(empty);
+                    }
+                    for (int i = 0; i < memories.length(); ++i) {
+                        JSONObject memory = memories.optJSONObject(i);
+                        if (memory == null) continue;
+                        String kind = memory.optString("kind");
+                        String label = kind.equals("interpretation") ? "解釈・推測" : kind.equals("promise") ? "約束"
+                                : kind.equals("event") ? "出来事" : "明示された情報";
+                        if (memory.optString("key").equals("legacy_pin")) label = "旧版から引き継いだ記録";
+                        if (!memory.optBoolean("current", true)) label += "（過去）";
+                        if (kind.equals("promise") && memory.optString("status").equals("fulfilled")) label = "完了した約束";
+                        if (kind.equals("promise") && memory.optString("status").equals("cancelled")) label = "取り消した約束";
+                        String scope = memory.optString("scope").equals("fiction") ? "創作"
+                                : memory.optString("scope").equals("real") ? "現実の話" : "共有した体験";
+                        TextView text = sheetText(label + "  ·  " + scope + "\n" + memory.optString("text"), textSize);
+                        text.setPadding(dp(12), dp(14), dp(12), dp(14));
+                        JSONArray sources = memory.optJSONArray("source_ids");
+                        if (sources != null && sources.length() > 0) {
+                            long source = sources.optLong(0);
+                            text.setContentDescription(text.getText() + "。タップして元の会話を表示");
+                            text.setOnClickListener(view -> { dialog.dismiss(); nativeJumpToMessage(source); surface.renderBurst(); });
+                        }
+                        body.addView(text);
+                    }
+                    showSheet(dialog);
+                });
+            } catch (Exception error) { ui(() -> showError("記憶を読み込めませんでした。")); }
+        });
+    }
+
+    private void exportArchive() {
+        worker.execute(() -> {
+            String error = nativeExport();
+            ui(() -> {
+                if (!error.isEmpty()) { showError(error); return; }
+                Intent destination = new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/zip")
+                        .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE, "Conversation-backup.zip");
+                startActivityForResult(destination, 81);
+            });
+        });
+    }
+
+    @Override protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request != 81 || result != RESULT_OK || data == null || data.getData() == null) return;
+        Uri destination = data.getData();
+        worker.execute(() -> {
+            try (java.io.OutputStream destinationStream = getContentResolver().openOutputStream(destination, "w")) {
+                if (destinationStream == null) throw new java.io.IOException("Backup destination unavailable");
+                BackupArchive.write(new java.io.File(getFilesDir(), "export"), destinationStream);
+            } catch (Exception error) { ui(() -> showError("バックアップを書き出せませんでした。保存先を確認してください。")); }
+        });
+    }
+
+    @Override protected void onDestroy() {
+        if (session != null) session.cancel();
+        if (connection != null) connection.cancel();
+        worker.shutdownNow();
+        super.onDestroy();
     }
 
     private Dialog newSheet() {
@@ -473,6 +745,7 @@ public final class MainActivity extends Activity {
     }
 
     @Override public void onPause() {
+        if (connection != null) connection.setForeground(false);
         if (input != null) saveDisplaySettings();
         if (input != null) getPreferences(MODE_PRIVATE).edit()
                 .putString("draft", input.getText().toString()).commit();
@@ -493,6 +766,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onWindowFocusChanged(boolean focused) {
         super.onWindowFocusChanged(focused);
+        if (focused && connection != null) connection.setForeground(true);
         if (focused && surface != null) surface.renderBurst();
     }
 

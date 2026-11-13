@@ -13,6 +13,9 @@ namespace {
 std::vector<std::string> messages = {"日本語と絵文字 😀 の折り返し表示テスト。改行も保存されます。\n二行目です。"};
 std::vector<std::string> memories;
 int texture_requests = 0;
+int text_requests = 0;
+int cache_first = 0;
+int cache_count = 0;
 
 std::vector<unsigned char> read_font(const char* path) {
     std::ifstream stream(path, std::ios::binary);
@@ -20,10 +23,12 @@ std::vector<unsigned char> read_font(const char* path) {
 }
 
 void frame() {
+    text_requests = 0;
     ImGui::NewFrame();
     draw_ui();
     ImGui::Render();
     assert(ImGui::GetDrawData()->TotalVtxCount > 0);
+    assert(text_requests <= 80);
     for (ImTextureData* texture : ImGui::GetPlatformIO().Textures) {
         if (texture->Status == ImTextureStatus_WantCreate || texture->Status == ImTextureStatus_WantUpdates) {
             assert(texture->Pixels && texture->Width <= 4096 && texture->Height <= 4096);
@@ -34,10 +39,104 @@ void frame() {
     }
 }
 
-void tap(float x, float y) {
-    handle_touch(0, x, y);
-    handle_touch(1, x, y);
-    for (int i = 0; i < 5; ++i) frame();
+ImGuiWindow* chat_window() {
+    for (ImGuiWindow* window : ImGui::GetCurrentContext()->Windows)
+        if (window->Active && window->ParentWindow && std::string(window->ParentWindow->Name) == "Conversation") return window;
+    assert(false);
+    return nullptr;
+}
+
+float message_y(int index) {
+    for (const auto& p : message_positions) if (p.index == index) return p.y;
+    assert(false);
+    return 0;
+}
+
+void check_pages_and_streaming() {
+    const auto short_history = messages;
+    messages.clear();
+    for (int i = 0; i < 20000; ++i) messages.push_back("message-" + std::to_string(i));
+    following_bottom = true;
+    history_changed();
+    frame(); frame();
+    assert(page_first == 19920 && page_count == 80);
+    assert(message_positions.size() == 80 && cache_first == page_first);
+    ImGuiWindow* child = chat_window();
+    assert(child->Scroll.y >= child->ScrollMax.y - 1);
+    // Both roles are real messages with distinct left/right bubble placement.
+    float assistant_left = width, user_left = width;
+    for (const ImDrawVert& vertex : child->DrawList->VtxBuffer) {
+        if (vertex.col == IM_COL32(30, 37, 44, 255)) assistant_left = std::min(assistant_left, vertex.pos.x);
+        if (vertex.col == IM_COL32(39, 49, 57, 255)) user_left = std::min(user_left, vertex.pos.x);
+    }
+    assert(assistant_left < width / 3 && user_left > assistant_left + 20);
+    set_streaming("応答を表示中 😀");
+    frame(); frame();
+    assert(messages.size() == 20000 && message_positions.size() == 81);
+    assert(child->Scroll.y >= child->ScrollMax.y - 1);
+    ImGui::SetScrollY(child, child->ScrollMax.y / 2);
+    frame(); frame();
+    const float reading_scroll = child->Scroll.y;
+    assert(!following_bottom);
+    set_streaming("応答を表示中 😀\n続きを読むときも位置を維持します。\n三行目");
+    frame(); frame();
+    assert(message_positions.size() == 81 && std::abs(child->Scroll.y - reading_scroll) < 2);
+    set_streaming("");
+    frame(); frame();
+    // Reach the old edge, then request another swipe to reveal the preceding page.
+    ImGui::SetScrollY(child, 0);
+    frame(); frame();
+    const int overlap = page_first;
+    const float old_y = message_y(overlap);
+    pending_scroll = 100;
+    frame(); frame();
+    assert(page_first == 19880 && page_count == 80);
+    assert(std::abs(message_y(overlap) - old_y) < 2);
+    assert(child->Scroll.y > 0 && !following_bottom);
+    const int older_page = page_first;
+    const float older_scroll = child->Scroll.y;
+    const std::string transcript = recent_transcript();
+    assert(transcript.find("message-19980") == 0 && transcript.find("message-19999") != std::string::npos);
+    assert(cache_first == older_page && cache_count == page_count);
+    frame();
+    assert(page_first == older_page && std::abs(child->Scroll.y - older_scroll) < 2);
+    messages.push_back("new reply");
+    history_changed();
+    set_streaming("next reply");
+    frame(); frame();
+    assert(page_first == older_page && message_positions.size() == 80);
+    assert(std::abs(child->Scroll.y - older_scroll) < 2);
+    // The newer edge restores the overlapping transcript rather than jumping to the latest response.
+    set_streaming("");
+    ImGui::SetScrollY(child, child->ScrollMax.y);
+    frame(); frame();
+    const int bottom_overlap = message_positions.back().index;
+    const float bottom_y = message_y(bottom_overlap);
+    pending_scroll = -100;
+    frame(); frame();
+    assert(page_first > older_page);
+    assert(std::abs(message_y(bottom_overlap) - bottom_y) < 2);
+    following_bottom = true;
+    history_changed();
+    frame(); frame();
+    jump_to_message(19971);
+    frame();
+    assert(!following_bottom);
+    set_streaming("navigation must stay on the selected source");
+    frame(); frame();
+    assert(std::abs(message_y(19970) - list_min.y - 16 * density) < 2);
+    set_streaming("");
+    jump_to_message(500);
+    frame(); frame();
+    assert(page_first <= 499 && page_first + page_count > 499);
+    assert(std::abs(message_y(499) - list_min.y - 16 * density) < 2);
+    const int jumped_page = page_first;
+    jump_to_message(0); jump_to_message(999999);
+    assert(page_first == jumped_page);
+    messages = short_history;
+    following_bottom = true;
+    history_changed();
+    frame(); frame();
 }
 
 void check_gestures() {
@@ -55,7 +154,22 @@ extern "C" {
 bool conversation_init(const char*) { return true; }
 bool conversation_send(const char* text) { messages.emplace_back(text); return true; }
 int32_t conversation_message_count() { return static_cast<int32_t>(messages.size()); }
-const char* conversation_message_text(int32_t index) { return messages.at(index).c_str(); }
+bool conversation_load_window(int32_t first, int32_t limit) {
+    assert(first >= 0 && limit >= 0 && limit <= 80);
+    cache_first = first;
+    cache_count = std::min(limit, static_cast<int32_t>(messages.size()) - first);
+    return true;
+}
+const char* conversation_message_text(int32_t index) {
+    assert(index >= cache_first && index < cache_first + cache_count);
+    ++text_requests;
+    return messages.at(index).c_str();
+}
+const char* conversation_message_role(int32_t index) {
+    assert(index >= cache_first && index < cache_first + cache_count);
+    return index % 2 == 0 ? "user" : "assistant";
+}
+int64_t conversation_message_id(int32_t index) { return index + 1; }
 bool conversation_remember(int32_t index) { memories.push_back(messages.at(index)); return true; }
 int32_t conversation_memory_count() { return static_cast<int32_t>(memories.size()); }
 const char* conversation_memory_text(int32_t index) { return memories.at(index).c_str(); }
@@ -88,7 +202,8 @@ int main() {
     height = 1800;
     density = 3;
 
-    for (int generation = 0; generation < 2; ++generation) {
+    float restored_source_y = 0;
+    for (int generation = 0; generation < 3; ++generation) {
         context = ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = nullptr;
@@ -112,17 +227,21 @@ int main() {
         assert(baked->FindGlyphNoFallback(0x1f600));
         frame();
         frame();
+        if (generation == 1) assert(chat_window()->Scroll.y >= chat_window()->ScrollMax.y - 1);
+        if (generation == 2) {
+            assert(!following_bottom && std::abs(message_y(9) - restored_source_y) < 2);
+        }
+        check_pages_and_streaming();
         // The transcript uses the full surface; headers/tabs must not take space.
         assert(list_min.y <= 48 && list_max.y >= height - 48);
 
         if (generation == 0) {
             for (int i = 0; i < 30; ++i) messages.push_back(messages.front());
-            scroll_to_bottom = true;
+            following_bottom = true;
+            history_changed();
             frame();
             frame();
-            ImGuiWindow* child = nullptr;
-            for (ImGuiWindow* window : ImGui::GetCurrentContext()->Windows)
-                if (window->Active && window->ParentWindow && std::string(window->ParentWindow->Name) == "Conversation") child = window;
+            ImGuiWindow* child = chat_window();
             assert(child && child->ScrollMax.y > 0);
             const float old_scroll = child->Scroll.y;
             handle_touch(0, 200, list_min.y + 100);
@@ -145,6 +264,14 @@ int main() {
         set_typography(72, 100);
         assert(message_gap_dp == 24);
         set_typography(72, 20);
+        following_bottom = true;
+        history_changed();
+        frame(); frame();
+        if (generation == 1) {
+            jump_to_message(10);
+            frame(); frame();
+            restored_source_y = message_y(9);
+        }
         for (ImTextureData* texture : ImGui::GetPlatformIO().Textures) {
             texture->SetTexID(ImTextureID_Invalid);
             texture->SetStatus(ImTextureStatus_Destroyed);
@@ -153,5 +280,5 @@ int main() {
         ImGui::DestroyContext(context);
         context = nullptr;
     }
-    std::puts("PASS: Japanese+emoji, dynamic texture requests, tap/swipe, scroll, density reset, context recreation");
+    std::puts("PASS: 20k history bounded to 80, role layout, anchored paging, streaming/follow, accessibility, Japanese+emoji, swipe, density, context recreation");
 }

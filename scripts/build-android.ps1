@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $repo
 $tools = & "$PSScriptRoot/setup-android.ps1"
+& "$PSScriptRoot/setup-sqlite.ps1"
 
 function Run([string]$Program, [string[]]$Arguments) {
     & $Program @Arguments
@@ -15,7 +16,8 @@ foreach ($directory in @($build, $dist, "$build/core", "$build/java", "$build/de
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
 }
 if (-not $SkipTests) {
-    Run $tools.Odin @('test', 'core', '-all-packages', '-define:ODIN_TEST_THREADS=1', '-out:build/core-tests.exe')
+    Run $tools.Odin @('test', 'core', '-all-packages', '-define:ODIN_TEST_THREADS=1', '-out:build/core-tests.exe',
+        "-extra-linker-flags:/LIBPATH:$repo/.tools/sqlite/windows")
 }
 
 $llvmBin = Join-Path $tools.Ndk 'toolchains/llvm/prebuilt/windows-x86_64/bin'
@@ -52,7 +54,7 @@ if (-not (Test-Path -LiteralPath $key)) {
         '-keypass', 'android', '-alias', 'androiddebugkey', '-keyalg', 'RSA', '-keysize', '2048',
         '-validity', '10000', '-dname', 'CN=Android Debug,O=Conversation,C=JP', '-noprompt')
 }
-$apk = Join-Path $dist 'Conversation-0.1.0-arm64-debug.apk'
+$apk = Join-Path $dist 'Conversation-0.2.0-arm64-debug.apk'
 Run "$($tools.BuildTools)/apksigner.bat" @('sign', '--ks', $key, '--ks-key-alias', 'androiddebugkey',
     '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--out', $apk, "$build/aligned.apk")
 Run "$($tools.BuildTools)/apksigner.bat" @('verify', '--verbose', $apk)

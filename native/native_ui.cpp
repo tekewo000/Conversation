@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <mutex>
 #include <string>
@@ -30,6 +31,17 @@ EGLContext gl_context = EGL_NO_CONTEXT;
 bool core_ready = false;
 bool renderer_ready = false;
 bool scroll_to_bottom = true;
+bool following_bottom = true;
+constexpr int kPageSize = 80;
+constexpr int kPageStep = 40;
+int page_first = -1;
+int page_count = 0;
+int page_total = 0;
+std::string streaming;
+struct MessagePosition { int index; float y; float height; };
+std::vector<MessagePosition> message_positions;
+int anchor_index = -1;
+float anchor_offset = 0;
 int width = 1;
 int height = 1;
 float density = 1.0f;
@@ -112,23 +124,67 @@ bool read_text(JNIEnv* env, jbyteArray input, std::string& output) {
 void core_error() {
     const char* message = conversation_error();
     error = message && message[0] ? message : "保存できませんでした。";
-    __android_log_print(ANDROID_LOG_ERROR, kLogTag, "%s", error.c_str());
+    __android_log_print(ANDROID_LOG_ERROR, kLogTag, "Core operation failed");
+}
+
+bool load_page(int first) {
+    const int total = core_ready ? conversation_message_count() : 0;
+    first = std::clamp(first, 0, std::max(0, total - 1));
+    const int count = std::min(kPageSize, total - first);
+    if (core_ready && count > 0 && !conversation_load_window(first, count)) { core_error(); return false; }
+    page_first = first;
+    page_count = count;
+    page_total = total;
+    return true;
+}
+
+void history_changed() {
+    const int total = core_ready ? conversation_message_count() : 0;
+    if (page_first < 0 || following_bottom) {
+        if (load_page(std::max(0, total - kPageSize))) scroll_to_bottom = true;
+    } else load_page(page_first);
+}
+
+void jump_to_message(int64_t id) {
+    const int total = core_ready ? conversation_message_count() : 0;
+    if (id <= 0 || id > total) return;
+    // shortcut: IDs must be contiguous, add an ID lookup if deletion is introduced.
+    const int index = static_cast<int>(id - 1);
+    if (!load_page(std::min(std::max(0, index - kPageStep), std::max(0, total - kPageSize)))) return;
+    if (conversation_message_id(index) != id) return;
+    anchor_index = index;
+    anchor_offset = 16 * density;
+    scroll_to_bottom = false;
+    following_bottom = false;
+}
+
+void set_streaming(std::string text) {
+    streaming = std::move(text);
+    if (following_bottom) scroll_to_bottom = true;
 }
 
 std::string recent_transcript() {
     std::string transcript;
     const int count = core_ready ? conversation_message_count() : 0;
-    for (int i = std::max(0, count - 20); i < count; ++i) {
-        const char* text = conversation_message_text(i);
-        if (!text) continue;
-        if (!transcript.empty()) transcript += "\n\n";
-        transcript += text;
+    if (!core_ready || count == 0 || !conversation_load_window(std::max(0, count - 20), std::min(20, count))) return transcript;
+    try {
+        for (int i = std::max(0, count - 20); i < count; ++i) {
+            const char* text = conversation_message_text(i);
+            if (!text) continue;
+            if (!transcript.empty()) transcript += "\n\n";
+            transcript += text;
+            if (transcript.size() > 16384) {
+                size_t start = transcript.size() - 16384;
+                while (start < transcript.size() && (static_cast<unsigned char>(transcript[start]) & 0xc0) == 0x80) ++start;
+                transcript.erase(0, start);
+            }
+        }
+    } catch (...) {
+        load_page(page_first < 0 ? std::max(0, count - kPageSize) : page_first);
+        throw;
     }
-    if (transcript.size() > 16384) {
-        size_t start = transcript.size() - 16384;
-        while (start < transcript.size() && (static_cast<unsigned char>(transcript[start]) & 0xc0) == 0x80) ++start;
-        transcript.erase(0, start);
-    }
+    // Accessibility reads the latest messages without replacing the visible history page.
+    load_page(page_first < 0 ? std::max(0, count - kPageSize) : page_first);
     return transcript;
 }
 
@@ -180,29 +236,72 @@ void draw_ui() {
     ImGui::Begin("Conversation", nullptr, ImGuiWindowFlags_NoDecoration |
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
     ImGui::BeginChild("chat", ImVec2(0, 0), ImGuiChildFlags_None);
+    if (ImGui::IsWindowAppearing()) {
+        if (following_bottom) scroll_to_bottom = true;
+        else if (anchor_index < 0) {
+            for (const auto& p : message_positions) {
+                if (p.y + p.height > list_min.y) {
+                    anchor_index = p.index;
+                    anchor_offset = p.y - list_min.y;
+                    break;
+                }
+            }
+        }
+    }
     list_min = ImGui::GetWindowPos();
     list_max = ImVec2(list_min.x + ImGui::GetWindowSize().x, list_min.y + ImGui::GetWindowSize().y);
-    if (pending_scroll != 0) {
-        ImGui::SetScrollY(ImGui::GetScrollY() - pending_scroll);
-        pending_scroll = 0;
+    if (page_first < 0 || (core_ready && page_total != conversation_message_count())) history_changed();
+    const float old_scroll = ImGui::GetScrollY();
+    const float max_scroll = ImGui::GetScrollMaxY();
+    const float wheel = ImGui::GetIO().MouseWheel * ImGui::GetFontSize() * 5;
+    const float movement = pending_scroll != 0 ? pending_scroll : wheel;
+    pending_scroll = 0;
+    if (movement != 0) {
         scroll_to_bottom = false;
+        const float target = std::clamp(old_scroll - movement, 0.0f, max_scroll);
+        const bool older = movement > 0 && target <= 24 * d && page_first > 0;
+        const bool newer = movement < 0 && target >= max_scroll - 24 * d && page_first + page_count < page_total;
+        if ((older || newer) && !message_positions.empty()) {
+            const auto visible = std::find_if(message_positions.begin(), message_positions.end(),
+                [&](const MessagePosition& p) { return p.y + p.height + old_scroll - target > list_min.y; });
+            const MessagePosition& anchor = visible == message_positions.end() ? message_positions.back() : *visible;
+            const int first = older ? std::max(0, page_first - kPageStep) :
+                std::min(page_first + kPageStep, std::max(0, page_total - kPageSize));
+            if (load_page(first)) {
+                anchor_index = anchor.index;
+                anchor_offset = anchor.y - list_min.y + old_scroll - target;
+            }
+        } else ImGui::SetScrollY(target);
+        following_bottom = page_first + page_count >= page_total && target >= max_scroll - 2 * d && movement < 0;
     }
-    const int count = core_ready ? conversation_message_count() : 0;
     const float available = ImGui::GetContentRegionAvail().x;
     const float padding = 12 * d;
     const float max_width = std::max(1.0f, std::min(available * 0.86f, 600 * d));
     const float wrap = std::max(1.0f, max_width - padding * 2);
-    for (int i = 0; i < count; ++i) {
-        const char* text = conversation_message_text(i);
+    message_positions.clear();
+    bool restored_anchor = false;
+    const bool show_stream = !streaming.empty() && page_first + page_count >= page_total;
+    for (int offset = 0; offset < page_count + (show_stream ? 1 : 0); ++offset) {
+        const int index = page_first + offset;
+        const bool provisional = offset == page_count;
+        const char* text = provisional ? streaming.c_str() : conversation_message_text(index);
+        const char* role = provisional ? "assistant" : conversation_message_role(index);
         if (!text) continue;
+        const bool user = role && std::strcmp(role, "user") == 0;
         const ImVec2 size = ImGui::CalcTextSize(text, nullptr, false, wrap);
         const float bubble_width = std::min(max_width, size.x + padding * 2);
         const float bubble_height = size.y + 10 * d * 2;
         const ImVec2 cursor = ImGui::GetCursorScreenPos();
-        const ImVec2 origin(cursor.x + available - bubble_width, cursor.y);
+        const ImVec2 origin(cursor.x + (user ? available - bubble_width : 0), cursor.y);
+        message_positions.push_back({index, cursor.y, bubble_height});
+        if (anchor_index == index) {
+            ImGui::SetScrollY(old_scroll + cursor.y - list_min.y - anchor_offset);
+            anchor_index = -1;
+            restored_anchor = true;
+        }
         ImDrawList* draw = ImGui::GetWindowDrawList();
         draw->AddRectFilled(origin, ImVec2(origin.x + bubble_width, origin.y + bubble_height),
-                            IM_COL32(39, 49, 57, 255), 16 * d);
+                            user ? IM_COL32(39, 49, 57, 255) : IM_COL32(30, 37, 44, 255), 16 * d);
         draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
                       ImVec2(origin.x + padding, origin.y + 10 * d),
                       ImGui::GetColorU32(ImGuiCol_Text), text, nullptr, wrap);
@@ -211,6 +310,9 @@ void draw_ui() {
     if (scroll_to_bottom) {
         ImGui::SetScrollHereY(1);
         scroll_to_bottom = false;
+        following_bottom = true;
+    } else if (movement == 0 && anchor_index < 0 && !restored_anchor) {
+        following_bottom = page_first + page_count >= page_total && old_scroll >= max_scroll - 2 * d;
     }
     ImGui::EndChild();
     ImGui::End();
@@ -355,11 +457,119 @@ Java_jp_tekewo_conversation_MainActivity_nativeSend(JNIEnv* env, jclass, jbyteAr
         if (!read_text(env, text, message)) return java_string(env, "入力に無効な文字が含まれています。");
         if (!conversation_send(message.c_str())) { core_error(); return java_string(env, error); }
         error.clear();
-        scroll_to_bottom = true;
+        history_changed();
         return java_string(env, "");
     } catch (const std::exception&) {
         return java_string(env, "送信に必要なメモリを確保できませんでした。");
     }
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeAddMessage(JNIEnv* env, jclass, jbyteArray role, jbyteArray text) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        std::string message, message_role;
+        if (!core_ready) { error = "保存先を初期化できていません。"; return 0; }
+        if (!read_text(env, role, message_role) || !read_text(env, text, message)) {
+            error = "入力に無効な文字が含まれています。"; return 0;
+        }
+        const int64_t id = conversation_add_message(message_role.c_str(), message.c_str());
+        if (!id) { core_error(); return 0; }
+        error.clear();
+        history_changed();
+        return id;
+    } catch (const std::exception&) {
+        error = "保存に必要なメモリを確保できませんでした。";
+        return 0;
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeLastError(JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lock(mutex);
+    return java_string(env, error);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeContext(JNIEnv* env, jclass, jbyteArray query) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        std::string text;
+        if (!core_ready || !read_text(env, query, text)) { error = "入力が無効です。"; return java_string(env, ""); }
+        const char* result = conversation_context(text.c_str());
+        if (!result) { core_error(); return java_string(env, ""); }
+        error.clear();
+        return java_string(env, result);
+    } catch (const std::exception&) {
+        error = "文脈を読み込めませんでした。"; return java_string(env, "");
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativePendingJob(JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        if (!core_ready) return java_string(env, "");
+        const char* result = conversation_pending_job();
+        if (!result) { core_error(); return java_string(env, ""); }
+        error.clear();
+        return java_string(env, result);
+    } catch (const std::exception&) {
+        error = "記憶の更新準備に失敗しました。"; return java_string(env, "");
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeApplyJob(JNIEnv* env, jclass, jlong id, jbyteArray payload) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        std::string text;
+        if (!core_ready || !read_text(env, payload, text)) return java_string(env, "記憶の更新内容が無効です。");
+        if (!conversation_apply_job(id, text.c_str())) { core_error(); return java_string(env, error); }
+        error.clear();
+        return java_string(env, "");
+    } catch (const std::exception&) { return java_string(env, "記憶を更新できませんでした。"); }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeMemories(JNIEnv* env, jclass, jbyteArray query) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        std::string text;
+        if (!core_ready || !read_text(env, query, text)) { error = "検索内容が無効です。"; return java_string(env, ""); }
+        const char* result = conversation_memories(text.c_str());
+        if (!result) { core_error(); return java_string(env, ""); }
+        error.clear();
+        return java_string(env, result);
+    } catch (const std::exception&) { error = "記憶を読み込めませんでした。"; return java_string(env, ""); }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeExport(JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        if (!core_ready) return java_string(env, "保存先を初期化できていません。");
+        if (!conversation_export((storage_path + "/export").c_str())) { core_error(); return java_string(env, error); }
+        error.clear();
+        return java_string(env, "");
+    } catch (const std::exception&) { return java_string(env, "書き出しに失敗しました。"); }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeSetStreaming(JNIEnv* env, jclass, jbyteArray text) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        std::string message;
+        if (!read_text(env, text, message)) { error = "応答に無効な文字が含まれています。"; return; }
+        set_streaming(std::move(message));
+    } catch (const std::exception&) { error = "応答表示に必要なメモリを確保できませんでした。"; }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeJumpToMessage(JNIEnv*, jclass, jlong id) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try { jump_to_message(id); }
+    catch (const std::exception&) { error = "会話を読み込めませんでした。"; }
 }
 
 extern "C" JNIEXPORT void JNICALL

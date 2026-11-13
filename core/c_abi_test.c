@@ -2,33 +2,27 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-
-int main(int argc, char** argv) {
-    assert(argc == 3);
-    assert(sizeof(bool) == 1);
+int main(int argc, char **argv) {
+    assert(argc == 3 && sizeof(bool) == 1);
     assert(!conversation_init(NULL));
-    assert(!conversation_send("closed"));
-    assert(conversation_message_count() == 0);
-    assert(strlen(conversation_error()) > 0);
     assert(conversation_init(argv[1]));
-    const char* text = "こんにちは\n\"UTF-8\" 🎾";
-    if (strcmp(argv[2], "write") == 0) {
-        assert(conversation_message_count() == 0);
-        assert(conversation_send(text));
-        assert(conversation_remember(0));
+    if (!strcmp(argv[2], "write")) {
+        assert(conversation_add_message("user", "こんにちは 🎾") == 1);
+        assert(conversation_add_message("assistant", "覚えました") == 2);
+        assert(strstr(conversation_pending_job(), "こんにちは"));
+        assert(!conversation_apply_job(1, "{\"memories\":[{\"kind\":\"fact\",\"subject\":\"user\",\"key\":\"sport\",\"text\":\"tennis\",\"scope\":\"real\",\"certainty\":\"explicit\",\"source_ids\":[99]}]}"));
+        assert(conversation_apply_job(1, "{\"memories\":[{\"kind\":\"fact\",\"subject\":\"user\",\"key\":\"sport\",\"text\":\"tennis\",\"scope\":\"real\",\"certainty\":\"explicit\",\"source_ids\":[1]}]}"));
+        assert(conversation_apply_job(1, "{\"memories\":[]}"));
     }
-    assert(conversation_message_count() == 1);
-    assert(strcmp(conversation_message_text(0), text) == 0);
-    assert(conversation_memory_count() == 1);
-    assert(strcmp(conversation_memory_text(0), text) == 0);
-    assert(strcmp(conversation_error(), "") == 0);
+    assert(conversation_message_count() == 2);
+    assert(conversation_load_window(0, 80));
+    assert(conversation_message_id(0) == 1);
+    assert(!strcmp(conversation_message_role(0), "user"));
+    assert(!strcmp(conversation_message_text(0), "こんにちは 🎾"));
+    assert(strstr(conversation_memories("tennis"), "tennis"));
+    assert(strstr(conversation_context("tennis"), "tennis"));
+    assert(!strcmp(conversation_pending_job(), "{}"));
     conversation_close();
-    assert(!conversation_send("closed"));
-    assert(conversation_init(argv[1]));
-    assert(conversation_message_count() == 1);
-    assert(strcmp(conversation_memory_text(0), text) == 0);
-    conversation_close();
-    conversation_close();
-    puts("C ABI roundtrip passed");
+    puts("C ABI durable roundtrip passed");
     return 0;
 }

@@ -39,7 +39,7 @@ paired_surrogates :: proc(text: string) -> bool {
 	return true
 }
 
-snapshot_tokens_valid :: proc(bytes: []byte) -> bool {
+snapshot_tokens_valid :: proc(bytes: []byte, max_depth: int = 2) -> bool {
 	data := string(bytes)
 	if !utf8.valid_string(data) || strings.contains_rune(data, 0) do return false
 	tokenizer := json.make_tokenizer(data, .JSON, true)
@@ -60,7 +60,7 @@ snapshot_tokens_valid :: proc(bytes: []byte) -> bool {
 			if previous.kind == .String && previous.text == `""` do return false
 		case .Open_Brace, .Open_Bracket:
 			depth += 1
-			if depth > 2 do return false
+			if depth > max_depth do return false
 		case .Close_Brace, .Close_Bracket:
 			depth -= 1
 			if depth < 0 do return false

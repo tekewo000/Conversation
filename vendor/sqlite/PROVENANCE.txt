@@ -1,0 +1,9 @@
+SQLite 3.51.2 amalgamation (public domain)
+Official release: https://www.sqlite.org/releaselog/3_51_2.html
+Download: https://www.sqlite.org/2026/sqlite-amalgamation-3510200.zip
+Archive SHA256: 6e2a845a493026bdbad0618b2b5a0cf48584faab47384480ed9f592d912f23ec
+sqlite3.c SHA3-256, published by upstream: 733b3fcc6cccb1e334424b9b91a9d68b618385b76ebfcbb106690bd3a9e61367
+Source ID: 2026-01-09 17:27:48 b270f8339eb13b504d0b2ba154ebca966b7dde08e40c3ed7d559749818cb2075
+
+Windows: scripts/setup-sqlite.ps1 verifies hashes then compiles .tools/sqlite/windows/sqlite3.lib.
+Android ARM64: compile sqlite3.c into the native CMake target, with SQLITE_THREADSAFE=1, SQLITE_ENABLE_FTS5=1 and SQLITE_OMIT_LOAD_EXTENSION=1. Odin core compiles object-only for linux_arm64 with ODIN_OS .Linux; its SQLite C symbols are resolved by the final native link. Also link Android log/android and system dl/m when required by the selected toolchain.

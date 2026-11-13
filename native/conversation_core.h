@@ -1,27 +1,34 @@
 #pragma once
-
 #include <stdbool.h>
 #include <stdint.h>
-
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-// Serialize all calls. Returned strings are borrowed until the next mutation.
-// init opens an app-private directory; false means no history can be modified.
+// Serialize all calls. Borrowed JSON/text buffers survive until the next call
+// returning JSON; window strings survive until load_window/add/init/close.
 bool conversation_init(const char* storage_dir);
 bool conversation_send(const char* utf8);
+int64_t conversation_add_message(const char* role, const char* utf8);
 int32_t conversation_message_count(void);
-// Invalid indices return NULL. Text preserves the original UTF-8 and whitespace.
+// Absolute zero-based indexes; load at most 80 rows before using getters.
+bool conversation_load_window(int32_t first, int32_t limit);
 const char* conversation_message_text(int32_t index);
-// Repeatedly pinning the same message is a successful no-op.
+const char* conversation_message_role(int32_t index);
+int64_t conversation_message_id(int32_t index);
+// Bounded UTF-8 JSON. Queries are literal keywords (at most 256 bytes).
+const char* conversation_context(const char* query);
+// {} means no pending job; long messages are explicitly marked truncated.
+const char* conversation_pending_job(void);
+bool conversation_apply_job(int64_t id, const char* extraction_json);
+// {memories:[...]} includes source snippets, IDs, versions, and current flag.
+const char* conversation_memories(const char* query);
+bool conversation_export(const char* output_dir);
+// Legacy read compatibility. Pin modification is retired (returns false).
 bool conversation_remember(int32_t index);
 int32_t conversation_memory_count(void);
 const char* conversation_memory_text(int32_t index);
-// Empty string after success; human-readable error after a failed mutation.
 const char* conversation_error(void);
 void conversation_close(void);
-
 #ifdef __cplusplus
 }
 #endif
