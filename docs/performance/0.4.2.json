@@ -1,0 +1,104 @@
+{
+  "environment": "Pixel_9_Pro Android16/API36,1280x2856,480dpi,60Hz,SwiftShader,x86_64 with ARM64 libndk_translation.so",
+  "fixture": "2000 synthetic messages; 200 longer replies; 80-message display page; no linked repository or network",
+  "before": {
+    "version": "0.4.1",
+    "cold_ms": [
+      1150,
+      970,
+      875,
+      968,
+      927,
+      1158,
+      914
+    ],
+    "cold_median_ms": 968,
+    "idle": {
+      "duration_s": 20.02000000000001,
+      "cpu_ticks": 0,
+      "clock_ticks_per_s": 100,
+      "cpu_percent_one_core": 0.0,
+      "rendered_frames": 0
+    },
+    "pss_mib": {
+      "after-launch": 71.689,
+      "after-scroll": 80.662,
+      "after-menu": 95.291,
+      "after-idle": 92.31
+    },
+    "scroll": {
+      "p95_trials_ms": [
+        48,
+        46,
+        46
+      ],
+      "median_trial_p95_ms": 46,
+      "frames": 1019,
+      "janky": 103,
+      "jank_percent": 10.1079
+    },
+    "menu": {
+      "p95_trials_ms": [
+        77,
+        61,
+        61
+      ],
+      "median_trial_p95_ms": 61,
+      "frames": 637,
+      "janky": 211,
+      "jank_percent": 33.124
+    }
+  },
+  "after": {
+    "version": "0.4.2",
+    "cold_ms": [
+      904,
+      1072,
+      1077,
+      1056,
+      1034,
+      1012,
+      1146
+    ],
+    "cold_median_ms": 1056,
+    "idle": {
+      "duration_s": 20.00999999999999,
+      "cpu_ticks": 0,
+      "clock_ticks_per_s": 100,
+      "cpu_percent_one_core": 0.0,
+      "rendered_frames": 0
+    },
+    "pss_mib": {
+      "after-launch": 56.394,
+      "after-scroll": 67.219,
+      "after-menu": 74.081,
+      "after-idle": 69.839
+    },
+    "scroll": {
+      "p95_trials_ms": [
+        46,
+        44,
+        44
+      ],
+      "median_trial_p95_ms": 44,
+      "frames": 1034,
+      "janky": 87,
+      "jank_percent": 8.4139
+    },
+    "menu": {
+      "p95_trials_ms": [
+        36,
+        34,
+        36
+      ],
+      "median_trial_p95_ms": 36,
+      "frames": 776,
+      "janky": 44,
+      "jank_percent": 5.6701
+    }
+  },
+  "apk_bytes": {
+    "before": 25990148,
+    "after": 6666973
+  }
+}

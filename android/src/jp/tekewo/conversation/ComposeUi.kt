@@ -1,7 +1,11 @@
 package jp.tekewo.conversation
 
+import android.view.Gravity
+import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
@@ -9,6 +13,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -29,6 +34,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -39,6 +47,8 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -48,6 +58,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.window.Dialog
@@ -77,6 +88,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     private var scrollRequest by mutableIntStateOf(0)
     private var scrollTarget = 0
     private var pageDirection = 0
+    private val menuFocus = FocusRequester()
 
     class Panel(@JvmField val title: String) {
         @JvmField var sheet = false
@@ -141,7 +153,22 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         }
     }
 
+    private fun isInlineSheet(value: Panel?) = value != null && value.sheet && !value.secure && value.fields.isEmpty()
+
     @Composable private fun Content() {
+        Box(Modifier.fillMaxSize()) {
+            ChatHost()
+            PanelHost()
+        }
+    }
+
+    @Composable private fun ChatHost() {
+        Box(Modifier.fillMaxSize().then(if (isInlineSheet(panel)) Modifier.clearAndSetSemantics { } else Modifier)) {
+            ChatContent()
+        }
+    }
+
+    @Composable private fun ChatContent() {
         val keyboard = LocalSoftwareKeyboardController.current
         val focus = LocalFocusManager.current
         val list = rememberLazyListState()
@@ -153,7 +180,9 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
                 if (failure.isNotEmpty()) Text(failure, Modifier.padding(20.dp), color = MaterialTheme.colorScheme.error)
-                LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = list, reverseLayout = true,
+                BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                val bubbleWidth = minOf((maxWidth - 32.dp).coerceAtLeast(0.dp) * 0.86f, 600.dp)
+                LazyColumn(Modifier.fillMaxSize(), state = list, reverseLayout = true,
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(messageGap.dp)) {
                     if (first + messages.size < total) item("newer") {
@@ -165,9 +194,9 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                         }
                     }
                     if (streaming.isNotEmpty() && first + messages.size >= total)
-                        item("streaming") { MessageText(streaming, false) }
+                        item("streaming") { MessageText(streaming, false, bubbleWidth) }
                     items(messages.asReversed(), key = { it.id }) { message ->
-                        MessageText(message.text, message.role == "user")
+                        MessageText(message.text, message.role == "user", bubbleWidth)
                     }
                     if (first > 0) item("older") {
                         TextButton(onClick = {
@@ -175,9 +204,11 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                         }) { Text("以前の会話を読む") }
                     }
                 }
+                }
                 Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 12.dp, bottom = 10.dp, top = 6.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { keyboard?.hide(); focus.clearFocus(); onMenu.run() }, Modifier.size(48.dp)) {
+                    IconButton(onClick = { keyboard?.hide(); focus.clearFocus(); onMenu.run() },
+                        Modifier.size(48.dp).focusRequester(menuFocus)) {
                         Icon(ConversationIcons.Menu, contentDescription = "メニュー", tint = Color(0xFFDEE8EF))
                     }
                     BasicTextField(value = draft, onValueChange = { draft = it }, enabled = enabled,
@@ -196,13 +227,41 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 }
             }
         }
-        panel?.let { PanelContent(it) }
     }
 
-    @Composable private fun MessageText(text: String, user: Boolean) {
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
+    @Composable private fun PanelHost() {
+        val value = panel
+        val inline = isInlineSheet(value)
+        val closeFocus = remember { FocusRequester() }
+        var returnFocus by remember { mutableStateOf(false) }
+        LaunchedEffect(value) {
+            if (inline) {
+                closeFocus.requestFocus()
+                returnFocus = true
+            } else if (returnFocus) {
+                menuFocus.requestFocus()
+                returnFocus = false
+            }
+        }
+        if (value == null) return
+        if (!inline) { PanelContent(value); return }
+        BackHandler(onBack = ::dismiss)
+        Box(Modifier.fillMaxSize().imePadding()
+            .semantics { paneTitle = value.title }) {
+            Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.55f))
+                .semantics { contentDescription = "メニューを閉じる" }
+                .clickable(enabled = value.dismissOnClickOutside,
+                    interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = ::dismiss))
+            PanelSurface(value, Modifier.align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
+                .focusProperties { onExit = { cancelFocusChange() } }.focusGroup(), closeFocus)
+        }
+    }
+
+    @Composable private fun MessageText(text: String, user: Boolean, bubbleWidth: Dp) {
+        Box(Modifier.fillMaxWidth()) {
             SelectionContainer(Modifier.align(if (user) Alignment.CenterEnd else Alignment.CenterStart)
-                .widthIn(max = minOf(maxWidth * 0.86f, 600.dp))
+                .widthIn(max = bubbleWidth)
                 .background(if (user) Color(0xFF2D4434) else Color(0xFF533643), RoundedCornerShape(16.dp))
                 .padding(horizontal = 12.dp, vertical = 10.dp)) {
                 // ImGui sizes Noto's 1448-unit ascent/descent; Compose sizes its 1000-unit em.
@@ -215,122 +274,139 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
 
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable private fun PanelContent(value: Panel) {
-        val maxHeight = LocalConfiguration.current.screenHeightDp.dp * 0.85f
         Dialog(onDismissRequest = ::dismiss, properties = DialogProperties(
             securePolicy = if (value.secure) SecureFlagPolicy.SecureOn else SecureFlagPolicy.Inherit,
             dismissOnClickOutside = value.dismissOnClickOutside, usePlatformDefaultWidth = false,
             decorFitsSystemWindows = false)) {
             val window = (LocalView.current.parent as? DialogWindowProvider)?.window
-            SideEffect { window?.setDimAmount(0.55f) }
-            Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing.only(
+            SideEffect {
+                window?.apply {
+                    if (attributes.dimAmount != 0.55f) setDimAmount(0.55f)
+                    val gravity = if (value.sheet) Gravity.BOTTOM else Gravity.CENTER
+                    if (attributes.gravity != gravity) setGravity(gravity)
+                    val height = if (value.sheet) WRAP_CONTENT else MATCH_PARENT
+                    if (attributes.width != MATCH_PARENT || attributes.height != height) setLayout(MATCH_PARENT, height)
+                }
+            }
+            Box(Modifier.fillMaxWidth().then(if (value.sheet) Modifier else Modifier.fillMaxHeight())
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(
                 WindowInsetsSides.Top + WindowInsetsSides.Horizontal)).imePadding(),
                 contentAlignment = if (value.sheet) Alignment.BottomCenter else Alignment.Center) {
-                // Full-size dialog lets the sheet meet the bottom edge; dismiss only on its backdrop.
+                // Keep the platform modal window, but allocate only the sheet's height.
                 Box(Modifier.matchParentSize().clickable(enabled = value.dismissOnClickOutside,
                     interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                     indication = null, onClick = ::dismiss))
-                Surface(Modifier.fillMaxWidth(if (value.sheet) 1f else 0.88f).heightIn(max = maxHeight)
-                    .pointerInput(Unit) { detectTapGestures { } },
-                    shape = if (value.sheet) RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
-                            else RoundedCornerShape(28.dp), color = Color(0xFF1C2229)) {
-                Column(Modifier.then(if (value.sheet) Modifier.navigationBarsPadding() else Modifier)
-                    .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 20.dp)) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(value.title, fontSize = 21.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.sp,
-                            modifier = Modifier.weight(1f).padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp)
-                                .semantics { heading() })
-                        if (value.sheet) IconButton(onClick = ::dismiss, modifier = Modifier.size(48.dp)) {
-                            Icon(ConversationIcons.menu(6), contentDescription = "閉じる", tint = Color(0xFFA6C4BC),
-                                modifier = Modifier.size(20.dp))
-                        }
+                PanelSurface(value)
+
+            }
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable private fun PanelSurface(value: Panel, modifier: Modifier = Modifier, closeFocus: FocusRequester? = null) {
+        val maxHeight = LocalConfiguration.current.screenHeightDp.dp * 0.85f
+        Surface(modifier.fillMaxWidth(if (value.sheet) 1f else 0.88f).heightIn(max = maxHeight)
+            .pointerInput(Unit) { detectTapGestures { } },
+            shape = if (value.sheet) RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+                    else RoundedCornerShape(28.dp), color = Color(0xFF1C2229)) {
+        Column(Modifier.then(if (value.sheet) Modifier.navigationBarsPadding() else Modifier)
+            .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 20.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(value.title, fontSize = 21.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.sp,
+                    modifier = Modifier.weight(1f).padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp)
+                        .semantics { heading() })
+                if (value.sheet) IconButton(onClick = ::dismiss, modifier = Modifier.size(48.dp)
+                    .then(if (closeFocus == null) Modifier else Modifier
+                        .focusProperties { canFocus = true }.focusRequester(closeFocus))) {
+                    Icon(ConversationIcons.menu(6), contentDescription = "閉じる", tint = Color(0xFFA6C4BC),
+                        modifier = Modifier.size(20.dp))
+                }
+            }
+            Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                if (value.message.isNotEmpty()) SelectionContainer {
+                    Text(value.message, Modifier.padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 20.dp),
+                        fontSize = 17.sp, letterSpacing = 0.sp)
+                }
+                if (value.preview) Text("こんにちは。\n今日の続きから話そう。", fontSize = textSize.sp,
+                    modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 20.dp)
+                        .background(Color(0xFF273139), RoundedCornerShape(16.dp)).fillMaxWidth().padding(16.dp))
+                value.fields.forEach { field ->
+                    key(field) {
+                        val interactions = remember { MutableInteractionSource() }
+                        val focused by interactions.collectIsFocusedAsState()
+                        BasicTextField(field.value, onValueChange = { field.value = it; field.error = "" },
+                            singleLine = true, interactionSource = interactions,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
+                                .background(Color(0xFF13171C), RoundedCornerShape(16.dp))
+                                .border(1.dp, if (focused) Color(0xFFA6C4BC) else Color(0xFF39434D), RoundedCornerShape(16.dp))
+                                .heightIn(min = 52.dp).semantics { contentDescription = field.label }
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            textStyle = TextStyle(color = Color(0xFFE6EEF2), fontSize = 16.sp),
+                            cursorBrush = SolidColor(Color(0xFFA6C4BC)),
+                            decorationBox = { inner -> Box(contentAlignment = Alignment.CenterStart) {
+                                if (field.value.isEmpty()) Text(field.label, color = Color(0xFF9CABB5), fontSize = 16.sp,
+                                    letterSpacing = 0.sp)
+                                inner()
+                            } },
+                            visualTransformation = if (field.secret) PasswordVisualTransformation() else VisualTransformation.None,
+                            keyboardOptions = KeyboardOptions(keyboardType = if (field.secret) KeyboardType.Password else KeyboardType.Text))
+                        if (field.error.isNotEmpty()) Text(field.error, color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(horizontal = 8.dp), fontSize = 14.sp)
                     }
-                    Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
-                        if (value.message.isNotEmpty()) SelectionContainer {
-                            Text(value.message, Modifier.padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 20.dp),
-                                fontSize = 17.sp, letterSpacing = 0.sp)
+                }
+                value.sliders.forEach { setting ->
+                    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+                    Text("${setting.label}  ${setting.value}", Modifier.padding(start = 12.dp, top = 10.dp, bottom = 4.dp),
+                        fontSize = 17.sp, letterSpacing = 0.sp)
+                    Slider(setting.value.toFloat(), onValueChange = {
+                        setting.value = it.roundToInt(); setting.change.accept(setting.value)
+                    }, valueRange = setting.min.toFloat()..setting.max.toFloat(),
+                        steps = setting.max - setting.min - 1,
+                        modifier = Modifier.padding(horizontal = 12.dp).height(48.dp)
+                            .semantics { contentDescription = setting.label },
+                        thumb = { Box(Modifier.size(12.dp).background(Color(0xFFA6C4BC), CircleShape)) },
+                        track = { Canvas(Modifier.fillMaxWidth().height(2.dp)) {
+                            val start = Offset(if (rtl) size.width else 0f, center.y)
+                            val end = Offset(if (rtl) 0f else size.width, center.y)
+                            val fraction = (setting.value - setting.min).toFloat() / (setting.max - setting.min)
+                            drawLine(Color(0xFF4B5258), start, end, strokeWidth = size.height)
+                            drawLine(Color(0xFFA6C4BC), start, Offset(start.x + (end.x - start.x) * fraction, center.y),
+                                strokeWidth = size.height)
+                        } })
+                }
+                value.rows.forEach { row ->
+                    Row(Modifier.fillMaxWidth().semantics {
+                            if (value.choices) { role = Role.RadioButton; selected = row.checked }
+                        }.clickable {
+                            if (row.dismiss) hide()
+                            row.action.run()
+                        }.heightIn(min = 56.dp).padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        if (value.sheet && row.icon >= 0) {
+                            Icon(ConversationIcons.menu(row.icon), contentDescription = null,
+                                tint = Color(0xFFA6C4BC), modifier = Modifier.size(24.dp))
+                            Spacer(Modifier.width(20.dp))
                         }
-                        if (value.preview) Text("こんにちは。\n今日の続きから話そう。", fontSize = textSize.sp,
-                            modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 20.dp)
-                                .background(Color(0xFF273139), RoundedCornerShape(16.dp)).fillMaxWidth().padding(16.dp))
-                        value.fields.forEach { field ->
-                            key(field) {
-                                val interactions = remember { MutableInteractionSource() }
-                                val focused by interactions.collectIsFocusedAsState()
-                                BasicTextField(field.value, onValueChange = { field.value = it; field.error = "" },
-                                    singleLine = true, interactionSource = interactions,
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
-                                        .background(Color(0xFF13171C), RoundedCornerShape(16.dp))
-                                        .border(1.dp, if (focused) Color(0xFFA6C4BC) else Color(0xFF39434D), RoundedCornerShape(16.dp))
-                                        .heightIn(min = 52.dp).semantics { contentDescription = field.label }
-                                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                                    textStyle = TextStyle(color = Color(0xFFE6EEF2), fontSize = 16.sp),
-                                    cursorBrush = SolidColor(Color(0xFFA6C4BC)),
-                                    decorationBox = { inner -> Box(contentAlignment = Alignment.CenterStart) {
-                                        if (field.value.isEmpty()) Text(field.label, color = Color(0xFF9CABB5), fontSize = 16.sp,
-                                            letterSpacing = 0.sp)
-                                        inner()
-                                    } },
-                                    visualTransformation = if (field.secret) PasswordVisualTransformation() else VisualTransformation.None,
-                                    keyboardOptions = KeyboardOptions(keyboardType = if (field.secret) KeyboardType.Password else KeyboardType.Text))
-                                if (field.error.isNotEmpty()) Text(field.error, color = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.padding(horizontal = 8.dp), fontSize = 14.sp)
-                            }
+                        if (value.choices) {
+                            RadioButton(selected = row.checked, onClick = null)
+                            Spacer(Modifier.width(16.dp))
                         }
-                        value.sliders.forEach { setting ->
-                            val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
-                            Text("${setting.label}  ${setting.value}", Modifier.padding(start = 12.dp, top = 10.dp, bottom = 4.dp),
-                                fontSize = 17.sp, letterSpacing = 0.sp)
-                            Slider(setting.value.toFloat(), onValueChange = {
-                                setting.value = it.roundToInt(); setting.change.accept(setting.value)
-                            }, valueRange = setting.min.toFloat()..setting.max.toFloat(),
-                                steps = setting.max - setting.min - 1,
-                                modifier = Modifier.padding(horizontal = 12.dp).height(48.dp)
-                                    .semantics { contentDescription = setting.label },
-                                thumb = { Box(Modifier.size(12.dp).background(Color(0xFFA6C4BC), CircleShape)) },
-                                track = { Canvas(Modifier.fillMaxWidth().height(2.dp)) {
-                                    val start = Offset(if (rtl) size.width else 0f, center.y)
-                                    val end = Offset(if (rtl) 0f else size.width, center.y)
-                                    val fraction = (setting.value - setting.min).toFloat() / (setting.max - setting.min)
-                                    drawLine(Color(0xFF4B5258), start, end, strokeWidth = size.height)
-                                    drawLine(Color(0xFFA6C4BC), start, Offset(start.x + (end.x - start.x) * fraction, center.y),
-                                        strokeWidth = size.height)
-                                } })
-                        }
-                        value.rows.forEach { row ->
-                            Row(Modifier.fillMaxWidth().semantics {
-                                    if (value.choices) { role = Role.RadioButton; selected = row.checked }
-                                }.clickable {
-                                    if (row.dismiss) hide()
-                                    row.action.run()
-                                }.heightIn(min = 56.dp).padding(horizontal = 12.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically) {
-                                if (value.sheet && row.icon >= 0) {
-                                    Icon(ConversationIcons.menu(row.icon), contentDescription = null,
-                                        tint = Color(0xFFA6C4BC), modifier = Modifier.size(24.dp))
-                                    Spacer(Modifier.width(20.dp))
-                                }
-                                if (value.choices) {
-                                    RadioButton(selected = row.checked, onClick = null)
-                                    Spacer(Modifier.width(16.dp))
-                                }
-                                Text(row.label + (if (row.checked && !value.choices) "  ✓" else ""),
-                                    fontSize = if (value.sheet) maxOf(18, textSize - 2).sp else 16.sp,
-                                    letterSpacing = 0.sp, modifier = Modifier.padding(vertical = 8.dp))
-                            }
-                        }
-                    }
-                    if (!value.sheet) Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End) {
-                        TextButton(onClick = ::dismiss) {
-                            Text(if (value.confirmLabel.isEmpty()) "閉じる" else "キャンセル", fontSize = 14.sp, letterSpacing = 0.sp)
-                        }
-                        if (value.confirmLabel.isNotEmpty()) TextButton(onClick = { value.confirm?.run() },
-                            modifier = Modifier.padding(4.dp).background(Color(0xFF36594B), RoundedCornerShape(16.dp))) {
-                            Text(value.confirmLabel, fontSize = 14.sp, color = Color(0xFFE6EEF2))
-                        }
+                        Text(row.label + (if (row.checked && !value.choices) "  ✓" else ""),
+                            fontSize = if (value.sheet) maxOf(18, textSize - 2).sp else 16.sp,
+                            letterSpacing = 0.sp, modifier = Modifier.padding(vertical = 8.dp))
                     }
                 }
             }
+            if (!value.sheet) Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = ::dismiss) {
+                    Text(if (value.confirmLabel.isEmpty()) "閉じる" else "キャンセル", fontSize = 14.sp, letterSpacing = 0.sp)
+                }
+                if (value.confirmLabel.isNotEmpty()) TextButton(onClick = { value.confirm?.run() },
+                    modifier = Modifier.padding(4.dp).background(Color(0xFF36594B), RoundedCornerShape(16.dp))) {
+                    Text(value.confirmLabel, fontSize = 14.sp, color = Color(0xFFE6EEF2))
+                }
             }
         }
+    }
     }
 }

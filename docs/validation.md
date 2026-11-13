@@ -2,7 +2,7 @@
 
 Entries below are historical records, in chronological order. Earlier renderer,
 font and milestone limitations describe those versions; the Compose migration
-records at the end describe 0.4.0 and 0.4.1. Physical-device evidence from older versions
+records at the end describe 0.4.0 through 0.4.2. Physical-device evidence from older versions
 does not validate the new Compose interface.
 
 ## 2026-11-13
@@ -427,3 +427,64 @@ Visual restoration does not add new physical-phone IME, TalkBack, battery,
 live ChatGPT or private GitHub validation. The older ImGui screenshots and the
 new Compose screen can be compared for appearance, but do not establish exact
 pixel equality across devices or system font scales.
+
+## 2026-11-14: Reduce Compose redraw work (0.4.2)
+
+- Pure menus without fields or secrets now render as an overlay inside the
+  existing Activity window, avoiding a separate Dialog window. Forms and secure
+  panels retain native Dialog handling; sensitive panels still set the secure
+  window flag. `PanelHost` observes panel state separately from the chat, and
+  maximum bubble width is calculated once per list rather than independently
+  for every message. The overlay scrim covers the full screen, including the
+  status-bar background.
+- A prior candidate reduced a native sheet window from 2856px to a 636px
+  content-height fixture and passed 11 UI tests, but did not improve menu frame
+  p95. That window-cropping approach was rejected and is not the final design.
+- The final UI suite passed 15 tests with zero failures, errors or skips.
+  Coverage includes hiding background accessibility semantics while an inline
+  menu is open, Back/scrim/header dismissal, resuming composer input, initial
+  focus on Close, focus containment through eight Tab and eight D-pad moves,
+  and the actual secure-window flag on sensitive native dialogs. The tests
+  found a touch-mode Close-focus issue; the final build includes its fix.
+- Release now enables R8 and resource shrinking with Android's standard
+  `proguard-android-optimize.txt`. A package-scoped `-keep,allowoptimization`
+  rule preserves application class/member names and their existence for JNI
+  and separately signed reflection-based probes, while allowing method-body
+  optimization and dependency shrinking. The Noto OFL license is explicitly
+  retained as a raw resource. This follows the official
+  [optimization](https://developer.android.com/topic/performance/app-optimization/enable-app-optimization),
+  [keep-rule](https://developer.android.com/topic/performance/app-optimization/add-keep-rules)
+  and [resource-retention](https://developer.android.com/topic/performance/app-optimization/customize-which-resources-to-keep)
+  guidance. Mapping inspection confirmed 68 original application class names
+  and direct DEX inspection confirmed all 14 JNI method names. Only newly
+  generated desugaring lambda classes are excluded from the original-class
+  naming check. The packaged Noto font and OFL text match their source hashes;
+  launcher and foreground icon resources remain present.
+- Final signed Release: source version 0.4.2, code 9, 6,666,973 bytes; SHA256
+  `a283f7d9aef71426d5d0fa38b23094de868d9bf55e11b57c1bec6f9f1aa1ca95`.
+  This is 74.35% smaller than the 25,990,148-byte 0.4.1 APK. The full native,
+  Gradle, external signing and verification pipeline passed v3 signing,
+  package/version, non-debuggable status, ZIP alignment and all packaged native
+  16KiB alignment checks. No R8 warnings or missing classes were reported.
+  This rebuild skipped the unchanged Odin tests; it does not replace the
+  earlier core evidence or resolve the known Android import limitation.
+- Before-change fresh emulator measurements: median startup 968ms; median
+  per-run scroll p95 46ms, with 103/1019 frames classified as janky (10.11%);
+  median per-run menu p95 61ms, with 211/637 janky frames (33.12%). PSS after
+  the menu workload was 97,578KiB. These are baseline observations only; the
+  implementation changes and passing regressions do not establish a measured
+  speed or memory improvement without matched after-change measurements.
+
+The earlier combined exact-limit Android import failure remains unchanged.
+These UI checks add no physical-device performance, live ChatGPT or actual
+private GitHub validation.
+
+Matched final Release measurements used the same emulator and synthetic
+2,000-message workload. Menu median trial-p95 improved from61 to36ms and
+modern jank counts from211/637 to44/776. PSS sampled after menu work fell
+from95.3 to74.1MiB. Startup median was968 to1056ms, so startup improvement was
+not established. Scroll median trial-p95 was46 to44ms. Both20-second idle
+samples recorded zero process CPU ticks and zero frames. These are emulator
+observations, not physical-device FPS or battery results. See
+[the comparison and limits](performance/0.4.2.md) and
+[the aggregated measurements](performance/0.4.2.json).

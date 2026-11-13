@@ -4,10 +4,12 @@ AndroidでAIの友達と会話し、出来事・好み・約束を自動で記�
 Odinが会話・記憶・SQLiteを管理し、Jetpack ComposeとMaterial 3で画面を描画します。
 ChatGPTのサブスク認証を組み合わせています。
 
-## 0.4.1 Jetpack Compose・表示調整
+## 0.4.2 Jetpack Compose・描画調整
 
 - チャット、入力欄、メニュー、設定、人物操作、接続・確認ダイアログをJetpack Composeへ移行。
 - 旧版に合わせた緑／紫の吹き出し、入力欄、アイコン、下端に沿うメニュー、細いスライダーを使用。
+- 会話とメニューの再描画処理を整理し、Releaseで未使用コード・リソースの削減を有効化。
+- 署名済みAPKは6,666,973Bで、0.4.1の25,990,148Bから74.35%削減。
 - 会話文は旧版と同じNoto Sans JPと文字寸法を使い、テキスト選択とアクセシビリティのセマンティクスに対応。
 - 人物ごとの会話・記憶・下書き・設定・暗号化された接続情報と、既存の署名を引き継ぎます。
 
@@ -104,7 +106,7 @@ Windows PowerShellで実行します。初回はSDK／NDK／Odin／Gradle等の�
 .\scripts\install-android.ps1 -Configuration Release
 ```
 
-出力は`dist/Conversation-0.4.1-arm64-release.apk`。既定の構成はReleaseです。
+出力は`dist/Conversation-0.4.2-arm64-release.apk`。既定の構成はReleaseです。
 Android10/API29以降・ARM64向けです。
 USBデバッグを有効にし、このPCをスマホで許可してからインストールしてください。
 複数端末の場合は`install-android.ps1 -Serial <シリアル>`を指定します。
@@ -112,6 +114,7 @@ USBデバッグを有効にし、このPCをスマホで許可してからイン
 UIのビルドはGradle 8.13、Android Gradle Plugin 8.13.2、Kotlin 2.2.21、Compose BOM 2025.10.01を固定して使います。
 Android API 36／Build Tools 36.0.0、NDK r30、JDK 17または21を使い、Gradleはチェックサムを検証して準備します。
 Releaseはデバッグを無効にし、Odinを`-o:speed`、C/C++をCMake Release、GradleのRelease構成でJava・Kotlin・DEXをビルドします。
+R8で依存コードと未使用リソースを削減し、JNI・診断ツール用のアプリ側クラス／メンバー名とフォントのライセンスは保持します。
 署名・パッケージ・バージョン・デバッグ無効・全同梱ネイティブライブラリの16KiBページ対応を検証してからAPKを出力します。
 署名鍵とDPAPI保護されたパスワードは`%LOCALAPPDATA%/Conversation/signing/`に保管し、GitやAPKへ含めません。
 このフォルダは今後の更新に必要です。パスワードは作成したWindowsユーザーで復号するため、
