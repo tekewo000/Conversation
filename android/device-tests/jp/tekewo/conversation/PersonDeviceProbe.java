@@ -113,6 +113,7 @@ public final class PersonDeviceProbe extends Instrumentation {
             JSONObject snapshot = new JSONObject().put("format", 1).put("uid", android.os.Process.myUid()).put("registry_sha256", registryHash)
                     .put("databases", databases).put("github_present", github).put("chatgpt_access_present", access).put("chatgpt_refresh_present", refresh);
             byte[] encoded = bytes(snapshot.toString());
+            check(encoded.length <= 1024 * 1024, "Release baseline marker stays within its read bound");
             FileOutputStream output = null;
             try {
                 output = marker.startWrite(); output.write(encoded); marker.finishWrite(output); output = null;
@@ -138,7 +139,8 @@ public final class PersonDeviceProbe extends Instrumentation {
                 MessageDigest sha = MessageDigest.getInstance("SHA-256");
                 long count = 0;
                 try (Cursor rows = database.rawQuery("SELECT rowid,* FROM " + table + " WHERE rowid<=? ORDER BY rowid", new String[]{Long.toString(limit)})) {
-                    ((SQLiteCursor)rows).setWindow(new CursorWindow("release-verification", 8 * 1024 * 1024L));
+                    // A journal event can approach 16 MiB of JSON, with UTF-16 storage requiring twice its bytes.
+                    ((SQLiteCursor)rows).setWindow(new CursorWindow("release-verification", 64 * 1024 * 1024L));
                     for (String column : rows.getColumnNames()) hashValue(sha, Cursor.FIELD_TYPE_STRING, bytes(column));
                     while (rows.moveToNext()) {
                         count++;
@@ -177,6 +179,10 @@ public final class PersonDeviceProbe extends Instrumentation {
 
     private void runProbe(Context app, String probeId) throws Exception {
         File files = app.getFilesDir().getCanonicalFile();
+        for (String name : new String[] { "conversation.sqlite3", "conversation.sqlite3-wal", "conversation.sqlite3-shm", "conversation.sqlite3-journal", "notebook.json", "export" })
+            check(!new File(files, name).exists(), "Old shared conversation data removed: " + name);
+        check(!app.getSharedPreferences("MainActivity", Context.MODE_PRIVATE).contains("draft"), "Old shared draft removed");
+        report("PASS: old shared conversation, memory, export staging and draft removed");
         File root = new File(files, "person-device-probe." + probeId).getCanonicalFile();
         check(root.getParentFile().equals(files) && !root.exists() && root.mkdir(), "Fresh probe directory");
         String idA = UUID.randomUUID().toString(), idB = UUID.randomUUID().toString();

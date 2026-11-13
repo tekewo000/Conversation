@@ -139,7 +139,7 @@ bool load_page(int first) {
 }
 
 bool switch_person(std::string requested_path, const std::string& payload) {
-    if (requested_path.empty() || requested_path.find('\0') != std::string::npos || payload.find('\0') != std::string::npos) {
+    if ((requested_path.empty() && !payload.empty()) || requested_path.find('\0') != std::string::npos || payload.find('\0') != std::string::npos) {
         error = "人物の保存先・資料が無効です。";
         return false;
     }
@@ -154,10 +154,10 @@ bool switch_person(std::string requested_path, const std::string& payload) {
     conversation_close();
     core_ready = false;
     try {
-        if (conversation_init(requested_path.c_str()) &&
-                (payload.empty() || conversation_import_person(payload.c_str()))) {
+        if (requested_path.empty() || (conversation_init(requested_path.c_str()) &&
+                (payload.empty() || conversation_import_person(payload.c_str())))) {
             storage_path.swap(requested_path);
-            core_ready = true;
+            core_ready = !storage_path.empty();
             page_first = -1; page_count = 0; page_total = 0;
             streaming.clear(); message_positions.clear();
             anchor_index = -1; anchor_offset = 0;
@@ -266,7 +266,7 @@ void apply_style() {
     style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.22f, 0.29f, 0.32f, 1);
     style.Colors[ImGuiCol_ButtonActive] = ImVec4(0.25f, 0.36f, 0.34f, 1);
     style.ScaleAllSizes(density);
-    style.FontSizeBase = typography_pixels > 0 ? typography_pixels : 20.0f * density;
+    style.FontSizeBase = typography_pixels > 0 ? typography_pixels : 16.0f * density;
 }
 
 void set_typography(float pixels, float gap_dp) {
@@ -359,7 +359,7 @@ void draw_ui() {
         }
         ImDrawList* draw = ImGui::GetWindowDrawList();
         draw->AddRectFilled(origin, ImVec2(origin.x + bubble_width, origin.y + bubble_height),
-                            user ? IM_COL32(73, 110, 84, 255) : IM_COL32(139, 90, 111, 255), 16 * d);
+                            user ? IM_COL32(45, 68, 52, 255) : IM_COL32(83, 54, 67, 255), 16 * d);
         draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
                       ImVec2(origin.x + padding, origin.y + 10 * d),
                       IM_COL32(255, 255, 255, 255), text, nullptr, wrap);
@@ -402,7 +402,7 @@ Java_jp_tekewo_conversation_MainActivity_nativeInit(JNIEnv* env, jclass, jbyteAr
     std::lock_guard<std::mutex> lock(mutex);
     try {
         std::string requested_path;
-        if (!read_text(env, path, requested_path) || requested_path.empty())
+        if (!read_text(env, path, requested_path))
             return java_string(env, "保存先が無効です。");
         if (core_ready) return java_string(env, switch_person(std::move(requested_path), "") ? "" : error);
         if (!read_bytes(env, jp_font, japanese_font) || japanese_font.size() < 12 ||
@@ -443,8 +443,8 @@ Java_jp_tekewo_conversation_MainActivity_nativeSurfaceCreated(JNIEnv*, jclass) {
     // This view is the sole GL owner; its replacement context has no live objects yet.
     destroy_ui();
     while (glGetError() != GL_NO_ERROR) {}
-    if (!core_ready || eglGetCurrentContext() == EGL_NO_CONTEXT) {
-        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "Cannot create renderer: no core or EGL context");
+    if (eglGetCurrentContext() == EGL_NO_CONTEXT) {
+        __android_log_print(ANDROID_LOG_ERROR, kLogTag, "Cannot create renderer: no EGL context");
         return;
     }
     IMGUI_CHECKVERSION();
@@ -606,6 +606,32 @@ Java_jp_tekewo_conversation_MainActivity_nativeApplyJob(JNIEnv* env, jclass, jlo
         error.clear();
         return java_string(env, "");
     } catch (const std::exception&) { return java_string(env, "記憶を更新できませんでした。"); }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativePendingPersona(JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        if (!core_ready) return java_string(env, "");
+        const char* result = conversation_pending_persona();
+        if (!result) { core_error(); return java_string(env, ""); }
+        error.clear();
+        return java_string(env, result);
+    } catch (const std::exception&) {
+        error = "人格の見直し準備に失敗しました。"; return java_string(env, "");
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeApplyPersona(JNIEnv* env, jclass, jlong through_id, jbyteArray payload) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        std::string text;
+        if (!core_ready || !read_text(env, payload, text)) return java_string(env, "人格の更新内容が無効です。");
+        if (!conversation_apply_persona(through_id, text.c_str())) { core_error(); return java_string(env, error); }
+        error.clear();
+        return java_string(env, "");
+    } catch (const std::exception&) { return java_string(env, "人格を更新できませんでした。"); }
 }
 
 extern "C" JNIEXPORT jstring JNICALL

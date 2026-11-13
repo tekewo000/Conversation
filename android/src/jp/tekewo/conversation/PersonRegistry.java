@@ -10,6 +10,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -21,13 +22,12 @@ import java.util.Set;
 import java.util.UUID;
 
 final class PersonRegistry {
-    static final String LEGACY_ID = "legacy";
     private final File root;
     private final File peopleDirectory;
     private final File index;
     private final Map<String, Person> people = new LinkedHashMap<>();
     private final Map<String, Person> staged = new LinkedHashMap<>();
-    private String activeId = LEGACY_ID;
+    private String activeId = "";
 
     static final class Person {
         final String id;
@@ -48,7 +48,7 @@ final class PersonRegistry {
         root = directory.getCanonicalFile();
         if (!root.isDirectory() && !root.mkdirs()) throw new IOException("人物の保存先を作成できません。");
         peopleDirectory = new File(root, "people"); index = new File(root, "people-registry.json");
-        people.put(LEGACY_ID, new Person(LEGACY_ID, "これまでの会話", null, root, "", "", 0));
+        deleteLegacyHistory();
         if (!index.exists()) return;
         if (index.length() <= 0 || index.length() > 1024 * 1024 || Files.isSymbolicLink(index.toPath())) throw new IOException("人物一覧が不正です。");
         try {
@@ -73,7 +73,8 @@ final class PersonRegistry {
                 people.put(id, new Person(id, doc.name, repository, personDirectory, doc.rawMarkdown, doc.profile, remoteId));
             }
             activeId = json.getString("active_id");
-            if (!people.containsKey(activeId)) throw new IOException("選択中の人物が見つかりません。");
+            if (activeId.equals("legacy")) activeId = "";
+            if (!activeId.isEmpty() && !people.containsKey(activeId)) throw new IOException("選択中の人物が見つかりません。");
         } catch (JSONException | IllegalArgumentException error) { throw new IOException("人物一覧を読み込めません。", error); }
     }
 
@@ -114,17 +115,16 @@ final class PersonRegistry {
     }
 
     synchronized void activate(String id) throws IOException {
-        if (!people.containsKey(id)) throw new IllegalArgumentException("人物が見つかりません。");
+        if (id == null || (!id.isEmpty() && !people.containsKey(id))) throw new IllegalArgumentException("人物が見つかりません。");
         if (activeId.equals(id)) return;
         persist(people, id); activeId = id;
     }
 
     synchronized void delete(String id) throws IOException {
-        if (LEGACY_ID.equals(id)) throw new IllegalArgumentException("これまでの会話は削除できません。");
         if (!people.containsKey(id)) throw new IllegalArgumentException("人物が見つかりません。");
         File directory = personDirectory(id);
         Map<String, Person> updated = new LinkedHashMap<>(people); updated.remove(id);
-        String selectedId = activeId.equals(id) ? LEGACY_ID : activeId;
+        String selectedId = activeId.equals(id) ? "" : activeId;
         // Save the index first so a failed write cannot leave it pointing at deleted data.
         persist(updated, selectedId);
         people.remove(id); activeId = selectedId;
@@ -181,7 +181,7 @@ final class PersonRegistry {
     private void persist(Map<String, Person> records, String selectedId) throws IOException {
         try {
             JSONArray array = new JSONArray();
-            for (Person person : records.values()) if (!person.id.equals(LEGACY_ID)) {
+            for (Person person : records.values()) {
                 array.put(new JSONObject().put("id", person.id).put("name", person.name)
                     .put("repository", person.repository == null ? JSONObject.NULL : person.repository).put("remote_id", person.remoteId));
             }
@@ -198,6 +198,16 @@ final class PersonRegistry {
     }
     private static boolean validId(String id) {
         try { return UUID.fromString(id).toString().equals(id); } catch (IllegalArgumentException error) { return false; }
+    }
+    private void deleteLegacyHistory() throws IOException {
+        try {
+            for (String name : new String[] { "conversation.sqlite3", "conversation.sqlite3-wal", "conversation.sqlite3-shm", "conversation.sqlite3-journal", "notebook.json" }) {
+                File file = new File(root, name);
+                if (Files.isDirectory(file.toPath(), LinkOption.NOFOLLOW_LINKS)) throw new IOException("保存先に同名のフォルダがあります。");
+                Files.deleteIfExists(file.toPath());
+            }
+            deleteDirectory(new File(root, "export"));
+        } catch (IOException error) { throw new IOException("これまでの会話データを削除できませんでした。", error); }
     }
     private static String read(File file) throws IOException { return new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8); }
     private static void writeAtomic(File file, String text) throws IOException {

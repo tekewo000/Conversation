@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="ConversationTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:alertDialogTheme">@style/ConversationDialogTheme</item>
+        <item name="android:editTextStyle">@style/ConversationInput</item>
+        <item name="android:colorAccent">#A6C4BC</item>
+    </style>
+
+    <style name="ConversationDialogTheme" parent="@android:style/Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/conversation_dialog_background</item>
+        <item name="android:colorBackground">#1C2229</item>
+        <item name="android:colorBackgroundFloating">#1C2229</item>
+        <item name="android:textColorPrimary">#E6EEF2</item>
+        <item name="android:textColorSecondary">#9CABB5</item>
+        <item name="android:textColorHint">#9CABB5</item>
+        <item name="android:textColorAlertDialogListItem">#E6EEF2</item>
+        <item name="android:colorAccent">#A6C4BC</item>
+        <item name="android:colorControlNormal">#9CABB5</item>
+        <item name="android:colorControlActivated">#A6C4BC</item>
+        <item name="android:colorControlHighlight">#24A6C4BC</item>
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:textSize">16sp</item>
+        <item name="android:windowTitleStyle">@style/ConversationDialogTitle</item>
+        <item name="android:textAppearance">@style/ConversationDialogText</item>
+        <item name="android:textAppearanceMedium">@style/ConversationDialogText</item>
+        <item name="android:textAppearanceSmall">@style/ConversationDialogText</item>
+        <item name="android:textAppearanceListItem">@style/ConversationDialogText</item>
+        <item name="android:textAppearanceListItemSmall">@style/ConversationDialogText</item>
+        <item name="android:buttonBarPositiveButtonStyle">@style/ConversationDialogPrimaryButton</item>
+        <item name="android:buttonBarNegativeButtonStyle">@style/ConversationDialogButton</item>
+        <item name="android:buttonBarNeutralButtonStyle">@style/ConversationDialogNeutralButton</item>
+        <item name="android:editTextStyle">@style/ConversationInput</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:backgroundDimAmount">0.55</item>
+        <item name="android:windowMinWidthMajor">88%</item>
+        <item name="android:windowMinWidthMinor">88%</item>
+    </style>
+
+    <style name="ConversationDialogTitle" parent="@android:style/TextAppearance.Material.DialogWindowTitle">
+        <item name="android:textSize">21sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:textColor">#E6EEF2</item>
+    </style>
+
+    <style name="ConversationDialogText" parent="@android:style/TextAppearance.Material.Body1">
+        <item name="android:textSize">16sp</item>
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:textColor">#E6EEF2</item>
+    </style>
+
+    <style name="ConversationDialogButton" parent="@android:style/Widget.Material.Button.Borderless">
+        <item name="android:textSize">14sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:letterSpacing">0</item>
+        <item name="android:textColor">#A6C4BC</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:minWidth">64dp</item>
+        <item name="android:paddingStart">16dp</item>
+        <item name="android:paddingEnd">16dp</item>
+    </style>
+
+    <style name="ConversationDialogPrimaryButton" parent="ConversationDialogButton">
+        <item name="android:background">@drawable/conversation_dialog_primary_button</item>
+        <item name="android:textColor">#E6EEF2</item>
+    </style>
+
+    <style name="ConversationDialogNeutralButton" parent="ConversationDialogButton">
+        <item name="android:textColor">#F4A2A8</item>
+    </style>
+
+    <style name="ConversationInput" parent="@android:style/Widget.Material.EditText">
+        <item name="android:background">@drawable/conversation_input_background</item>
+        <item name="android:backgroundTint">@null</item>
+        <item name="android:textColor">#E6EEF2</item>
+        <item name="android:textColorHint">#9CABB5</item>
+        <item name="android:textSize">16sp</item>
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:minHeight">52dp</item>
+        <item name="android:paddingStart">16dp</item>
+        <item name="android:paddingEnd">16dp</item>
+        <item name="android:paddingTop">12dp</item>
+        <item name="android:paddingBottom">12dp</item>
+    </style>
+</resources>

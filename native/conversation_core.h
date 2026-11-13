@@ -20,6 +20,9 @@ const char* conversation_context(const char* query);
 // {} means no pending job; long messages are explicitly marked truncated.
 const char* conversation_pending_job(void);
 bool conversation_apply_job(int64_t id, const char* extraction_json);
+// {} means no scheduled persona review. Apply {changes:[{field,text,reason,source_ids}]}.
+const char* conversation_pending_persona(void);
+bool conversation_apply_persona(int64_t through_id, const char* payload_json);
 // {memories:[...]} includes source snippets, IDs, versions, and current flag.
 const char* conversation_memories(const char* query);
 // Fresh person DB only; retries with the same UUID and source SHA256 are idempotent.

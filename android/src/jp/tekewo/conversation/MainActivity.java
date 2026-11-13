@@ -69,6 +69,8 @@ public final class MainActivity extends Activity {
     private static native String nativeContext(byte[] query);
     private static native String nativePendingJob();
     private static native String nativeApplyJob(long id, byte[] payload);
+    private static native String nativePendingPersona();
+    private static native String nativeApplyPersona(long throughId, byte[] payload);
     private static native String nativeMemories(byte[] query);
     private static native String nativeExport();
     private static native void nativeJumpToMessage(long id);
@@ -103,13 +105,14 @@ public final class MainActivity extends Activity {
         runOnUiThread(() -> { if (!closed && !isDestroyed() && !isFinishing()) action.run(); });
     }
     private boolean ready;
-    private int textSize = 20;
+    private static final int DEFAULT_TEXT_SIZE = 16;
+    private int textSize = DEFAULT_TEXT_SIZE;
     private int messageGap = 12;
     private static final int BACKGROUND = Color.rgb(19, 23, 28);
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        textSize = Math.max(16, Math.min(28, getPreferences(MODE_PRIVATE).getInt("text_size", 20)));
+        textSize = Math.max(16, Math.min(28, getPreferences(MODE_PRIVATE).getInt("text_size", DEFAULT_TEXT_SIZE)));
         messageGap = Math.max(8, Math.min(24, getPreferences(MODE_PRIVATE).getInt("message_gap", 12)));
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         if (Build.VERSION.SDK_INT >= 30) {
@@ -150,9 +153,12 @@ public final class MainActivity extends Activity {
             System.loadLibrary("conversation");
             String error;
             synchronized (storeGate) {
+                requireSuccess(nativeSwitchPerson(bytes(""), bytes("")));
                 people = new PersonRegistry(getFilesDir());
                 activePerson = people.active();
-                error = nativeInit(bytes(activePerson.directory.getAbsolutePath()),
+                if (!getPreferences(MODE_PRIVATE).edit().remove("draft").commit())
+                    throw new java.io.IOException("以前の下書きを削除できませんでした。");
+                error = nativeInit(bytes(activePerson == null ? "" : activePerson.directory.getAbsolutePath()),
                         asset("NotoSansJP-Regular.ttf"), asset("NotoEmoji-Regular.ttf"));
                 ready = error.isEmpty();
             }
@@ -167,6 +173,7 @@ public final class MainActivity extends Activity {
         }
 
         surface = new ChatSurface();
+        surface.setVisibility(activePerson == null ? View.INVISIBLE : View.VISIBLE);
         root.addView(surface, new LinearLayout.LayoutParams(-1, 0, 1));
 
         LinearLayout composer = new LinearLayout(this);
@@ -185,7 +192,7 @@ public final class MainActivity extends Activity {
         input.setBackground(roundBackground(Color.rgb(28, 34, 41), 24));
         input.setPadding(dp(16), dp(10), dp(16), dp(10));
         input.setMinHeight(dp(48));
-        input.setTextSize(20);
+        input.setTextSize(DEFAULT_TEXT_SIZE);
         input.setMinLines(1);
         input.setMaxLines(5);
         input.setVerticalScrollBarEnabled(false);
@@ -193,18 +200,18 @@ public final class MainActivity extends Activity {
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
                 | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         input.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI);
-        input.setEnabled(ready);
+        input.setEnabled(ready && activePerson != null);
         composer.addView(input, new LinearLayout.LayoutParams(0, -2, 1));
 
         send = iconButton(true, "送信");
-        send.setEnabled(ready);
+        send.setEnabled(ready && activePerson != null);
         send.setOnClickListener(view -> sendMessage());
         LinearLayout.LayoutParams sendLayout = new LinearLayout.LayoutParams(dp(48), dp(48));
         sendLayout.leftMargin = dp(8);
         composer.addView(send, sendLayout);
         root.addView(composer);
 
-        input.setText(getPreferences(MODE_PRIVATE).getString(draftKey(), ""));
+        if (activePerson != null) input.setText(getPreferences(MODE_PRIVATE).getString(draftKey(), ""));
         applyTypography();
         connection = new ChatGptConnection(this);
         session = new ChatSession(new ChatSession.Store() {
@@ -229,6 +236,16 @@ public final class MainActivity extends Activity {
                     if (!error.isEmpty()) throw new java.io.IOException(error);
                 }
             }
+            public JSONObject pendingPersona() throws Exception {
+                synchronized (storeGate) { requireCurrentPerson(); return new JSONObject(nativePendingPersona()); }
+            }
+            public void applyPersona(long throughId, String payload) throws Exception {
+                synchronized (storeGate) {
+                    requireCurrentPerson();
+                    String error = nativeApplyPersona(throughId, bytes(payload));
+                    if (!error.isEmpty()) throw new java.io.IOException(error);
+                }
+            }
         });
         scheduleGitSync();
     }
@@ -240,6 +257,7 @@ public final class MainActivity extends Activity {
     private void requireCurrentPerson() throws java.io.IOException {
         requireOpen();
         if (changingPerson) throw new java.io.IOException("人物を切り替えています。");
+        if (activePerson == null) throw new java.io.IOException("人物を選んでください。");
     }
     private void setStreaming(String text) {
         synchronized (storeGate) {
@@ -248,7 +266,7 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private String draftKey() { return activePerson.id.equals(PersonRegistry.LEGACY_ID) ? "draft" : "draft_" + activePerson.id; }
+    private String draftKey() { return "draft_" + activePerson.id; }
     private void saveDraft() {
         if (!changingPerson && input != null && activePerson != null) getPreferences(MODE_PRIVATE).edit()
                 .putString(draftKey(), input.getText().toString()).commit();
@@ -266,8 +284,8 @@ public final class MainActivity extends Activity {
 
     private void setBusy(boolean value) {
         busy = value;
-        input.setEnabled(ready && !changingPerson);
-        send.setEnabled(ready && !value);
+        input.setEnabled(ready && activePerson != null && !changingPerson);
+        send.setEnabled(ready && activePerson != null && !changingPerson && !value);
         send.setAlpha(value ? 0.45f : 1.0f);
     }
 
@@ -293,7 +311,7 @@ public final class MainActivity extends Activity {
     }
 
     private void sendMessage() {
-        if (busy) return;
+        if (busy || activePerson == null) return;
         if (!connection.hasSession()) { showConnection(); return; }
         String text = input.getText().toString();
         if (text.trim().isEmpty()) return;
@@ -380,6 +398,7 @@ public final class MainActivity extends Activity {
                 : new String[]{"会話", "人物", "表示設定", "ChatGPT", "Gitバックアップ"};
         int[] icons = {0, 2, 4, 5, 1, 6};
         for (int i = 0; i < labels.length; ++i) {
+            if (i == 4 && activePerson == null) continue;
             final int action = i;
             menuRow(body, labels[i], icons[i], () -> {
                 sheet.dismiss();
@@ -521,7 +540,7 @@ public final class MainActivity extends Activity {
     }
 
     private void retryMemories() {
-        if (busy || !connection.hasSession()) return;
+        if (busy || activePerson == null || !connection.hasSession()) return;
         setBusy(true); session.begin(); connectionStatus = "記憶を整理しています";
         worker.execute(() -> {
             try {
@@ -541,7 +560,7 @@ public final class MainActivity extends Activity {
             dialog.dismiss(); showNewPerson();
         });
         for (PersonRegistry.Person person : people.list()) {
-            menuRow(body, person.name + (person.id.equals(activePerson.id) ? "  ✓" : ""), 5, () -> {
+            menuRow(body, person.name + (activePerson != null && person.id.equals(activePerson.id) ? "  ✓" : ""), 5, () -> {
                 if (busy) { showError("応答と記憶の整理が終わってから人物を切り替えてください。"); return; }
                 dialog.dismiss(); switchPerson(person);
             });
@@ -552,7 +571,7 @@ public final class MainActivity extends Activity {
             startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*")
                     .addCategory(Intent.CATEGORY_OPENABLE), 82);
         });
-        if (people.list().size() > 1) menuRow(body, "人物を削除", 6, () -> {
+        if (!people.list().isEmpty()) menuRow(body, "人物を削除", 6, () -> {
             if (busy) { showError("応答と記憶の整理が終わってから削除してください。"); return; }
             dialog.dismiss(); showDeletePeople();
         });
@@ -564,7 +583,8 @@ public final class MainActivity extends Activity {
         name.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("人物を追加")
                 .setMessage("名前だけで始められます。人物のことは会話しながら決めていけます。")
-                .setView(name).setPositiveButton("作成", null).setNegativeButton("キャンセル", null).create();
+                .setPositiveButton("作成", null).setNegativeButton("キャンセル", null).create();
+        dialog.setView(name, dp(24), dp(16), dp(24), dp(8));
         dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
             try {
                 PersonDocument document = PersonDocument.named(name.getText().toString());
@@ -577,7 +597,6 @@ public final class MainActivity extends Activity {
 
     private void showDeletePeople() {
         List<PersonRegistry.Person> removable = people.list();
-        removable.removeIf(person -> person.id.equals(PersonRegistry.LEGACY_ID));
         String[] names = new String[removable.size()];
         for (int i = 0; i < names.length; i++) names[i] = removable.get(i).name;
         new AlertDialog.Builder(this).setTitle("削除する人物")
@@ -604,10 +623,9 @@ public final class MainActivity extends Activity {
                     synchronized (syncingPeople) {
                         if (syncingPeople.contains(person.id))
                             throw new java.io.IOException("この人物のGit保存が終わってから削除してください。");
-                        boolean selected = person.id.equals(activePerson.id);
+                        boolean selected = activePerson != null && person.id.equals(activePerson.id);
                         if (selected) {
-                            PersonRegistry.Person legacy = people.list().get(0);
-                            requireSuccess(nativeSwitchPerson(bytes(legacy.directory.getAbsolutePath()), bytes("")));
+                            requireSuccess(nativeSwitchPerson(bytes(""), bytes("")));
                         }
                         try { people.delete(person.id); }
                         catch (Exception error) {
@@ -643,7 +661,7 @@ public final class MainActivity extends Activity {
     }
 
     private void switchPerson(PersonRegistry.Person person) {
-        if (person.id.equals(activePerson.id) || busy) return;
+        if ((activePerson != null && person.id.equals(activePerson.id)) || busy) return;
         saveDraft(); changingPerson = true; setBusy(true);
         syncTimer.removeCallbacks(autoSync);
         worker.execute(() -> {
@@ -662,7 +680,7 @@ public final class MainActivity extends Activity {
     }
 
     private void restorePerson() throws Exception {
-        String error = nativeSwitchPerson(bytes(activePerson.directory.getAbsolutePath()), bytes(""));
+        String error = nativeSwitchPerson(bytes(activePerson == null ? "" : activePerson.directory.getAbsolutePath()), bytes(""));
         if (!error.isEmpty()) { ready = false; throw new java.io.IOException("元の人物を開き直せませんでした。アプリを再起動してください。"); }
     }
     private static void requireSuccess(String error) throws java.io.IOException {
@@ -674,7 +692,7 @@ public final class MainActivity extends Activity {
         edit.setVerticalScrollBarEnabled(false);
         edit.setHorizontalScrollBarEnabled(false);
         edit.setHint(hint); edit.setContentDescription(hint); edit.setTextColor(Color.rgb(230, 238, 242));
-        edit.setHintTextColor(Color.rgb(156, 171, 181)); edit.setTextSize(17);
+        edit.setHintTextColor(Color.rgb(156, 171, 181)); edit.setTextSize(DEFAULT_TEXT_SIZE);
         edit.setSingleLine(true); edit.setSaveEnabled(false);
         edit.setInputType(InputType.TYPE_CLASS_TEXT | (secret ? InputType.TYPE_TEXT_VARIATION_PASSWORD
                 : InputType.TYPE_TEXT_VARIATION_URI));
@@ -691,7 +709,10 @@ public final class MainActivity extends Activity {
         body.addView(sheetText("この人物専用の、空の非公開GitHubリポジトリを指定してください。", 16));
         EditText repository = sheetInput("https://github.com/所有者/リポジトリ", false);
         EditText token = sheetInput("この人物用のGitHubトークン", true);
-        body.addView(repository); body.addView(token);
+        LinearLayout.LayoutParams fieldLayout = new LinearLayout.LayoutParams(-1, -2);
+        fieldLayout.setMargins(0, dp(12), 0, 0);
+        body.addView(repository, fieldLayout);
+        body.addView(token, new LinearLayout.LayoutParams(fieldLayout));
         body.addView(sheetText("Fine-grained token: このリポジトリの Contents を Read and write に設定。", 15));
         ScrollView scroll = new ScrollView(this);
         scroll.setVerticalScrollBarEnabled(false);
@@ -776,7 +797,7 @@ public final class MainActivity extends Activity {
         EditText token = sheetInput("GitHubトークン", true);
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("GitHubトークン")
                 .setMessage("Contents: Read and write を許可したトークンを端末内に暗号化して保存します。")
-                .setView(token).setPositiveButton("保存", (view, which) -> {
+                .setPositiveButton("保存", (view, which) -> {
                     String value = token.getText().toString().trim(); token.setText("");
                     worker.execute(() -> {
                         try { tokens.set(value); ui(() -> { gitStatus = "接続情報を保存しました"; queueGitSync(true); }); }
@@ -786,16 +807,17 @@ public final class MainActivity extends Activity {
                     try { tokens.clear(); ui(() -> gitStatus = "自動保存は接続情報の設定待ちです"); }
                     catch (Exception error) { ui(() -> showError(safeError(error))); }
                 })).setNegativeButton("キャンセル", null).create();
+        dialog.setView(token, dp(24), dp(16), dp(24), dp(8));
         dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE); dialog.show();
     }
 
     private void scheduleGitSync() {
         syncTimer.removeCallbacks(autoSync);
-        if (!closed && !changingPerson && activePerson.repository != null) syncTimer.postDelayed(autoSync, 120_000);
+        if (!closed && !changingPerson && activePerson != null && activePerson.repository != null) syncTimer.postDelayed(autoSync, 120_000);
     }
 
     private void queueGitSync(boolean report) {
-        if (!ready || closed || changingPerson || activePerson.repository == null || isDestroyed()) return;
+        if (!ready || closed || changingPerson || activePerson == null || activePerson.repository == null || isDestroyed()) return;
         final PersonRegistry.Person person = activePerson;
         gitStatus = "Gitに保存しています";
         // Capture on the chat worker; network work must never read the subsequently active database.
@@ -1040,7 +1062,7 @@ public final class MainActivity extends Activity {
             messageGap = value;
             applyTypography();
         });
-        menuRow(body, "標準に戻す", 4, () -> { font.setProgress(4); gap.setProgress(4); });
+        menuRow(body, "標準に戻す", 4, () -> { font.setProgress(DEFAULT_TEXT_SIZE - 16); gap.setProgress(4); });
         dialog.setOnDismissListener(ignored -> saveDisplaySettings());
         showSheet(dialog);
     }
@@ -1069,6 +1091,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showRecentConversation() {
+        if (activePerson == null) return;
         TextView text = sheetText(nativeRecentTranscript(), textSize);
         text.setTextIsSelectable(true);
         text.setPadding(dp(20), dp(16), dp(20), dp(16));
@@ -1099,7 +1122,7 @@ public final class MainActivity extends Activity {
         android.util.TypedValue ripple = new android.util.TypedValue();
         getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, ripple, true);
         button.setBackgroundResource(ripple.resourceId);
-        if (send) button.setBackground(roundBackground(Color.rgb(130, 197, 176), 24));
+        if (send) button.setBackground(roundBackground(Color.rgb(54, 89, 75), 24));
         return button;
     }
 
@@ -1111,7 +1134,7 @@ public final class MainActivity extends Activity {
             canvas.save();
             canvas.translate(getBounds().left, getBounds().top);
             canvas.scale(getBounds().width() / 24f, getBounds().height() / 24f);
-            paint.setColor(send ? Color.rgb(16, 30, 27) : Color.rgb(222, 232, 239));
+            paint.setColor(Color.rgb(222, 232, 239));
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(1.8f);
             paint.setStrokeCap(Paint.Cap.ROUND);

@@ -73,8 +73,8 @@ void check_pages_and_streaming() {
     // Both roles are real messages with distinct left/right bubble placement.
     float assistant_left = width, user_left = width;
     for (const ImDrawVert& vertex : child->DrawList->VtxBuffer) {
-        if (vertex.col == IM_COL32(139, 90, 111, 255)) assistant_left = std::min(assistant_left, vertex.pos.x);
-        if (vertex.col == IM_COL32(73, 110, 84, 255)) user_left = std::min(user_left, vertex.pos.x);
+        if (vertex.col == IM_COL32(83, 54, 67, 255)) assistant_left = std::min(assistant_left, vertex.pos.x);
+        if (vertex.col == IM_COL32(45, 68, 52, 255)) user_left = std::min(user_left, vertex.pos.x);
     }
     assert(assistant_left < width / 3 && user_left > assistant_left + 20);
     set_streaming("応答を表示中 😀");
@@ -157,6 +157,12 @@ void check_pages_and_streaming() {
     following_bottom = true;
     history_changed();
     frame(); frame();
+    assert(switch_person("", ""));
+    frame(); frame();
+    assert(message_positions.empty() && page_count == 0 && page_total == 0);
+    assert(text_requests == 0 && recent_transcript().empty());
+    assert(switch_person("another-person", ""));
+    frame(); frame();
 }
 
 void check_gestures() {
@@ -203,9 +209,15 @@ void check_person_switching() {
     archive_fails = true;
     assert(archive_delta(17).empty() && error == "archive failed");
     archive_fails = false;
-    core_ready = false;
+    assert(!switch_person("", "valid-import") && core_ready);
+    assert(switch_person("", ""));
+    assert(!core_ready && storage_path.empty() && error.empty());
+    assert(page_first == -1 && page_count == 0 && page_total == 0);
+    assert(streaming.empty() && message_positions.empty());
     assert(archive_delta(17).empty() && !error.empty());
-    core_ready = true;
+    assert(!switch_person("bad-path", ""));
+    assert(!core_ready && storage_path.empty());
+    assert(switch_person("another-person", "") && core_ready);
 }
 } // namespace
 
@@ -294,7 +306,7 @@ int main() {
         apply_style();
         apply_style();
         assert(ImGui::GetStyle().WindowPadding.x == 48);
-        assert(ImGui::GetStyle().FontSizeBase == (generation == 0 ? 60 : 72));
+        assert(ImGui::GetStyle().FontSizeBase == (generation == 0 ? 48 : 72));
         assert(message_gap_dp == (generation == 0 ? 12 : 20));
         ImFontBaked* baked = font->GetFontBaked(51);
         assert(baked->FindGlyphNoFallback(0x3042));

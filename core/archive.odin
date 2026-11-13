@@ -19,6 +19,7 @@ ARCHIVE_TABLES := [?]Archive_Table{
  {"person_profiles","slot,person_id,name,profile,source_sha256,version",`json_object('slot',slot,'person_id',person_id,'name',name,'profile',profile,'source_sha256',source_sha256,'version',version)`},
  {"source_documents","id,person_id,format,provenance,source_sha256,raw_markdown,created_at",`json_object('id',id,'person_id',person_id,'format',format,'provenance',provenance,'source_sha256',source_sha256,'raw_markdown',raw_markdown,'created_at',created_at)`},
  {"memory_document_sources","memory_id,document_id,section,occurred_at",`json_object('memory_id',memory_id,'document_id',document_id,'section',section,'occurred_at',occurred_at)`},
+ {"persona_revisions","id,through_id,changes,created_at",`json_object('id',id,'through_id',through_id,'changes',changes,'created_at',created_at)`},
 }
 archive_group:i64
 ARCHIVE_GROUP_MAX :: 16*1048576
@@ -159,7 +160,7 @@ archive_row_valid :: proc(table: ^Archive_Table, row: json.Object) -> bool {
   nullable:=column=="job_id" || column=="ordinal" || column=="supersedes_id" || column=="occurred_at"
   _,is_null:=value.(json.Null)
   if is_null { if !nullable do return false; continue }
-  integer:=column=="id" || column=="slot" || column=="version" || column=="job_id" || column=="ordinal" || column=="first_id" || column=="end_id" || column=="processed" || column=="memory_id" || column=="message_id" || column=="document_id" || column=="supersedes_id"
+  integer:=column=="id" || column=="slot" || column=="version" || column=="job_id" || column=="ordinal" || column=="first_id" || column=="end_id" || column=="processed" || column=="memory_id" || column=="message_id" || column=="document_id" || column=="supersedes_id" || column=="through_id"
   if integer {
    number,ok:=value.(json.Integer)
    if !ok || number<0 || (number==0 && column!="ordinal" && column!="processed") || (column=="processed" && number>1) do return false
@@ -179,6 +180,7 @@ archive_row_valid :: proc(table: ^Archive_Table, row: json.Object) -> bool {
   case "profile":maximum=PERSON_PROFILE_MAX_BYTES
   case "raw_markdown":maximum=PERSON_SOURCE_MAX_BYTES
   case "section":maximum=512
+  case "changes":maximum=32768
   }
   if !ok || len(text)>maximum || !utf8.valid_string(text) || strings.contains_rune(text,0) || (column!="valid_from" && len(strings.trim_space(text))==0) do return false
   if (column=="created_at" || column=="occurred_at" || (column=="valid_from" && text!="")) && !valid_date(text) do return false
@@ -204,6 +206,9 @@ archive_restore_event :: proc(event: json.Object, encoded: string) -> bool {
  if table.name=="messages" {
   id:=i64(row["id"].(json.Integer))
   if id>0x7fffffff || id!=scalar("SELECT coalesce(max(id),0)+1 FROM messages") do return fail("Archived message IDs must remain contiguous and fit the history window.")
+ }
+ if table.name=="persona_revisions" {
+  if i64(row["id"].(json.Integer))!=scalar("SELECT coalesce(max(id),0)+1 FROM persona_revisions") || !persona_revision_valid(i64(row["through_id"].(json.Integer)),string(row["changes"].(json.String))) do return fail("Invalid archived persona revision; nothing was restored.")
  }
  columns:=strings.split(table.columns,",")
  defer delete(columns)

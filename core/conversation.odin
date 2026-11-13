@@ -249,7 +249,7 @@ conversation_init :: proc "c" (storage_dir: cstring) -> bool {
  if path_e != nil || sqlite3_open_v2(cpath, &db, 6, nil) != 0 { release_state(); return fail("Could not open SQLite database.") }
  sqlite3_busy_timeout(db, 5000)
  version:=scalar("PRAGMA user_version")
- if version!=0 && version!=1 && version!=2 { release_state(); return fail("Unsupported database version; database was preserved.") }
+ if version!=0 && version!=1 && version!=2 && version!=3 { release_state(); return fail("Unsupported database version; database was preserved.") }
  tables:=scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
  if tables<0 { release_state(); return fail("Could not inspect database schema.") }
  if tables>0 {
@@ -262,11 +262,11 @@ conversation_init :: proc "c" (storage_dir: cstring) -> bool {
   }
  }
  if !execute(SCHEMA) || !execute("BEGIN IMMEDIATE") { release_state(); return false }
- if !execute(PERSON_SCHEMA) || !execute(ARCHIVE_SCHEMA) { execute("ROLLBACK"); release_state(); return false }
+ if !execute(PERSON_SCHEMA) || !execute(PERSONA_SCHEMA) || !execute(ARCHIVE_SCHEMA) { execute("ROLLBACK"); release_state(); return false }
  initialized := scalar("SELECT count(*) FROM meta WHERE key='initialized' AND value='1'")
  search_ready:=scalar("SELECT count(*) FROM meta WHERE key='search_version' AND value='1'")
  if initialized < 0 || search_ready<0 || (initialized == 0 && !migrate_legacy()) ||
-  (search_ready==0 && !execute(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild'); INSERT INTO memories_fts(memories_fts) VALUES('rebuild'); DELETE FROM memory_current; INSERT INTO memory_current SELECT id,kind,status FROM memories m WHERE NOT EXISTS(SELECT 1 FROM memories n WHERE n.supersedes_id=m.id); INSERT OR REPLACE INTO meta VALUES('search_version','1');`)) || !archive_backfill() || !execute("PRAGMA user_version=2") || !execute("COMMIT") {
+  (search_ready==0 && !execute(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild'); INSERT INTO memories_fts(memories_fts) VALUES('rebuild'); DELETE FROM memory_current; INSERT INTO memory_current SELECT id,kind,status FROM memories m WHERE NOT EXISTS(SELECT 1 FROM memories n WHERE n.supersedes_id=m.id); INSERT OR REPLACE INTO meta VALUES('search_version','1');`)) || !archive_backfill() || !execute("PRAGMA user_version=3") || !execute("COMMIT") {
   execute("ROLLBACK")
   release_state()
   return false
@@ -575,7 +575,7 @@ CONTEXT_JSON :: `WITH RECURSIVE query_grams(i,token) AS (
 ), message_budget AS (
  SELECT id,row,sum(length(CAST(row AS BLOB))+1) OVER(ORDER BY id DESC ROWS UNBOUNDED PRECEDING) AS bytes FROM message_rows
 )
-SELECT json_object('person',json(` + PERSON_JSON + `),'messages',json((SELECT json_group_array(json(row)) FROM (SELECT row FROM message_budget WHERE bytes<=18000 ORDER BY id))),'memories',json((SELECT json_group_array(json(row)) FROM memory_budget WHERE bytes<=14000)))`
+SELECT json_object('person',json(` + PERSON_JSON + `),'persona',json(` + PERSONA_JSON + `),'messages',json((SELECT json_group_array(json(row)) FROM (SELECT row FROM message_budget WHERE bytes<=18000 ORDER BY id))),'memories',json((SELECT json_group_array(json(row)) FROM memory_budget WHERE bytes<=14000)))`
 @(export)
 conversation_context :: proc "c" (query: cstring) -> cstring {
  context=runtime.default_context()
@@ -629,9 +629,9 @@ conversation_export :: proc "c" (output_dir: cstring) -> bool {
  folder:=strings.concatenate({base,"/",name})
  defer delete(folder)
  if os.make_directory(folder)!=nil do return fail("Could not create export snapshot directory.")
- counts:[7]i64
- chunks:[7]int
- for table,i in ([]string{"messages","memories","memory_sources","jobs","person_profiles","source_documents","memory_document_sources"}) {
+ counts:[8]i64
+ chunks:[8]int
+ for table,i in ([]string{"messages","memories","memory_sources","jobs","person_profiles","source_documents","memory_document_sources","persona_revisions"}) {
   row_sql:=archive_table(table).row_json
   sql:=fmt.aprintf("SELECT %s FROM %s ORDER BY rowid",row_sql,table)
   csql,e:=strings.clone_to_cstring(sql)
@@ -683,7 +683,7 @@ conversation_export :: proc "c" (output_dir: cstring) -> bool {
  person:=json_query(person_sql)
  delete(person_sql)
  if person==nil do return false
- metadata:=fmt.aprintf(`{{"format":2,"snapshot":"%s","person":%s,"messages":%d,"memories":%d,"sources":%d,"jobs":%d,"profiles":%d,"documents":%d,"document_sources":%d,"chunks":{{"messages":%d,"memories":%d,"memory_sources":%d,"jobs":%d,"person_profiles":%d,"source_documents":%d,"memory_document_sources":%d}},"chunk_bytes_target":1048576,"chunk_bytes_max":16777216}}`,name,string(person),counts[0],counts[1],counts[2],counts[3],counts[4],counts[5],counts[6],chunks[0],chunks[1],chunks[2],chunks[3],chunks[4],chunks[5],chunks[6])
+ metadata:=fmt.aprintf(`{{"format":2,"snapshot":"%s","person":%s,"messages":%d,"memories":%d,"sources":%d,"jobs":%d,"profiles":%d,"documents":%d,"document_sources":%d,"persona_revisions":%d,"chunks":{{"messages":%d,"memories":%d,"memory_sources":%d,"jobs":%d,"person_profiles":%d,"source_documents":%d,"memory_document_sources":%d,"persona_revisions":%d}},"chunk_bytes_target":1048576,"chunk_bytes_max":16777216}}`,name,string(person),counts[0],counts[1],counts[2],counts[3],counts[4],counts[5],counts[6],counts[7],chunks[0],chunks[1],chunks[2],chunks[3],chunks[4],chunks[5],chunks[6],chunks[7])
  defer delete(metadata)
  temporary:=strings.concatenate({base,"/metadata.json.tmp"})
  defer delete(temporary)

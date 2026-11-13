@@ -76,8 +76,9 @@ Run "$($tools.JavaHome)/bin/javac.exe" (@('-J-Duser.language=en', '-encoding', '
 $classes = @(Get-ChildItem -LiteralPath "$build/java" -Filter '*.class' -Recurse | ForEach-Object { $_.FullName })
 $dexMode = if ($Configuration -eq 'Release') { '--release' } else { '--debug' }
 Run "$($tools.BuildTools)/d8.bat" (@($dexMode, '--min-api', '29', '--lib', $tools.PlatformJar, '--output', "$build/dex") + $classes)
+Run "$($tools.BuildTools)/aapt2.exe" @('compile', '--dir', 'android/res', '-o', "$build/resources.zip")
 Run "$($tools.BuildTools)/aapt2.exe" @('link', '-o', "$build/unpacked.apk", '-I', $tools.PlatformJar,
-    '--manifest', $generatedManifest, '-A', 'android/assets', '--min-sdk-version', '29', '--target-sdk-version', '36')
+    '--manifest', $generatedManifest, "$build/resources.zip", '-A', 'android/assets', '--min-sdk-version', '29', '--target-sdk-version', '36')
 Copy-Item -LiteralPath "$build/dex/classes.dex" -Destination "$build/package/classes.dex" -Force
 Run "$($tools.JavaHome)/bin/jar.exe" @('uf', "$build/unpacked.apk", '-C', "$build/package", 'classes.dex', '-C', "$build/package", 'lib')
 Run "$($tools.BuildTools)/zipalign.exe" @('-f', '-P', '16', '4', "$build/unpacked.apk", "$build/aligned.apk")

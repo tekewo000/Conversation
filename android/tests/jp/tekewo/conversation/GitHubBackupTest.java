@@ -15,6 +15,7 @@ public final class GitHubBackupTest {
     static final String ID = GitArchiveFilesTest.ID, RAW = GitArchiveFilesTest.RAW;
     static final GitHubBackup.PersonIdentity PERSON = new GitHubBackup.PersonIdentity(ID);
     static final String REPO = "owner/person";
+    static final String TREE_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     static final class Fake implements GitHubBackup.Transport {
         boolean privateRepo = true, unrelatedRefs, unavailableRefs, loseBootstrap, loseCommit, failCommit, raceCommit, makePublicBeforeWrite;
@@ -55,8 +56,14 @@ public final class GitHubBackupTest {
                 if (method.equals("GET") && path.contains("/git/commits/")) {
                     String sha = path.substring(path.lastIndexOf('/') + 1);
                     String parent = parents.get(sha);
-                    return response(200, new JSONObject().put("parents", parent == null || parent.isEmpty() ? new JSONArray()
+                    return response(200, new JSONObject().put("tree", new JSONObject().put("sha", TREE_SHA)).put("parents", parent == null || parent.isEmpty() ? new JSONArray()
                             : new JSONArray().put(new JSONObject().put("sha", parent))));
+                }
+                if (method.equals("GET") && path.contains("/git/trees/")) {
+                    assert path.equals("/repos/" + REPO + "/git/trees/" + TREE_SHA);
+                    JSONArray entries = new JSONArray();
+                    for (String name : files.keySet()) entries.put(new JSONObject().put("path", name).put("type", "blob"));
+                    return response(200, new JSONObject().put("sha", TREE_SHA).put("truncated", false).put("tree", entries));
                 }
                 if (method.equals("PUT") && path.endsWith("/contents/archive.json")) {
                     writes++;
@@ -133,9 +140,54 @@ public final class GitHubBackupTest {
         assert unavailable.writes == 0;
         Fake reallyEmpty = new Fake(); reallyEmpty.unavailableRefs = true;
         assert sync(reallyEmpty, delta(0, 1), GitHubBackup.SyncState.empty()).cursor == 1;
-        Fake unrelated = new Fake(); unrelated.commit();
+        Fake unrelated = new Fake(); unrelated.files.put("README.md", GitArchiveFiles.utf8("Existing files\n")); unrelated.commit();
         rejected("conflict", () -> sync(unrelated, delta(0, 1), GitHubBackup.SyncState.empty()));
         assert unrelated.writes == 0;
+        rejected("conflict", () -> new GitHubBackup(unrelated).verifyIdentity(PERSON, REPO));
+        Fake emptyManifest = new Fake(); emptyManifest.files.put("person.md", GitArchiveFiles.utf8("Do not overwrite\n"));
+        emptyManifest.manifest(new JSONObject()); emptyManifest.commit();
+        rejected("conflict", () -> new GitHubBackup(emptyManifest).verifyIdentity(PERSON, REPO));
+        rejected("conflict", () -> sync(emptyManifest, delta(0, 1), GitHubBackup.SyncState.empty()));
+        assert emptyManifest.writes == 0;
+        assert new String(emptyManifest.files.get("person.md"), StandardCharsets.UTF_8).equals("Do not overwrite\n");
+        Fake reused = new Fake(); reused.files.put("old.txt", GitArchiveFiles.utf8("Previous data\n")); reused.commit();
+        reused.files.clear();
+        String deletedFilesHead = reused.commit();
+        assert new GitHubBackup(reused).verifyIdentity(PERSON, REPO).repoId == 42 && reused.writes == 0;
+        GitHubBackup.SyncResult reusedFirst = sync(reused, delta(0, 1), GitHubBackup.SyncState.empty());
+        assert reusedFirst.cursor == 1 && reusedFirst.status.equals("synced");
+        assert reused.commits == 3 && reused.writes == 1 && reused.parents.get(reusedFirst.head).equals(deletedFilesHead);
+        assert reused.manifest().getBoolean("complete") && reused.manifest().getString("previous_head").equals(deletedFilesHead);
+        assert Arrays.equals(reused.files.get("person.md"), RAW.getBytes(StandardCharsets.UTF_8));
+        assert sync(reused, delta(1, 2), reusedFirst).cursor == 2;
+        Fake reusedLostResponse = new Fake(); reusedLostResponse.commit(); reusedLostResponse.loseCommit = true;
+        GitHubBackup.SyncResult reusedRecovered = sync(reusedLostResponse, delta(0, 1), GitHubBackup.SyncState.empty());
+        assert reusedRecovered.status.equals("recovered") && reusedLostResponse.commits == 2;
+        assert sync(reusedLostResponse, delta(0, 1), GitHubBackup.SyncState.empty()).status.equals("recovered");
+        assert reusedLostResponse.commits == 2 && reusedLostResponse.writes == 1;
+        Fake reusedRace = new Fake(); reusedRace.commit(); reusedRace.raceCommit = true;
+        rejected("conflict", () -> sync(reusedRace, delta(0, 1), GitHubBackup.SyncState.empty()));
+        assert reusedRace.files.isEmpty() && reusedRace.commits == 2;
+        Fake reusedFailure = new Fake(); reusedFailure.commit(); reusedFailure.failCommit = true;
+        rejected("remote", () -> sync(reusedFailure, delta(0, 1), GitHubBackup.SyncState.empty()));
+        assert reusedFailure.files.isEmpty() && reusedFailure.commits == 1;
+        reusedFailure.failCommit = false;
+        assert sync(reusedFailure, delta(0, 1), GitHubBackup.SyncState.empty()).cursor == 1;
+        Fake erasedArchive = new Fake(); GitHubBackup.SyncResult erasedPrior = sync(erasedArchive, delta(0, 1), GitHubBackup.SyncState.empty());
+        erasedArchive.files.clear(); erasedArchive.commit();
+        int erasedWrites = erasedArchive.writes;
+        rejected("conflict", () -> sync(erasedArchive, delta(1, 2), erasedPrior));
+        assert erasedArchive.writes == erasedWrites;
+        Fake truncatedTree = new Fake(); truncatedTree.commit();
+        GitHubBackup truncatedClient = new GitHubBackup((method, path, body) -> path.contains("/git/trees/")
+                ? new GitHubBackup.Response(200, new JSONObject().put("tree", new JSONArray()).put("truncated", true))
+                : truncatedTree.request(method, path, body));
+        rejected("conflict", () -> truncatedClient.verifyIdentity(PERSON, REPO));
+        Fake malformedTree = new Fake(); malformedTree.commit();
+        GitHubBackup malformedClient = new GitHubBackup((method, path, body) -> path.contains("/git/trees/")
+                ? new GitHubBackup.Response(200, new JSONObject().put("tree", new JSONArray()))
+                : malformedTree.request(method, path, body));
+        rejected("repository", () -> malformedClient.verifyIdentity(PERSON, REPO));
         Fake foreign = new Fake(); foreign.commit();
         foreign.manifest(GitArchiveFiles.marker("e24785e0-f679-4e67-bd8c-7323760c9956", 42));
         rejected("conflict", () -> new GitHubBackup(foreign).verifyIdentity(PERSON, REPO));

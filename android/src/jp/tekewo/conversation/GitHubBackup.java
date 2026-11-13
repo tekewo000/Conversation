@@ -17,7 +17,7 @@ import java.util.Map;
 import java.util.UUID;
 import javax.net.ssl.HttpsURLConnection;
 
-/** A single private repository is permanently owned by one imported person. */
+/** A private repository archives one imported person at a time. */
 final class GitHubBackup {
     interface Transport { Response request(String method, String apiPath, JSONObject body) throws IOException; }
     static final class Response {
@@ -71,6 +71,7 @@ final class GitHubBackup {
     }
     private static final class Remote {
         final String head;
+        // null only when archive.json is absent and the pinned tree was verified empty.
         final JSONObject manifest;
         Remote(String head, JSONObject manifest) { this.head = head; this.manifest = manifest; }
     }
@@ -119,7 +120,7 @@ final class GitHubBackup {
             Repository repository = verifyRepository(input);
             Remote remote = readRemote(repository);
             if (remote.head.isEmpty()) verifyEmpty(repository);
-            else validateOwner(remote, identity.id, repository.repoId);
+            else if (remote.manifest != null) validateOwner(remote, identity.id, repository.repoId);
             return repository;
         } catch (Failure e) { throw e; }
         catch (Exception e) { throw fail("repository", "保存先の人物識別情報を確認できませんでした。"); }
@@ -161,6 +162,12 @@ final class GitHubBackup {
                 }
                 remote = readRemote(repository);
             }
+            if (remote.manifest == null) {
+                if (!prior.head.isEmpty() || prior.cursor != 0)
+                    throw conflict("保存先のアーカイブが削除されています。ローカルの会話は保持しています。");
+                // An existing empty tree can receive the complete archive atomically at its verified HEAD.
+                remote = new Remote(remote.head, GitArchiveFiles.marker(identity.id, repository.repoId));
+            }
             validateOwner(remote, identity.id, repository.repoId);
             boolean complete = remote.manifest.getBoolean("complete");
             if (!remote.head.equals(prior.head)) {
@@ -197,9 +204,11 @@ final class GitHubBackup {
             } catch (Exception uncertain) {
                 // A committed response can be lost. Read the exact manifest at HEAD before permitting any retry.
                 Remote check = readRemote(repository);
-                validateOwner(check, identity.id, repository.repoId);
-                if (matchesReplay(repository, check, batch, delta, new SyncState(remote.head, batch.from, repository.repoId,
-                        repository.repo, repository.branch))) return result(repository, check, "recovered");
+                if (check.manifest != null) {
+                    validateOwner(check, identity.id, repository.repoId);
+                    if (matchesReplay(repository, check, batch, delta, new SyncState(remote.head, batch.from, repository.repoId,
+                            repository.repo, repository.branch))) return result(repository, check, "recovered");
+                }
                 if (!check.head.equals(remote.head)) throw conflict("保存中にリモートが更新されました。上書きは行いません。");
                 throw fail("remote", "GitHub への保存を確認できませんでした。次回は同じカーソルから再確認します。");
             }
@@ -215,7 +224,15 @@ final class GitHubBackup {
         String head = target.getString("sha");
         if (!target.getString("type").equals("commit") || !head.matches("[0-9a-f]{40,64}")) throw new IOException();
         Response file = request("GET", base(repository) + "/contents/archive.json?ref=" + head, null);
-        if (file.status == 404) throw conflict("保存先にはこのアプリ以外の履歴があります。");
+        if (file.status == 404) {
+            JSONObject commit = object(request("GET", base(repository) + "/git/commits/" + head, null), 200);
+            String treeSha = commit.getJSONObject("tree").getString("sha");
+            if (!treeSha.matches("[0-9a-f]{40,64}")) throw new IOException();
+            JSONObject tree = object(request("GET", base(repository) + "/git/trees/" + treeSha, null), 200);
+            if (tree.getBoolean("truncated") || tree.getJSONArray("tree").length() != 0)
+                throw conflict("保存先にファイルが残っています。初回保存には既定ブランチのファイルをすべて削除してください。");
+            return new Remote(head, null);
+        }
         JSONObject data = object(file, 200);
         if (!data.getString("encoding").equals("base64") || data.optLong("size", Long.MAX_VALUE) > 65536) throw new IOException();
         byte[] decoded = Base64.getDecoder().decode(data.getString("content").replace("\n", "").replace("\r", ""));

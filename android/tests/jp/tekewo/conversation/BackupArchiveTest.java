@@ -21,6 +21,8 @@ public final class BackupArchiveTest {
             Files.write(new File(root, "metadata.json").toPath(), "{\"snapshot\":\"snapshot-current\"}".getBytes(StandardCharsets.UTF_8));
             String original = "{\"content\":\"こんにちは🎾\"}\n";
             Files.write(new File(snapshot, "messages-0001.jsonl").toPath(), original.getBytes(StandardCharsets.UTF_8));
+            String persona = "{\"id\":1,\"through_id\":12,\"changes\":\"[]\",\"created_at\":\"2026-11-14T00:00:00Z\"}\n";
+            Files.write(new File(snapshot, "persona_revisions-000000.jsonl").toPath(), persona.getBytes(StandardCharsets.UTF_8));
             ByteArrayOutputStream data = new ByteArrayOutputStream(); BackupArchive.write(root, data);
             Set<String> names = new HashSet<>();
             try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(data.toByteArray()))) {
@@ -28,10 +30,12 @@ public final class BackupArchiveTest {
                 while ((entry = zip.getNextEntry()) != null) {
                     names.add(entry.getName()); ByteArrayOutputStream bytes = new ByteArrayOutputStream();
                     int count; while ((count = zip.read(buffer)) != -1) bytes.write(buffer, 0, count);
-                    if (entry.getName().endsWith(".jsonl")) assert original.equals(new String(bytes.toByteArray(), StandardCharsets.UTF_8));
+                    if (entry.getName().endsWith("messages-0001.jsonl")) assert original.equals(new String(bytes.toByteArray(), StandardCharsets.UTF_8));
+                    if (entry.getName().endsWith("persona_revisions-000000.jsonl")) assert persona.equals(new String(bytes.toByteArray(), StandardCharsets.UTF_8));
                 }
             }
-            assert names.size() == 2 && names.contains("metadata.json") && names.contains("snapshot-current/messages-0001.jsonl");
+            assert names.size() == 3 && names.contains("metadata.json") && names.contains("snapshot-current/messages-0001.jsonl")
+                    && names.contains("snapshot-current/persona_revisions-000000.jsonl");
             char[] profile = new char[128 * 1024]; java.util.Arrays.fill(profile, '\u0001');
             String metadata = new org.json.JSONObject().put("snapshot", "snapshot-current")
                     .put("person", new org.json.JSONObject().put("profile", new String(profile))).toString();

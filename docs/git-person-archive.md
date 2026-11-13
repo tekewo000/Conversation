@@ -1,6 +1,6 @@
 # 人物ごとの非公開 Git アーカイブ
 
-人物 1 人を GitHub の非公開リポジトリ 1 個に固定します。アプリはリポジトリを作成しません。利用者が GitHub で空の **Private** リポジトリを作成し、アプリに URL と fine-grained personal access token を設定します。README・ライセンスなどの初期ファイルは付けないでください。
+人物 1 人を GitHub の非公開リポジトリ 1 個に固定します。アプリはリポジトリを作成しません。利用者が GitHub で空の **Private** リポジトリを作成し、アプリに URL と fine-grained personal access token を設定します。README・ライセンスなどの初期ファイルは付けないでください。既存リポジトリも、既定ブランチのファイルをすべて削除してあれば初回保存に使えます。過去のコミットや別ブランチ・タグは削除しないため、以前のデータは履歴に残ります。
 
 トークンでは、対象の resource owner と保存先リポジトリを選び、リポジトリ権限を **Contents: Read and write**、**Metadata: Read-only** にします。他の権限は使いません。複数の人物を同じトークンで保存する場合は、それぞれの専用リポジトリを選択してください。組織の承認が必要なトークンは、承認後に利用します。GitHub 公式の [トークン権限](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens)、[Contents API](https://docs.github.com/en/rest/repos/contents)、[GraphQL 認証](https://docs.github.com/en/graphql/guides/forming-calls-with-graphql) を参照してください。
 
@@ -25,7 +25,7 @@ AndroidのJSON出力ではスラッシュ等のエスケープで容量が増え
 
 保存前に API から `private`、正式な `owner/repo`、数値 ID、既定ブランチを取得します。公開リポジトリは書き込み前に拒否します。人物一覧では `owner/repo` と数値 ID の重複を拒否し、リモートの `archive.json` に別の人物 UUID があれば使用しません。リネーム・移転によるリダイレクトにも追従しません。
 
-初回は全 Git 参照が空であることを確認してから Contents API で小さな `complete:false` の所有者マーカーを作り、その HEAD を指定した 1 回のコミットで完全なアーカイブにします。マーカーしかない状態はバックアップ完了とは扱いません。完全な保存は GitHub の [`createCommitOnBranch`](https://docs.github.com/en/graphql/reference/commits) に `expectedHeadOid` を指定し、同じコミットで差分とマニフェストを更新します。これにより、確認後に HEAD が変わっても既存履歴を上書きしません。[ファイル変更は base64 で送信](https://docs.github.com/en/graphql/reference/git)し、HTTP の送信先は `https://api.github.com` に固定します。別ホスト、HTTP リダイレクト、システムプロキシには認証を送信しません。
+コミットのない保存先では、全 Git 参照が空であることを確認してから Contents API で小さな `complete:false` の所有者マーカーを作り、その HEAD を指定した 1 回のコミットで完全なアーカイブにします。マーカーしかない状態はバックアップ完了とは扱いません。既存 HEAD に `archive.json` がない場合は、そのコミットのルートツリーを取得し、省略のない空のツリーだけを初回保存に受け入れます。この場合は既存 HEAD を親にして、完全なアーカイブを 1 回のコミットで追加します。前回の同期状態がある端末では、アーカイブの削除を再初期化とは扱わず競合で停止します。完全な保存は GitHub の [`createCommitOnBranch`](https://docs.github.com/en/graphql/reference/commits) に `expectedHeadOid` を指定し、同じコミットで差分とマニフェストを更新します。これにより、確認後に HEAD が変わっても既存履歴を上書きしません。[ファイル変更は base64 で送信](https://docs.github.com/en/graphql/reference/git)し、HTTP の送信先は `https://api.github.com` に固定します。別ホスト、HTTP リダイレクト、システムプロキシには認証を送信しません。
 
 前回保存した HEAD とリモートが違えば同期を停止し、端末の会話は利用できます。自動マージ、強制 push、履歴削除は行いません。返答が途切れた場合は、リモートの人物 UUID・カーソル・バッチの指紋・実際の親コミットを照合します。同じ保存が完了していればローカル状態だけを進め、二重コミットを作りません。端末側で新しい会話が増えていれば、検証できた先頭分まで進め、残りを次の差分で保存します。競合が残る場合は手動で調査する必要があります。
 

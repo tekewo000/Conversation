@@ -49,12 +49,29 @@ public final class GitArchiveFilesTest {
         reject(() -> GitArchiveFiles.build(ID, 42, RAW, fractional));
         expandedPersonBounds();
         sqliteUnicodeExpansionFitsEncodedBudget();
+        personaRevisionSurvivesJsonl();
         expandedDeltaBound();
         JSONObject oversized = delta(0, 1);
         char[] chars = new char[GitArchiveFiles.MAX_DELTA_BYTES]; Arrays.fill(chars, 'x');
         oversized.getJSONArray("records").getJSONObject(0).put("extra", new String(chars));
         reject(() -> GitArchiveFiles.build(ID, 42, RAW, oversized));
         System.out.println("GitArchiveFilesTest passed");
+    }
+
+    private static void personaRevisionSurvivesJsonl() throws Exception {
+        JSONObject archive = delta(0, 1);
+        String changes = "[{\"field\":\"speaking_style\",\"text\":\"短く具体的に話す\",\"reason\":\"会話で繰り返し希望された\",\"source_ids\":[1,2,3,4]}]";
+        archive.getJSONArray("records").getJSONObject(0).getJSONArray("events").put(new JSONObject()
+                .put("table", "persona_revisions").put("op", "insert").put("row", new JSONObject()
+                        .put("id", 1).put("through_id", 12).put("changes", changes).put("created_at", "2026-11-14T00:00:00Z")));
+        GitArchiveFiles.Batch batch = GitArchiveFiles.build(ID, 42, RAW, archive);
+        String path = batch.manifest.getJSONObject("latest_batch").getString("path");
+        JSONObject event = new JSONObject(new String(batch.files.get(path), StandardCharsets.UTF_8))
+                .getJSONArray("events").getJSONObject(1);
+        assert event.getString("table").equals("persona_revisions");
+        assert event.getString("op").equals("insert");
+        assert event.getJSONObject("row").getLong("through_id") == 12;
+        assert event.getJSONObject("row").getString("changes").equals(changes);
     }
 
     private static void expandedPersonBounds() throws Exception {

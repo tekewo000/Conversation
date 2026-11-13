@@ -22,6 +22,8 @@ int main(int argc, char **argv) {
     assert(strstr(conversation_memories("tennis"), "tennis"));
     assert(strstr(conversation_context("tennis"), "tennis"));
     assert(!strcmp(conversation_pending_job(), "{}"));
+    assert(!strcmp(conversation_pending_persona(), "{}"));
+    assert(!conversation_apply_persona(0, "{\"changes\":[]}"));
     conversation_close();
     puts("C ABI durable roundtrip passed");
     return 0;
