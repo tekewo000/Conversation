@@ -86,6 +86,21 @@ class ComposeUiTest {
         compose.runOnIdle { assertEquals(1, actions) }
     }
 
+    @Test fun sheetCloseButtonDismissesAndNotifiesItsOwner() {
+        var dismissals = 0
+        compose.runOnUiThread {
+            install()
+            val panel = ComposeUi.Panel("人物のメニュー")
+            panel.sheet = true
+            panel.onDismiss = Runnable { dismissals++ }
+            panel.rows.add(ComposeUi.Row("人物を追加", {}))
+            ui.show(panel)
+        }
+        compose.onNodeWithContentDescription("閉じる").performClick()
+        compose.onNodeWithText("人物のメニュー").assertDoesNotExist()
+        compose.runOnIdle { assertEquals(1, dismissals) }
+    }
+
     @Test fun secretInputIsMaskedAndDoesNotRestoreAfterActivityRecreation() {
         lateinit var tokenField: ComposeUi.Field
         fun showTokenPanel() {
@@ -97,13 +112,13 @@ class ComposeUiTest {
             ui.show(panel)
         }
         compose.runOnUiThread { showTokenPanel() }
-        compose.onNodeWithText("GitHubトークン")
+        compose.onNodeWithContentDescription("GitHubトークン")
             .assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.Password))
             .performTextInput("synthetic-test-secret")
         compose.runOnIdle { assertEquals("synthetic-test-secret", tokenField.value) }
         compose.activityRule.scenario.recreate()
         compose.runOnUiThread { showTokenPanel() }
-        compose.onNodeWithText("GitHubトークン")
+        compose.onNodeWithContentDescription("GitHubトークン")
             .assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.Password))
         compose.runOnIdle { assertEquals("", tokenField.value) }
     }

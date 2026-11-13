@@ -2,7 +2,7 @@
 
 Entries below are historical records, in chronological order. Earlier renderer,
 font and milestone limitations describe those versions; the Compose migration
-record at the end describes 0.4.0. Physical-device evidence from older versions
+records at the end describe 0.4.0 and 0.4.1. Physical-device evidence from older versions
 does not validate the new Compose interface.
 
 ## 2026-11-13
@@ -388,3 +388,42 @@ phone checks above remain evidence for the older UI only.
   limits nor storage implementation were changed to mask the failed check.
 - Physical-device IME/TalkBack/power, live ChatGPT authorization/inference and
   actual private GitHub writes were not tested in this migration.
+
+## 2026-11-14: Restore the previous visual style in Compose (0.4.1)
+
+- The user reported that the Compose migration changed the appearance too much.
+  The UI now follows the 0.3.3 styling while retaining Compose: right-aligned
+  green #2D4434 user bubbles, left-aligned plum #533643 assistant bubbles,
+  content-sized widths and 16dp bubble corners.
+- Restored the original Noto Sans JP font under `android/res/font/`, with its
+  OFL license under `android/res/raw/`. Conversation font sizes convert the
+  native renderer's 1448-unit ascent/descent size to Compose's 1000-unit em
+  (`1000 / 1448`), while line height retains the selected conversation size.
+  The native bridge still receives empty font arguments; Compose owns text.
+- Restored the filled dark 48dp composer, blank input without an outlined
+  placeholder, green upward send arrow and original line-icon shapes. Menu
+  sheets sit flush at the bottom with 28dp upper corners, row icons and a
+  header close control; forms retain centered dialogs. Sliders use thin tracks
+  and circular thumbs.
+- Source version is 0.4.1, code 8. Compose, JNI, storage, authentication and
+  backup contracts are unchanged. The combined exact-limit Android import
+  failure recorded for 0.4.0 remains an acknowledged pre-existing limitation.
+- The final UI suite passed 9 tests with zero failures, errors or skips,
+  including masked form input, draft/settings recreation, paging and the sheet
+  header close callback. The final signed Release build verified v3 signing,
+  code8/version0.4.1, disabled debugging and all native 16KiB alignment checks.
+  This UI-only build reused the existing core coverage; it did not rerun the
+  unchanged Odin suite or the known failing maximum-size Android import probe.
+- Installed and launched the final APK on the emulator. Compared main chat,
+  menu, people and settings against 0.3.3 using identical synthetic messages and
+  draft on the same device. Menus, icons, composer, bubble colors and glyph
+  sizing follow the old screen. Compose's Japanese line wrapping still differs
+  from ImGui on some long paragraphs. Synthetic people and the capture helper
+  were removed after capture; no real account or conversation was used.
+- Final APK: 25,990,148 bytes, SHA256
+  `49f0e0cf1faef300046d501162a439f4c6a6b8bd43972f4f12565f851bab0159`.
+
+Visual restoration does not add new physical-phone IME, TalkBack, battery,
+live ChatGPT or private GitHub validation. The older ImGui screenshots and the
+new Compose screen can be compared for appearance, but do not establish exact
+pixel equality across devices or system font scales.

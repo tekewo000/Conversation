@@ -297,19 +297,21 @@ public final class MainActivity extends ComponentActivity {
     private void showHistoryMenu() {
         if (!ready) return;
         ComposeUi.Panel menu = new ComposeUi.Panel("メニュー");
-        menu.rows.add(new ComposeUi.Row("会話", () -> { pageFirst = -1; scrollOnRefresh = true; refreshMessages(); }));
-        menu.rows.add(new ComposeUi.Row("人物", this::showPeople));
-        menu.rows.add(new ComposeUi.Row("表示設定", this::showDisplaySettings));
-        menu.rows.add(new ComposeUi.Row("ChatGPT", this::showConnection));
-        if (activePerson != null) menu.rows.add(new ComposeUi.Row("Gitバックアップ", this::showGitBackup));
+        menu.sheet = true;
+        menu.rows.add(new ComposeUi.Row("会話", () -> { pageFirst = -1; scrollOnRefresh = true; refreshMessages(); }, 0));
+        menu.rows.add(new ComposeUi.Row("人物", this::showPeople, 2));
+        menu.rows.add(new ComposeUi.Row("表示設定", this::showDisplaySettings, 4));
+        menu.rows.add(new ComposeUi.Row("ChatGPT", this::showConnection, 5));
+        if (activePerson != null) menu.rows.add(new ComposeUi.Row("Gitバックアップ", this::showGitBackup, 1));
         if (busy) menu.rows.add(new ComposeUi.Row("応答を停止", () -> {
             session.cancel(); connection.cancel(); setStreaming(""); refreshMessages();
-        }));
+        }, 6));
         compose.show(menu);
     }
 
     private void showConnection() {
         ComposeUi.Panel panel = new ComposeUi.Panel("ChatGPT");
+        panel.sheet = true;
         panel.message = connection.hasSession()
                 ? connection.accountLabel() + "\nChatGPTの利用枠を使用します。\n" + connectionStatus
                 : "ChatGPTにログインして、このアプリでサブスクの利用枠を使います。\n" + connectionStatus;
@@ -329,7 +331,7 @@ public final class MainActivity extends ComponentActivity {
                         compose.show(welcome);
                     } else retryMemories();
                 }));
-            }));
+            }, 5));
         } else {
             String slug = getPreferences(MODE_PRIVATE).getString("model_slug", "");
             String name = slug.isEmpty() ? "既定" : slug;
@@ -340,10 +342,10 @@ public final class MainActivity extends ComponentActivity {
                 ChatRequest request = savedRequest(model);
                 name = model.displayName; effort = request.effort; fast = request.fast; break;
             }
-            panel.rows.add(new ComposeUi.Row("モデル · " + name, this::showModels));
-            panel.rows.add(new ComposeUi.Row("Effort · " + (effort.isEmpty() ? "既定" : effort), () -> showRequestOption(false)));
-            panel.rows.add(new ComposeUi.Row("Fast · " + (fast ? "On" : "Off"), () -> showRequestOption(true)));
-            panel.rows.add(new ComposeUi.Row("記憶の整理を再試行", this::retryMemories));
+            panel.rows.add(new ComposeUi.Row("モデル · " + name, this::showModels, 4));
+            panel.rows.add(new ComposeUi.Row("Effort · " + (effort.isEmpty() ? "既定" : effort), () -> showRequestOption(false), 4));
+            panel.rows.add(new ComposeUi.Row("Fast · " + (fast ? "On" : "Off"), () -> showRequestOption(true), 4));
+            panel.rows.add(new ComposeUi.Row("記憶の整理を再試行", this::retryMemories, 2));
         }
         panel.rows.add(new ComposeUi.Row(connection.hasSession() ? "ログアウト" : "保存した接続情報をリセット", () -> {
             if (busy) return;
@@ -351,8 +353,8 @@ public final class MainActivity extends ComponentActivity {
                 connection.signOut(); availableModels = null;
                 ui(() -> { connectionStatus = connection.signOutStatus(); showConnection(); });
             });
-        }));
-        panel.rows.add(new ComposeUi.Row("利用状況を確認", this::openUsage));
+        }, 6));
+        panel.rows.add(new ComposeUi.Row("利用状況を確認", this::openUsage, 1));
         compose.show(panel);
     }
 
@@ -371,6 +373,7 @@ public final class MainActivity extends ComponentActivity {
                 ui(() -> {
                     if (busy || !connection.hasSession()) return;
                     ComposeUi.Panel panel = new ComposeUi.Panel("モデル · ChatGPTの利用枠");
+                    panel.choices = true;
                     panel.onDismiss = this::showConnection;
                     for (int i = 0; i < models.size(); i++) {
                         final int index = i;
@@ -397,6 +400,7 @@ public final class MainActivity extends ComponentActivity {
                 ui(() -> {
                     if (busy || !connection.hasSession()) return;
                     ComposeUi.Panel panel = new ComposeUi.Panel((fast ? "Fast" : "Effort") + " · " + model.displayName);
+                    panel.choices = true;
                     panel.onDismiss = this::showConnection;
                     if (fast ? !model.supportsFast : model.efforts.isEmpty()) {
                         panel.message = model.displayName + (fast ? "ではFastを利用できません。" : "ではEffortを変更できません。");
@@ -438,25 +442,26 @@ public final class MainActivity extends ComponentActivity {
 
     private void showPeople() {
         ComposeUi.Panel panel = new ComposeUi.Panel("人物");
+        panel.sheet = true;
         panel.rows.add(new ComposeUi.Row("人物を追加", () -> {
             if (busy) { showError("応答と記憶の整理が終わってから追加してください。"); return; }
             showNewPerson();
-        }));
+        }, 2));
         for (PersonRegistry.Person person : people.list()) {
             ComposeUi.Row row = new ComposeUi.Row(person.name, () -> {
                 if (busy) { showError("応答と記憶の整理が終わってから人物を切り替えてください。"); return; }
                 switchPerson(person);
-            });
+            }, 5);
             row.checked = activePerson != null && person.id.equals(activePerson.id); panel.rows.add(row);
         }
         panel.rows.add(new ComposeUi.Row("人物ファイルを読み込む", () -> {
             if (busy) { showError("応答と記憶の整理が終わってから読み込んでください。"); return; }
             startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE), 82);
-        }));
+        }, 1));
         if (!people.list().isEmpty()) panel.rows.add(new ComposeUi.Row("人物を削除", () -> {
             if (busy) { showError("応答と記憶の整理が終わってから削除してください。"); return; }
             showDeletePeople();
-        }));
+        }, 6));
         compose.show(panel);
     }
 
@@ -483,7 +488,7 @@ public final class MainActivity extends ComponentActivity {
             confirm.confirmLabel = "人物を削除";
             confirm.confirm = () -> { compose.hide(); deletePerson(person); };
             compose.show(confirm);
-        }));
+        }, 5));
         compose.show(panel);
     }
 
@@ -632,15 +637,16 @@ public final class MainActivity extends ComponentActivity {
     private void showGitBackup() {
         if (activePerson == null) return;
         ComposeUi.Panel panel = new ComposeUi.Panel("Gitバックアップ");
+        panel.sheet = true;
         panel.message = activePerson.repository == null
                 ? activePerson.name + "\n会話と記憶はこの端末に保存しています。ZIPに書き出して保管できます。"
                 : activePerson.name + "\n" + activePerson.repository + "\n" + gitStatus
                   + "\n会話の原文・人物ファイル・出来事と記憶の更新履歴を非公開リポジトリへ保存します。";
         if (activePerson.repository != null) {
-            panel.rows.add(new ComposeUi.Row("今すぐ保存", () -> queueGitSync(true)));
-            panel.rows.add(new ComposeUi.Row("GitHubトークンを設定", this::editGitToken));
+            panel.rows.add(new ComposeUi.Row("今すぐ保存", () -> queueGitSync(true), 1));
+            panel.rows.add(new ComposeUi.Row("GitHubトークンを設定", this::editGitToken, 4));
         }
-        panel.rows.add(new ComposeUi.Row("端末からZIPを書き出す", this::exportArchive));
+        panel.rows.add(new ComposeUi.Row("端末からZIPを書き出す", this::exportArchive, 1));
         compose.show(panel);
     }
 
@@ -796,6 +802,7 @@ public final class MainActivity extends ComponentActivity {
 
     private void showDisplaySettings() {
         ComposeUi.Panel panel = new ComposeUi.Panel("表示設定");
+        panel.sheet = true;
         panel.preview = true;
         ComposeUi.Setting font = new ComposeUi.Setting("文字サイズ", 16, 28, textSize, value -> {
             textSize = value; applyTypography(); saveDisplaySettings();
@@ -807,7 +814,7 @@ public final class MainActivity extends ComponentActivity {
         ComposeUi.Row reset = new ComposeUi.Row("標準に戻す", () -> {
             textSize = DEFAULT_TEXT_SIZE; messageGap = 12;
             font.setValue(textSize); gap.setValue(messageGap); applyTypography(); saveDisplaySettings();
-        });
+        }, 4);
         reset.dismiss = false; panel.rows.add(reset); compose.show(panel);
     }
 

@@ -42,7 +42,7 @@ class MainActivityComposeTest {
         compose.onNodeWithContentDescription("メニュー").performClick()
         compose.onNodeWithText("人物").performClick()
         compose.onNodeWithText("人物を追加").performClick()
-        compose.onNodeWithText("名前").performTextInput(name)
+        compose.onNodeWithContentDescription("名前").performTextInput(name)
         compose.onNodeWithText("作成").performClick()
         compose.waitUntil(20_000) { PersonRegistry(context.filesDir).active()?.name == name }
         compose.waitForIdle()
@@ -57,7 +57,7 @@ class MainActivityComposeTest {
             .performSemanticsAction(SemanticsActions.SetProgress) { it(22f) }
         compose.onNodeWithContentDescription("メッセージの間隔")
             .performSemanticsAction(SemanticsActions.SetProgress) { it(18f) }
-        compose.onNodeWithText("閉じる").performClick()
+        compose.onNodeWithContentDescription("閉じる").performClick()
         compose.activityRule.scenario.recreate()
         compose.runOnIdle {
             assertEquals(22, preferences.getInt("text_size", 0))
