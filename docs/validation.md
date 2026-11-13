@@ -36,8 +36,9 @@
 - This is the approved first input/storage milestone, not the complete AI app.
   Real sign-in, AI responses, automatic memory extraction/retrieval and GitHub
   history sync remain subsequent milestones.
-- No phone or emulator was connected during verification. Native GPU output,
-  physical IME, insets, TalkBack and measured idle power need phone checks.
+- The initial handoff had no connected phone. The subsequent Pixel 10 Pro check
+  below verifies startup/display; physical IME, insets, TalkBack and measured
+  idle power still need further phone checks.
 - Corrupt history is deliberately preserved and writing disabled. Directory fsync
   recovery for sudden power loss is not implemented.
 - Draft preference saving occurs at backgrounding; a forced foreground process
@@ -46,9 +47,26 @@
 ## Final handoff artifact
 
 - `dist/Conversation-0.1.0-arm64-debug.apk`
-- SHA-256: `2aae9ff38712c74461922166479bb03578796cb8d9a4e748a7bbd2d1e4074990`
-- Final core suite: six tests passed; the injected OOM parser leak warning above
+- SHA-256 (after phone storage fix): `0800b0879bf3490fb47cc2837f21c8a12290fec38ca5ea19ec206b0cc2cff0ae`
+- Final core suite: seven tests passed; the injected OOM parser leak warning above
   remains explicit. Standalone C ABI write/read and native CPU UI checks passed.
 - Final APK build, APK signature verification and 16 KiB zip alignment passed.
   Java 8 target and API-29 compatibility calls produce expected deprecation
   warnings when building with JDK 21 / Android API 36.
+
+## First phone check and storage fix
+
+- Pixel 10 Pro connected and authorized over USB. First installation succeeded
+  but exposed an existing-directory initialization error in the actual app.
+- Odin Linux/Android mkdir_all returns Exist for an existing directory (unlike
+  the Windows implementation) and traverses ancestors with read access, which
+  Android's app sandbox can deny. Java getFilesDir already supplies an existing
+  app-private directory.
+- Opening a notebook now stats the final directory directly, creates it only
+  when absent, and rejects regular files. Existing history is preserved.
+- `scripts/test-device.ps1` failed on the original app's initialization error,
+  then passed after rebuild and update installation. The process remains alive;
+  the actual Japanese Dear ImGui screen was inspected through a device capture.
+- Debug APK now sets debuggable explicitly to permit app-scoped adb diagnostics.
+  No app data was cleared or app uninstalled. Manual Japanese IME, actual message
+  saving, TalkBack and battery measurements remain to be checked.

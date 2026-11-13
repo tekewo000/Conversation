@@ -5,6 +5,33 @@ import "core:strings"
 import "core:testing"
 
 @(test)
+storage_directory_can_exist_but_not_be_a_file :: proc(t: ^testing.T) {
+	dir, error := os.make_directory_temp("", "conversation-existing-*", context.allocator)
+	assert(error == nil)
+	defer delete(dir)
+	defer os.remove_all(dir)
+	dir_c := strings.clone_to_cstring(dir)
+	defer delete(dir_c)
+	defer conversation_close()
+	assert(conversation_init(dir_c))
+	assert(conversation_send("保存先は既に存在している"))
+	conversation_close()
+	assert(conversation_init(dir_c))
+	testing.expect_value(t, conversation_message_count(), 1)
+	conversation_close()
+	file := strings.concatenate({dir, "/not-a-directory"})
+	defer delete(file)
+	assert(os.write_entire_file(file, "keep") == nil)
+	file_c := strings.clone_to_cstring(file)
+	defer delete(file_c)
+	testing.expect(t, !conversation_init(file_c))
+	original, read_error := os.read_entire_file(file, context.allocator)
+	assert(read_error == nil)
+	defer delete(original)
+	testing.expect_value(t, string(original), "keep")
+}
+
+@(test)
 notebook_persists_utf8_and_preserves_failed_changes :: proc(t: ^testing.T) {
 	dir, dir_error := os.make_directory_temp("", "conversation-test-*", context.allocator)
 	assert(dir_error == nil)

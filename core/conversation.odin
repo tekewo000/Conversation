@@ -160,7 +160,18 @@ open_notebook :: proc(storage_dir: cstring) -> bool {
 		release_state()
 		return fail("Not enough memory to open history.")
 	}
-	if os.make_directory_all(directory) != nil {
+	// Android allows the app's directory but may deny reading its /data ancestors.
+	info, directory_error := os.stat(directory, context.allocator)
+	if directory_error == .Not_Exist {
+		create_error := os.make_directory_all(directory)
+		if create_error != nil && create_error != .Exist {
+			release_state()
+			return fail("Could not create the storage directory.")
+		}
+		info, directory_error = os.stat(directory, context.allocator)
+	}
+	defer os.file_info_delete(info, context.allocator)
+	if directory_error != nil || info.type != .Directory {
 		release_state()
 		return fail("Could not open the storage directory.")
 	}
