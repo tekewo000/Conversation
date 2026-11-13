@@ -2,6 +2,7 @@ package jp.tekewo.conversation;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.graphics.Color;
@@ -11,8 +12,10 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.ColorFilter;
 import android.graphics.PixelFormat;
+import android.graphics.Typeface;
 import android.opengl.GLSurfaceView;
 import android.os.Build;
 import android.os.Bundle;
@@ -22,12 +25,16 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowManager;
+import android.view.Window;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.ImageButton;
+import android.widget.ImageView;
+import android.widget.SeekBar;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.FrameLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -43,6 +50,7 @@ public final class MainActivity extends Activity {
     private static native void nativeSurfaceCreated();
     private static native void nativeResize(int width, int height, float density);
     private static native void nativeRender();
+    private static native void nativeSetTypography(float pixels, float gapDp);
     private static native void nativeTouch(int action, float x, float y);
     private static native String nativeSend(byte[] text);
     private static native String nativeTranscript(boolean memories);
@@ -53,10 +61,14 @@ public final class MainActivity extends Activity {
     private ChatSurface surface;
     private EditText input;
     private boolean ready;
+    private int textSize = 20;
+    private int messageGap = 12;
     private static final int BACKGROUND = Color.rgb(19, 23, 28);
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        textSize = Math.max(16, Math.min(28, getPreferences(MODE_PRIVATE).getInt("text_size", 20)));
+        messageGap = Math.max(8, Math.min(24, getPreferences(MODE_PRIVATE).getInt("message_gap", 12)));
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         if (Build.VERSION.SDK_INT >= 30) {
             getWindow().setDecorFitsSystemWindows(false);
@@ -66,6 +78,8 @@ public final class MainActivity extends Activity {
         }
         getWindow().setStatusBarColor(BACKGROUND);
         getWindow().setNavigationBarColor(BACKGROUND);
+        getWindow().setNavigationBarContrastEnforced(false);
+        getWindow().setBackgroundDrawable(new ColorDrawable(BACKGROUND));
         getWindow().getDecorView().setSystemUiVisibility(getWindow().getDecorView().getSystemUiVisibility()
                 & ~(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR));
 
@@ -124,7 +138,7 @@ public final class MainActivity extends Activity {
         input.setBackground(roundBackground(Color.rgb(28, 34, 41), 24));
         input.setPadding(dp(16), dp(10), dp(16), dp(10));
         input.setMinHeight(dp(48));
-        input.setTextSize(17);
+        input.setTextSize(textSize);
         input.setMinLines(1);
         input.setMaxLines(5);
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
@@ -142,6 +156,7 @@ public final class MainActivity extends Activity {
         root.addView(composer);
 
         input.setText(getPreferences(MODE_PRIVATE).getString("draft", ""));
+        applyTypography();
     }
 
     private byte[] asset(String name) throws Exception {
@@ -178,36 +193,197 @@ public final class MainActivity extends Activity {
         ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE))
                 .hideSoftInputFromWindow(input.getWindowToken(), 0);
         input.clearFocus();
-        new AlertDialog.Builder(this).setTitle("メニュー")
-                .setItems(new String[]{"会話", "一覧・コピー", "記憶", "会話を固定", "接続状態"}, (dialog, which) -> {
-                    if (which == 0) { surface.renderBurst(); return; }
-                    if (which == 1 || which == 2) showTranscript(which == 2);
-                    else if (which == 4) {
-                        new AlertDialog.Builder(this).setTitle("接続状態")
-                                .setMessage("AIはまだ接続されていません。現在は会話の全文を端末に保存します。記憶の自動整理は未実装です。")
-                                .setPositiveButton("閉じる", null).show();
-                    }
-                    else {
-                        String[] messages = nativeMessageTexts();
-                        if (messages.length == 0) { showError("まだ会話がありません。"); return; }
-                        new AlertDialog.Builder(this).setTitle("固定する会話を選ぶ")
-                                .setItems(messages, (selection, index) -> {
-                                    String error = nativeRemember(index);
-                                    if (!error.isEmpty()) showError(error);
-                                    else {
-                                        input.announceForAccessibility("会話を固定しました");
-                                        surface.renderBurst();
-                                    }
-                                }).setNegativeButton("閉じる", null).show();
-                    }
+        Dialog sheet = newSheet();
+        LinearLayout body = sheetBody(sheet, "メニュー");
+        String[] labels = {"会話", "一覧とコピー", "記憶", "会話を固定", "表示設定", "接続状態"};
+        for (int i = 0; i < labels.length; ++i) {
+            final int action = i;
+            menuRow(body, labels[i], i, () -> {
+                sheet.dismiss();
+                if (action == 0) surface.renderBurst();
+                else if (action == 1 || action == 2) showTranscript(action == 2);
+                else if (action == 3) showPinSelection();
+                else if (action == 4) showDisplaySettings();
+                else new AlertDialog.Builder(this).setTitle("接続状態")
+                        .setMessage("AIはまだ接続されていません。会話の全文は端末に保存されます。記憶の自動整理は未実装です。")
+                        .setPositiveButton("閉じる", null).show();
+            });
+        }
+        showSheet(sheet);
+    }
+
+    private void showPinSelection() {
+        String[] messages = nativeMessageTexts();
+        if (messages.length == 0) { showError("まだ会話がありません。"); return; }
+        new AlertDialog.Builder(this).setTitle("固定する会話を選ぶ")
+                .setItems(messages, (selection, index) -> {
+                    String error = nativeRemember(index);
+                    if (!error.isEmpty()) showError(error);
+                    else { input.announceForAccessibility("会話を固定しました"); surface.renderBurst(); }
                 }).setNegativeButton("閉じる", null).show();
+    }
+
+    private Dialog newSheet() {
+        Dialog dialog = new Dialog(this, android.R.style.Theme_Material_NoActionBar);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        dialog.setCanceledOnTouchOutside(true);
+        return dialog;
+    }
+
+    private LinearLayout sheetBody(Dialog dialog, String title) {
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(16), dp(12), dp(16), dp(20));
+        GradientDrawable background = roundBackground(Color.rgb(28, 34, 41), 0);
+        float radius = dp(28);
+        background.setCornerRadii(new float[]{radius, radius, radius, radius, 0, 0, 0, 0});
+        body.setBackground(background);
+        body.setOnApplyWindowInsetsListener((view, insets) -> {
+            int bottom = Build.VERSION.SDK_INT >= 30
+                    ? insets.getInsets(WindowInsets.Type.navigationBars()).bottom
+                    : insets.getSystemWindowInsetBottom();
+            view.setPadding(dp(16), dp(12), dp(16), dp(20) + bottom);
+            return insets;
+        });
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        TextView heading = sheetText(title, 21);
+        heading.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        heading.setPadding(dp(12), dp(8), dp(8), dp(8));
+        header.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+        ImageButton close = new ImageButton(this);
+        close.setImageDrawable(new MenuIcon(6));
+        close.setContentDescription("閉じる");
+        close.setBackgroundColor(Color.TRANSPARENT);
+        close.setPadding(dp(14), dp(14), dp(14), dp(14));
+        close.setOnClickListener(view -> dialog.dismiss());
+        header.addView(close, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        body.addView(header);
+        ScrollView scroll = new ScrollView(this) {
+            @Override protected void onMeasure(int width, int height) {
+                int limit = Math.round(getResources().getDisplayMetrics().heightPixels * 0.85f);
+                super.onMeasure(width, View.MeasureSpec.makeMeasureSpec(limit, View.MeasureSpec.AT_MOST));
+            }
+        };
+        scroll.setFillViewport(false);
+        scroll.addView(body);
+        FrameLayout backdrop = new FrameLayout(this);
+        backdrop.setOnClickListener(view -> dialog.dismiss());
+        scroll.setClickable(true);
+        backdrop.addView(scroll, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
+        dialog.setContentView(backdrop);
+        return body;
+    }
+
+    private void showSheet(Dialog dialog) {
+        Window window = dialog.getWindow();
+        window.setBackgroundDrawableResource(android.R.color.transparent);
+        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        window.setDimAmount(0.55f);
+        window.setGravity(Gravity.BOTTOM);
+        window.setWindowAnimations(android.R.style.Animation_InputMethod);
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+        if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false);
+        else window.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+        window.setNavigationBarColor(Color.TRANSPARENT);
+        window.setNavigationBarContrastEnforced(false);
+        dialog.show();
+        window.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
+        window.getDecorView().requestApplyInsets();
+    }
+
+    private TextView sheetText(String value, float size) {
+        TextView text = new TextView(this);
+        text.setText(value);
+        text.setTextSize(size);
+        text.setTextColor(Color.rgb(230, 238, 242));
+        return text;
+    }
+
+    private void menuRow(LinearLayout body, String title, int icon, Runnable action) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(6), dp(12), dp(6));
+        row.setMinimumHeight(dp(56));
+        android.util.TypedValue ripple = new android.util.TypedValue();
+        getTheme().resolveAttribute(android.R.attr.selectableItemBackground, ripple, true);
+        row.setBackgroundResource(ripple.resourceId);
+        row.setFocusable(true);
+        row.setOnClickListener(view -> action.run());
+        row.setContentDescription(title);
+        ImageView image = new ImageView(this);
+        image.setImageDrawable(new MenuIcon(icon));
+        image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        row.addView(image, new LinearLayout.LayoutParams(dp(24), dp(24)));
+        TextView label = sheetText(title, Math.max(18, textSize - 2));
+        label.setPadding(dp(20), dp(8), 0, dp(8));
+        label.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        row.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
+        body.addView(row, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    private void applyTypography() {
+        input.setTextSize(textSize);
+        nativeSetTypography(input.getTextSize(), messageGap);
+        if (surface != null) surface.renderBurst();
+    }
+
+    private void saveDisplaySettings() {
+        getPreferences(MODE_PRIVATE).edit().putInt("text_size", textSize).putInt("message_gap", messageGap).apply();
+    }
+
+    private void showDisplaySettings() {
+        Dialog dialog = newSheet();
+        LinearLayout body = sheetBody(dialog, "表示設定");
+        TextView preview = sheetText("こんにちは。\n今日の続きから話そう。", textSize);
+        preview.setPadding(dp(16), dp(16), dp(16), dp(16));
+        preview.setBackground(roundBackground(Color.rgb(39, 49, 57), 16));
+        LinearLayout.LayoutParams previewLayout = new LinearLayout.LayoutParams(-1, -2);
+        previewLayout.setMargins(dp(12), dp(12), dp(12), dp(20));
+        body.addView(preview, previewLayout);
+        SeekBar font = settingSlider(body, "文字サイズ", 16, 28, textSize, value -> {
+            textSize = value;
+            preview.setTextSize(value);
+            applyTypography();
+        });
+        SeekBar gap = settingSlider(body, "メッセージの間隔", 8, 24, messageGap, value -> {
+            messageGap = value;
+            applyTypography();
+        });
+        menuRow(body, "標準に戻す", 4, () -> { font.setProgress(4); gap.setProgress(4); });
+        dialog.setOnDismissListener(ignored -> saveDisplaySettings());
+        showSheet(dialog);
+    }
+
+    private SeekBar settingSlider(LinearLayout body, String title, int min, int max, int value,
+                                  java.util.function.IntConsumer onChange) {
+        TextView label = sheetText(title + "  " + value, 17);
+        label.setPadding(dp(12), dp(10), dp(12), dp(4));
+        body.addView(label);
+        SeekBar slider = new SeekBar(this);
+        slider.setMax(max - min);
+        slider.setProgress(value - min);
+        slider.setContentDescription(title);
+        slider.setPadding(dp(12), dp(12), dp(12), dp(12));
+        slider.setMinimumHeight(dp(48));
+        slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar bar, int progress, boolean user) {
+                label.setText(title + "  " + (min + progress));
+                onChange.accept(min + progress);
+            }
+            @Override public void onStartTrackingTouch(SeekBar bar) {}
+            @Override public void onStopTrackingTouch(SeekBar bar) { saveDisplaySettings(); }
+        });
+        body.addView(slider, new LinearLayout.LayoutParams(-1, dp(48)));
+        return slider;
     }
 
     private void showTranscript(boolean memories) {
         String transcript = nativeTranscript(memories);
         TextView text = new TextView(this);
         text.setText(transcript.isEmpty() ? "まだ記録がありません。" : transcript);
-        text.setTextSize(17);
+        text.setTextSize(textSize);
         text.setTextIsSelectable(true);
         text.setPadding(dp(20), dp(16), dp(20), dp(16));
         ScrollView scroll = new ScrollView(this);
@@ -277,7 +453,51 @@ public final class MainActivity extends Activity {
         @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
     }
 
+    private static final class MenuIcon extends Drawable {
+        private final int kind;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        MenuIcon(int kind) { this.kind = kind; }
+        @Override public void draw(Canvas canvas) {
+            canvas.save();
+            canvas.translate(getBounds().left, getBounds().top);
+            canvas.scale(getBounds().width() / 24f, getBounds().height() / 24f);
+            paint.setColor(Color.rgb(166, 196, 188));
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(1.65f);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeJoin(Paint.Join.ROUND);
+            if (kind == 0) {
+                Path p = new Path(); p.moveTo(5, 4); p.lineTo(19, 4); p.lineTo(21, 6);
+                p.lineTo(21, 15); p.lineTo(19, 17); p.lineTo(9, 17); p.lineTo(4, 21);
+                p.lineTo(4, 6); p.close(); canvas.drawPath(p, paint);
+            } else if (kind == 1) {
+                canvas.drawRoundRect(5, 3, 19, 21, 2, 2, paint);
+                for (int y = 8; y <= 16; y += 4) canvas.drawLine(9, y, 15, y, paint);
+            } else if (kind == 2 || kind == 3) {
+                Path p = new Path(); p.moveTo(6, 3); p.lineTo(18, 3); p.lineTo(18, 21);
+                p.lineTo(12, 17); p.lineTo(6, 21); p.close(); canvas.drawPath(p, paint);
+                if (kind == 3) { canvas.drawLine(9, 9, 15, 9, paint); canvas.drawLine(12, 6, 12, 12, paint); }
+            } else if (kind == 4) {
+                for (int i = 0; i < 3; ++i) {
+                    int y = 6 + i * 6, x = i == 1 ? 15 : 9;
+                    canvas.drawLine(4, y, x - 2, y, paint); canvas.drawLine(x + 2, y, 20, y, paint);
+                    canvas.drawCircle(x, y, 2, paint);
+                }
+            } else if (kind == 5) {
+                canvas.drawCircle(12, 12, 8, paint);
+                canvas.drawLine(12, 11, 12, 16, paint); canvas.drawPoint(12, 7.5f, paint);
+            } else {
+                canvas.drawLine(6, 6, 18, 18, paint); canvas.drawLine(18, 6, 6, 18, paint);
+            }
+            canvas.restore();
+        }
+        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
+        @Override public void setColorFilter(ColorFilter filter) { paint.setColorFilter(filter); }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+    }
+
     @Override public void onPause() {
+        if (input != null) saveDisplaySettings();
         if (input != null) getPreferences(MODE_PRIVATE).edit()
                 .putString("draft", input.getText().toString()).commit();
         if (surface != null) {

@@ -90,6 +90,8 @@ int main() {
         apply_style();
         apply_style();
         assert(ImGui::GetStyle().WindowPadding.x == 48);
+        assert(ImGui::GetStyle().FontSizeBase == (generation == 0 ? 60 : 72));
+        assert(message_gap_dp == (generation == 0 ? 12 : 20));
         ImFontBaked* baked = font->GetFontBaked(51);
         assert(baked->FindGlyphNoFallback(0x3042));
         assert(baked->FindGlyphNoFallback(0x1f600));
@@ -121,6 +123,13 @@ int main() {
             assert(texture_requests > old_requests);
         }
         assert(messages.size() == 31);
+        set_typography(72, 20);
+        assert(ImGui::GetStyle().FontSizeBase == 72 && message_gap_dp == 20);
+        set_typography(NAN, NAN);
+        assert(ImGui::GetStyle().FontSizeBase == 72 && message_gap_dp == 20);
+        set_typography(72, 100);
+        assert(message_gap_dp == 24);
+        set_typography(72, 20);
         for (ImTextureData* texture : ImGui::GetPlatformIO().Textures) {
             texture->SetTexID(ImTextureID_Invalid);
             texture->SetStatus(ImTextureStatus_Destroyed);

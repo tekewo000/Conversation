@@ -33,6 +33,8 @@ bool scroll_to_bottom = true;
 int width = 1;
 int height = 1;
 float density = 1.0f;
+float typography_pixels = 0.0f;
+float message_gap_dp = 12.0f;
 float pending_scroll = 0.0f;
 ImVec2 list_min;
 ImVec2 list_max;
@@ -125,7 +127,7 @@ void apply_style() {
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowPadding = ImVec2(16, 16);
     style.FramePadding = ImVec2(12, 10);
-    style.ItemSpacing = ImVec2(10, 12);
+    style.ItemSpacing = ImVec2(10, 0);
     style.ChildRounding = 0;
     style.FrameRounding = 8;
     style.ScrollbarSize = 12;
@@ -139,7 +141,13 @@ void apply_style() {
     style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.22f, 0.29f, 0.32f, 1);
     style.Colors[ImGuiCol_ButtonActive] = ImVec4(0.25f, 0.36f, 0.34f, 1);
     style.ScaleAllSizes(density);
-    style.FontSizeBase = 17.0f * density;
+    style.FontSizeBase = typography_pixels > 0 ? typography_pixels : 20.0f * density;
+}
+
+void set_typography(float pixels, float gap_dp) {
+    if (std::isfinite(pixels) && pixels >= 8 && pixels <= 320) typography_pixels = pixels;
+    if (std::isfinite(gap_dp)) message_gap_dp = std::clamp(gap_dp, 8.0f, 24.0f);
+    if (context) { ImGui::SetCurrentContext(context); apply_style(); }
 }
 
 #ifndef CONVERSATION_UI_TEST
@@ -187,8 +195,7 @@ void draw_ui() {
         draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
                       ImVec2(origin.x + padding, origin.y + 10 * d),
                       ImGui::GetColorU32(ImGuiCol_Text), text, nullptr, wrap);
-        ImGui::Dummy(ImVec2(available, bubble_height));
-        ImGui::Spacing();
+        ImGui::Dummy(ImVec2(available, bubble_height + message_gap_dp * d));
     }
     if (scroll_to_bottom) {
         ImGui::SetScrollHereY(1);
@@ -291,6 +298,12 @@ Java_jp_tekewo_conversation_MainActivity_nativeResize(JNIEnv*, jclass, jint new_
     height = std::max(1, static_cast<int>(new_height));
     density = std::isfinite(scale) && scale > 0 ? scale : 1.0f;
     if (context) { ImGui::SetCurrentContext(context); apply_style(); }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeSetTypography(JNIEnv*, jclass, jfloat pixels, jfloat gap_dp) {
+    std::lock_guard<std::mutex> lock(mutex);
+    set_typography(pixels, gap_dp);
 }
 
 extern "C" JNIEXPORT void JNICALL

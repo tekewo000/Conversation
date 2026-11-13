@@ -103,3 +103,27 @@
   were retained; no app storage was cleared.
 - Android briefly showed its package-update activity immediately after the
   incremental install; a subsequent launch/startup check completed successfully.
+
+## Menu sheet and typography settings
+
+- Replaced the plain list dialog with a dark, rounded bottom sheet using
+  consistent outline icons, touch-sized rows and a close control. The chat
+  remains free of permanent labels and settings.
+- Added Display Settings: text size16–28sp (default20, formerly17), message
+  gap8–24dp (default12), live preview and reset. Preferences survive process
+  restarts. Input, transcript and native chat use the selected text size, with
+  Android's system text scaling included in the native font pixel size.
+- Native regression first failed for the previous17sp default, then passed for
+  default20, custom font72px/gap20, NaN rejection, range clamping and context
+  recreation. Existing Japanese/emoji, scroll and density checks passed.
+- Real Pixel10Pro test set the slider to22, closed settings, backgrounded and
+  stopped the app, restarted it, then verified the settings label restored22.
+  Reset verified stored defaults20/12. No conversation records were changed.
+- User noticed a black navigation-area strip below the sheet. Navigation color
+  alone did not fix a floating dialog's restricted bounds. The sheet now lives
+  in a full-window transparent backdrop, with its panel anchored at the bottom
+  and navigation insets padded inside the panel. Real-device capture confirmed
+  continuous background to the lower edge while retaining the system gesture
+  indicator. The display-settings sheet was left open at defaults20/12.
+- Final APK build, signature check and device startup check passed. Other
+  Android devices and navigation modes were not available for visual testing.
