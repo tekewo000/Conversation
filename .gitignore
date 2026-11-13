@@ -20,4 +20,5 @@ local.properties
 *.sqlite3-wal
 *.sqlite3-shm
 notebook.json
+/person.md
 test-results/
