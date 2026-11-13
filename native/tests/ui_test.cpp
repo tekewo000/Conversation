@@ -68,12 +68,13 @@ void check_pages_and_streaming() {
     assert(page_first == 19920 && page_count == 80);
     assert(message_positions.size() == 80 && cache_first == page_first);
     ImGuiWindow* child = chat_window();
+    assert(child->ScrollMax.y > 0 && !child->ScrollbarX && !child->ScrollbarY);
     assert(child->Scroll.y >= child->ScrollMax.y - 1);
     // Both roles are real messages with distinct left/right bubble placement.
     float assistant_left = width, user_left = width;
     for (const ImDrawVert& vertex : child->DrawList->VtxBuffer) {
-        if (vertex.col == IM_COL32(30, 37, 44, 255)) assistant_left = std::min(assistant_left, vertex.pos.x);
-        if (vertex.col == IM_COL32(39, 49, 57, 255)) user_left = std::min(user_left, vertex.pos.x);
+        if (vertex.col == IM_COL32(246, 222, 231, 255)) assistant_left = std::min(assistant_left, vertex.pos.x);
+        if (vertex.col == IM_COL32(222, 240, 223, 255)) user_left = std::min(user_left, vertex.pos.x);
     }
     assert(assistant_left < width / 3 && user_left > assistant_left + 20);
     set_streaming("応答を表示中 😀");

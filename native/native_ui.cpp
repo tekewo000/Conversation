@@ -289,7 +289,7 @@ void draw_ui() {
     ImGui::SetNextWindowSize(ImVec2(static_cast<float>(width), static_cast<float>(height)));
     ImGui::Begin("Conversation", nullptr, ImGuiWindowFlags_NoDecoration |
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-    ImGui::BeginChild("chat", ImVec2(0, 0), ImGuiChildFlags_None);
+    ImGui::BeginChild("chat", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
     if (ImGui::IsWindowAppearing()) {
         if (following_bottom) scroll_to_bottom = true;
         else if (anchor_index < 0) {
@@ -355,10 +355,10 @@ void draw_ui() {
         }
         ImDrawList* draw = ImGui::GetWindowDrawList();
         draw->AddRectFilled(origin, ImVec2(origin.x + bubble_width, origin.y + bubble_height),
-                            user ? IM_COL32(39, 49, 57, 255) : IM_COL32(30, 37, 44, 255), 16 * d);
+                            user ? IM_COL32(222, 240, 223, 255) : IM_COL32(246, 222, 231, 255), 16 * d);
         draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
                       ImVec2(origin.x + padding, origin.y + 10 * d),
-                      ImGui::GetColorU32(ImGuiCol_Text), text, nullptr, wrap);
+                      IM_COL32(32, 38, 42, 255), text, nullptr, wrap);
         ImGui::Dummy(ImVec2(available, bubble_height + message_gap_dp * d));
     }
     if (scroll_to_bottom) {

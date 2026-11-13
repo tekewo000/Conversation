@@ -188,6 +188,8 @@ public final class MainActivity extends Activity {
         input.setTextSize(textSize);
         input.setMinLines(1);
         input.setMaxLines(5);
+        input.setVerticalScrollBarEnabled(false);
+        input.setHorizontalScrollBarEnabled(false);
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
                 | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         input.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI);
@@ -514,6 +516,8 @@ public final class MainActivity extends Activity {
 
     private EditText sheetInput(String hint, boolean secret) {
         EditText edit = new EditText(this);
+        edit.setVerticalScrollBarEnabled(false);
+        edit.setHorizontalScrollBarEnabled(false);
         edit.setHint(hint); edit.setContentDescription(hint); edit.setTextColor(Color.rgb(230, 238, 242));
         edit.setHintTextColor(Color.rgb(156, 171, 181)); edit.setTextSize(17);
         edit.setSingleLine(true); edit.setSaveEnabled(false);
@@ -534,7 +538,10 @@ public final class MainActivity extends Activity {
         EditText token = sheetInput("この人物用のGitHubトークン", true);
         body.addView(repository); body.addView(token);
         body.addView(sheetText("Fine-grained token: このリポジトリの Contents を Read and write に設定。", 15));
-        ScrollView scroll = new ScrollView(this); scroll.addView(body);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.setHorizontalScrollBarEnabled(false);
+        scroll.addView(body);
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle(document.name).setView(scroll)
                 .setPositiveButton("読み込んで作成", null).setNegativeButton("キャンセル", null).create();
         dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
@@ -786,6 +793,8 @@ public final class MainActivity extends Activity {
             }
         };
         scroll.setFillViewport(false);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.setHorizontalScrollBarEnabled(false);
         scroll.addView(body);
         FrameLayout backdrop = new FrameLayout(this);
         backdrop.setOnClickListener(view -> dialog.dismiss());
@@ -904,6 +913,8 @@ public final class MainActivity extends Activity {
         text.setTextIsSelectable(true);
         text.setPadding(dp(20), dp(16), dp(20), dp(16));
         ScrollView scroll = new ScrollView(this);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.setHorizontalScrollBarEnabled(false);
         scroll.addView(text);
         new AlertDialog.Builder(this).setTitle("最近の会話")
                 .setView(scroll).setPositiveButton("閉じる", null).show();
