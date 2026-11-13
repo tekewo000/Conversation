@@ -4,7 +4,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 $configPath = Join-Path $repo '.tools/android-toolchain.json'
 if (-not (Test-Path -LiteralPath $configPath)) { throw 'Run scripts/build-android.ps1 first.' }
 $tools = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-$apk = Join-Path $repo 'dist/Conversation-0.2.0-arm64-debug.apk'
+$apk = Join-Path $repo 'dist/Conversation-0.3.0-arm64-debug.apk'
 if (-not (Test-Path -LiteralPath $apk)) { throw "APK missing: $apk. Run scripts/build-android.ps1 first." }
 $deviceArgs = @()
 if ($Serial) { $deviceArgs = @('-s', $Serial) }

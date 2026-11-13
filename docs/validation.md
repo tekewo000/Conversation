@@ -185,10 +185,59 @@
 
 ### Remaining boundaries
 
-Embedding search, graph reasoning, automatic private GitHub sync and in-app
-archive restore are not part of this minimal implementation. Short queries use
+Embedding search, graph reasoning and in-app archive restore are not part of
+this minimal implementation. Private GitHub backup was added in0.3.0 below. Short queries use
 indexed identity matches and a bounded recent fallback. Long extraction inputs
 can be marked partial; original content remains stored and searchable. Dedicated
 persona training was not performed. Japanese emotional/relational consistency,
 over-personalization, forced power-loss behavior, other phones, real token expiry
 rotation and long-running companion quality need further evaluation.
+
+## 2026-11-14: Person import and one repository per person
+
+- Added strict UTF-8 `conversation-person-v1` Markdown import, UUID-isolated
+  storage and an atomic person registry. Legacy history remains at its original
+  path. Repository canonical names and numeric IDs are unique, immutable bindings.
+- Profile instructions are present on every reply. Imported memories carry
+  document provenance; no synthetic historical messages are created. New explicit
+  conversation can supersede old profile facts without losing the source file.
+- SQLite v1 migrates to v2 with profile/document tables and a cursor journal.
+  Archive batches are bounded and transaction-complete; replay preserves sources,
+  updates and extraction checkpoints. Full snapshots include the new tables.
+-19 Odin tests and the cross-process C ABI roundtrip passed. Checks include a real
+  v1 schema,20k records,4096-event replay, long legacy pins, source SHA256 vectors,
+  failed import rollback and parsed snapshot metadata. Native tests passed with
+  safe switch rollback/reset and the existing bounded chat rendering checks.
+- All seven JVM suites passed:44 connection checks plus ChatSession, ZIP backup,
+  Markdown parser, registry, archive files and mocked GitHub transport. Git checks
+  cover private-only targets, foreign owners, repository replacement, HEAD
+  conflict, interrupted commits and longer-prefix recovery. An anonymous public
+  metadata request was rejected without any GitHub write.
+- Independent review corrected Activity-destruction races, abandoned sync locks,
+  credentials shared across people, long-pin replay and repeated JSON parsing.
+  Startup, switch and import now serialize native/registry ownership; destroyed
+  Activities cannot continue chat persistence or commit an imported person.
+- Real Android instrumentation found generic Odin hash dispatch asserting in an
+  ARM64 object build. Direct SHA256 state replaces that reflected initialization.
+  The failure occurred only in a fresh synthetic probe directory; the existing
+  person's registry/history were not used by the probe.
+- Real instrumentation also caught `mkdir_all` requiring read access to Android's
+  restricted `/data` ancestors. Initialization/export now create the target
+  directly and recurse only when a parent is missing. Desktop checks cover nested
+  Unicode paths, repeated export and preserving a blocking regular file.
+- Final Pixel10Pro instrumentation passed actual per-person Keystore encryption,
+  ciphertext isolation, separate clears, absent-directory initialization, JNI
+  import/source provenance, A/B conversation isolation, failed-switch recovery,
+  stable archive cursors and Unicode ZIP export. It used synthetic UUIDs only;
+  all probe files/keys and its separate signed test APK were removed afterward.
+- The existing phone database upgraded from v1 to v2. All10 messages,3 memories
+  and3 source rows matched the pre-upgrade content hashes exactly; integrity and
+  foreign-key checks passed. The original history was not assigned a fabricated
+  person. Final app cold-start smoke check passed.
+- Final0.3.0 APK SHA256:
+  `72e150a76a9844f8d2ce7c81515f34c4e924bd2e4cadcc7a126124d79d016d66`.
+
+Actual private-repository writes still require the user's repository and token.
+Fixture success does not prove live GitHub permissions or long-term AI quality.
+GitHub download/restore UI, multi-device merging and scheduled transfers while
+the app is closed are not implemented.

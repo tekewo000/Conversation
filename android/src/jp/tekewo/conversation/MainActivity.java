@@ -40,12 +40,17 @@ import android.widget.TextView;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.Set;
+import java.util.HashSet;
 import org.json.JSONObject;
 import org.json.JSONArray;
 
@@ -70,19 +75,32 @@ public final class MainActivity extends Activity {
     private static native void nativeSetStreaming(byte[] text);
     private static native String nativeRecentTranscript();
     private static native void nativePause();
+    private static native String nativeSwitchPerson(byte[] directory, byte[] payload);
+    private static native String nativeArchiveDelta(long cursor);
 
     private ChatSurface surface;
     private EditText input;
     private ImageButton send;
     private ChatGptConnection connection;
     private ChatSession session;
+    private PersonRegistry people;
+    private PersonRegistry.Person activePerson;
+    private File pendingExportDirectory;
+    private String gitStatus = "";
+    private final android.os.Handler syncTimer = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable autoSync = () -> queueGitSync(false);
+    private static final ExecutorService gitWorker = Executors.newSingleThreadExecutor();
+    private static final Set<String> syncingPeople = new HashSet<>();
+    private static final Object storeGate = new Object();
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private volatile boolean closed;
     private boolean busy;
+    private volatile boolean changingPerson;
     private String connectionStatus = "";
     private volatile List<ChatGptConnection.Model> availableModels;
     private static byte[] bytes(String value) { return value.getBytes(StandardCharsets.UTF_8); }
     private void ui(Runnable action) {
-        runOnUiThread(() -> { if (!isDestroyed() && !isFinishing()) action.run(); });
+        runOnUiThread(() -> { if (!closed && !isDestroyed() && !isFinishing()) action.run(); });
     }
     private boolean ready;
     private int textSize = 20;
@@ -130,9 +148,14 @@ public final class MainActivity extends Activity {
 
         try {
             System.loadLibrary("conversation");
-            String error = nativeInit(getFilesDir().getAbsolutePath().getBytes(StandardCharsets.UTF_8),
-                    asset("NotoSansJP-Regular.ttf"), asset("NotoEmoji-Regular.ttf"));
-            ready = error.isEmpty();
+            String error;
+            synchronized (storeGate) {
+                people = new PersonRegistry(getFilesDir());
+                activePerson = people.active();
+                error = nativeInit(bytes(activePerson.directory.getAbsolutePath()),
+                        asset("NotoSansJP-Regular.ttf"), asset("NotoEmoji-Regular.ttf"));
+                ready = error.isEmpty();
+            }
             if (!ready) showError(error);
         } catch (Exception | UnsatisfiedLinkError error) {
             TextView failure = new TextView(this);
@@ -179,22 +202,54 @@ public final class MainActivity extends Activity {
         composer.addView(send, sendLayout);
         root.addView(composer);
 
-        input.setText(getPreferences(MODE_PRIVATE).getString("draft", ""));
+        input.setText(getPreferences(MODE_PRIVATE).getString(draftKey(), ""));
         applyTypography();
         connection = new ChatGptConnection(this);
         session = new ChatSession(new ChatSession.Store() {
             public long add(String role, String text) throws Exception {
-                long id = nativeAddMessage(bytes(role), bytes(text));
-                if (id <= 0) throw new java.io.IOException(nativeLastError());
-                return id;
+                synchronized (storeGate) {
+                    requireCurrentPerson();
+                    long id = nativeAddMessage(bytes(role), bytes(text));
+                    if (id <= 0) throw new java.io.IOException(nativeLastError());
+                    return id;
+                }
             }
-            public JSONObject context(String query) throws Exception { return new JSONObject(nativeContext(bytes(query))); }
-            public JSONObject pending() throws Exception { return new JSONObject(nativePendingJob()); }
+            public JSONObject context(String query) throws Exception {
+                synchronized (storeGate) { requireCurrentPerson(); return new JSONObject(nativeContext(bytes(query))); }
+            }
+            public JSONObject pending() throws Exception {
+                synchronized (storeGate) { requireCurrentPerson(); return new JSONObject(nativePendingJob()); }
+            }
             public void apply(long id, String payload) throws Exception {
-                String error = nativeApplyJob(id, bytes(payload));
-                if (!error.isEmpty()) throw new java.io.IOException(error);
+                synchronized (storeGate) {
+                    requireCurrentPerson();
+                    String error = nativeApplyJob(id, bytes(payload));
+                    if (!error.isEmpty()) throw new java.io.IOException(error);
+                }
             }
         });
+        scheduleGitSync();
+    }
+
+    private void requireOpen() throws java.io.IOException {
+        if (closed || isDestroyed() || isFinishing() || Thread.currentThread().isInterrupted())
+            throw new java.io.IOException("処理をキャンセルしました。");
+    }
+    private void requireCurrentPerson() throws java.io.IOException {
+        requireOpen();
+        if (changingPerson) throw new java.io.IOException("人物を切り替えています。");
+    }
+    private void setStreaming(String text) {
+        synchronized (storeGate) {
+            if (!closed && !changingPerson && !isFinishing() && !Thread.currentThread().isInterrupted())
+                nativeSetStreaming(bytes(text));
+        }
+    }
+
+    private String draftKey() { return activePerson.id.equals(PersonRegistry.LEGACY_ID) ? "draft" : "draft_" + activePerson.id; }
+    private void saveDraft() {
+        if (input != null && activePerson != null) getPreferences(MODE_PRIVATE).edit()
+                .putString(draftKey(), input.getText().toString()).commit();
     }
 
     private byte[] asset(String name) throws Exception {
@@ -252,18 +307,18 @@ public final class MainActivity extends Activity {
                             if (input.getText().toString().equals(text)) {
                                 BaseInputConnection.removeComposingSpans(input.getText());
                                 input.setText("");
-                                getPreferences(MODE_PRIVATE).edit().remove("draft").apply();
+                                getPreferences(MODE_PRIVATE).edit().remove(draftKey()).apply();
                             }
                             surface.renderBurst();
                         });
                     }
                     public void streaming(String full) {
-                        nativeSetStreaming(bytes(full));
+                        setStreaming(full);
                         long now = android.os.SystemClock.uptimeMillis();
                         if (now - lastRender > 45) { lastRender = now; ui(() -> surface.requestRender()); }
                     }
                     public void replySaved() {
-                        nativeSetStreaming(bytes(""));
+                        setStreaming("");
                         ui(() -> { surface.renderBurst(); connectionStatus = "記憶を整理しています"; });
                     }
                     public void memoryStatus(String error) {
@@ -271,7 +326,7 @@ public final class MainActivity extends Activity {
                     }
                 });
             } catch (Exception error) {
-                nativeSetStreaming(bytes(""));
+                setStreaming("");
                 if (session.isCancelled()) {
                     ui(() -> { connectionStatus = "応答を停止しました"; surface.renderBurst(); });
                     return;
@@ -288,7 +343,7 @@ public final class MainActivity extends Activity {
                     else dialog.setPositiveButton("再試行", (view, which) -> runReply(text, !saved.get()));
                     dialog.setNegativeButton("閉じる", null).show();
                 });
-            } finally { ui(() -> setBusy(false)); }
+            } finally { ui(() -> { setBusy(false); scheduleGitSync(); }); }
         });
     }
 
@@ -309,21 +364,21 @@ public final class MainActivity extends Activity {
         input.clearFocus();
         Dialog sheet = newSheet();
         LinearLayout body = sheetBody(sheet, "メニュー");
-        String[] labels = busy ? new String[]{"会話", "記憶", "表示設定", "ChatGPT", "バックアップ", "応答を停止"}
-                : new String[]{"会話", "記憶", "表示設定", "ChatGPT", "バックアップ"};
+        String[] labels = busy ? new String[]{"会話", "人物", "表示設定", "ChatGPT", "Gitバックアップ", "応答を停止"}
+                : new String[]{"会話", "人物", "表示設定", "ChatGPT", "Gitバックアップ"};
         int[] icons = {0, 2, 4, 5, 1, 6};
         for (int i = 0; i < labels.length; ++i) {
             final int action = i;
             menuRow(body, labels[i], icons[i], () -> {
                 sheet.dismiss();
                 if (action == 0) surface.renderBurst();
-                else if (action == 1) showMemories();
+                else if (action == 1) showPeople();
                 else if (action == 2) showDisplaySettings();
                 else if (action == 3) showConnection();
-                else if (action == 4) exportArchive();
+                else if (action == 4) showGitBackup();
                 else {
                     session.cancel(); connection.cancel();
-                    nativeSetStreaming(bytes("")); surface.renderBurst();
+                    setStreaming(""); surface.renderBurst();
                 }
             });
         }
@@ -408,54 +463,235 @@ public final class MainActivity extends Activity {
                 session.processMemories((instructions, turns, delta) -> connection.request(model, instructions, turns, delta));
                 ui(() -> connectionStatus = "記憶の整理を進めました");
             } catch (Exception error) { ui(() -> connectionStatus = "記憶の整理は再試行待ちです。" + safeError(error)); }
-            finally { ui(() -> setBusy(false)); }
+            finally { ui(() -> { setBusy(false); scheduleGitSync(); }); }
         });
     }
 
-    private void showMemories() {
+    private void showPeople() {
+        Dialog dialog = newSheet();
+        LinearLayout body = sheetBody(dialog, "人物");
+        for (PersonRegistry.Person person : people.list()) {
+            menuRow(body, person.name + (person.id.equals(activePerson.id) ? "  ✓" : ""), 5, () -> {
+                if (busy) { showError("応答と記憶の整理が終わってから人物を切り替えてください。"); return; }
+                dialog.dismiss(); switchPerson(person);
+            });
+        }
+        menuRow(body, "人物ファイルを読み込む", 1, () -> {
+            if (busy) { showError("応答と記憶の整理が終わってから読み込んでください。"); return; }
+            dialog.dismiss();
+            startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*")
+                    .addCategory(Intent.CATEGORY_OPENABLE), 82);
+        });
+        showSheet(dialog);
+    }
+
+    private void switchPerson(PersonRegistry.Person person) {
+        if (person.id.equals(activePerson.id) || busy) return;
+        saveDraft(); setBusy(true); changingPerson = true;
+        syncTimer.removeCallbacks(autoSync);
         worker.execute(() -> {
             try {
-                JSONArray memories = new JSONObject(nativeMemories(bytes(""))).getJSONArray("memories");
-                ui(() -> {
-                    Dialog dialog = newSheet();
-                    LinearLayout body = sheetBody(dialog, "記憶");
-                    if (memories.length() == 0) {
-                        TextView empty = sheetText("会話から整理した記憶がここに表示されます。", 17);
-                        empty.setPadding(dp(12), dp(16), dp(12), dp(24)); body.addView(empty);
-                    }
-                    for (int i = 0; i < memories.length(); ++i) {
-                        JSONObject memory = memories.optJSONObject(i);
-                        if (memory == null) continue;
-                        String kind = memory.optString("kind");
-                        String label = kind.equals("interpretation") ? "解釈・推測" : kind.equals("promise") ? "約束"
-                                : kind.equals("event") ? "出来事" : "明示された情報";
-                        if (memory.optString("key").equals("legacy_pin")) label = "旧版から引き継いだ記録";
-                        if (!memory.optBoolean("current", true)) label += "（過去）";
-                        if (kind.equals("promise") && memory.optString("status").equals("fulfilled")) label = "完了した約束";
-                        if (kind.equals("promise") && memory.optString("status").equals("cancelled")) label = "取り消した約束";
-                        String scope = memory.optString("scope").equals("fiction") ? "創作"
-                                : memory.optString("scope").equals("real") ? "現実の話" : "共有した体験";
-                        TextView text = sheetText(label + "  ·  " + scope + "\n" + memory.optString("text"), textSize);
-                        text.setPadding(dp(12), dp(14), dp(12), dp(14));
-                        JSONArray sources = memory.optJSONArray("source_ids");
-                        if (sources != null && sources.length() > 0) {
-                            long source = sources.optLong(0);
-                            text.setContentDescription(text.getText() + "。タップして元の会話を表示");
-                            text.setOnClickListener(view -> { dialog.dismiss(); nativeJumpToMessage(source); surface.renderBurst(); });
-                        }
-                        body.addView(text);
-                    }
-                    showSheet(dialog);
-                });
-            } catch (Exception error) { ui(() -> showError("記憶を読み込めませんでした。")); }
+                synchronized (storeGate) {
+                    requireOpen();
+                    requireSuccess(nativeSwitchPerson(bytes(person.directory.getAbsolutePath()), bytes("")));
+                    try { people.activate(person.id); }
+                    catch (Exception error) { restorePerson(); throw error; }
+                }
+                ui(this::recreate);
+            } catch (Exception error) {
+                ui(() -> { changingPerson = false; setBusy(false); showError(safeError(error)); scheduleGitSync(); });
+            }
         });
+    }
+
+    private void restorePerson() throws Exception {
+        String error = nativeSwitchPerson(bytes(activePerson.directory.getAbsolutePath()), bytes(""));
+        if (!error.isEmpty()) { ready = false; throw new java.io.IOException("元の人物を開き直せませんでした。アプリを再起動してください。"); }
+    }
+    private static void requireSuccess(String error) throws java.io.IOException {
+        if (!error.isEmpty()) throw new java.io.IOException(error);
+    }
+
+    private EditText sheetInput(String hint, boolean secret) {
+        EditText edit = new EditText(this);
+        edit.setHint(hint); edit.setContentDescription(hint); edit.setTextColor(Color.rgb(230, 238, 242));
+        edit.setHintTextColor(Color.rgb(156, 171, 181)); edit.setTextSize(17);
+        edit.setSingleLine(true); edit.setSaveEnabled(false);
+        edit.setInputType(InputType.TYPE_CLASS_TEXT | (secret ? InputType.TYPE_TEXT_VARIATION_PASSWORD
+                : InputType.TYPE_TEXT_VARIATION_URI));
+        return edit;
+    }
+
+    private void previewPerson(PersonDocument document) {
+        if (busy) return;
+        LinearLayout body = new LinearLayout(this); body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(24), dp(8), dp(24), dp(8));
+        TextView preview = sheetText(document.profile.length() > 1600
+                ? document.profile.substring(0, 1600) + "…" : document.profile, 17);
+        body.addView(preview);
+        body.addView(sheetText("この人物専用の、空の非公開GitHubリポジトリを指定してください。", 16));
+        EditText repository = sheetInput("https://github.com/所有者/リポジトリ", false);
+        EditText token = sheetInput("この人物用のGitHubトークン", true);
+        body.addView(repository); body.addView(token);
+        body.addView(sheetText("Fine-grained token: このリポジトリの Contents を Read and write に設定。", 15));
+        ScrollView scroll = new ScrollView(this); scroll.addView(body);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle(document.name).setView(scroll)
+                .setPositiveButton("読み込んで作成", null).setNegativeButton("キャンセル", null).create();
+        dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+            String repo;
+            try { repo = PersonRegistry.normalizeRepository(repository.getText().toString()); }
+            catch (IllegalArgumentException error) { repository.setError(error.getMessage()); return; }
+            String suppliedToken = token.getText().toString().trim(); token.setText("");
+            dialog.dismiss(); createPerson(document, repo, suppliedToken);
+        }));
+        dialog.show();
+    }
+
+    private void createPerson(PersonDocument document, String repository, String suppliedToken) {
+        if (busy) return;
+        saveDraft(); setBusy(true); changingPerson = true;
+        syncTimer.removeCallbacks(autoSync);
+        worker.execute(() -> {
+            PersonRegistry.Person staged = null;
+            boolean committed = false;
+            boolean retainStaged = false;
+            try {
+                String token = suppliedToken;
+                if (token.isEmpty()) throw new java.io.IOException("GitHubトークンを入力してください。");
+                synchronized (storeGate) { requireOpen(); staged = people.stage(document, repository); }
+                GitHubBackup client = new GitHubBackup(new GitHubBackup.HttpTransport(token));
+                GitHubBackup.Repository remote = client.verifyIdentity(new GitHubBackup.PersonIdentity(staged.id), repository);
+                synchronized (storeGate) {
+                    requireOpen();
+                    people.bindRemoteId(staged.id, remote.repoId);
+                    new GitHubTokenStore(this, staged.id).set(token);
+                    requireSuccess(nativeSwitchPerson(bytes(staged.directory.getAbsolutePath()),
+                            bytes(document.importPayload(staged.id).toString())));
+                    try { people.commit(staged); committed = true; }
+                    catch (Exception error) {
+                        try { restorePerson(); }
+                        catch (Exception restore) { retainStaged = true; throw restore; }
+                        throw error;
+                    }
+                }
+                ui(this::recreate);
+            } catch (Exception error) {
+                try {
+                    if (staged != null && !committed && !retainStaged) {
+                        new GitHubTokenStore(this, staged.id).clear();
+                        people.discard(staged);
+                    }
+                } catch (Exception cleanup) { error = cleanup; }
+                final String detail = error instanceof IllegalArgumentException ? error.getMessage() : safeError(error);
+                ui(() -> { changingPerson = false; setBusy(false); showError(detail); scheduleGitSync(); });
+            }
+        });
+    }
+
+    private void showGitBackup() {
+        Dialog dialog = newSheet();
+        LinearLayout body = sheetBody(dialog, "Gitバックアップ");
+        TextView status = sheetText(activePerson.repository == null
+                ? "これまでの会話は、そのまま端末に残しています。人物ファイルを読み込むと、人物専用の保存先を設定できます。"
+                : activePerson.name + "\n" + activePerson.repository + "\n" + gitStatus
+                  + "\n会話の原文・人物ファイル・出来事と記憶の更新履歴を非公開リポジトリへ保存します。", 17);
+        status.setPadding(dp(12), dp(12), dp(12), dp(20)); body.addView(status);
+        if (activePerson.repository != null) {
+            menuRow(body, "今すぐ保存", 1, () -> { dialog.dismiss(); queueGitSync(true); });
+            menuRow(body, "GitHubトークンを設定", 4, () -> { dialog.dismiss(); editGitToken(); });
+        }
+        menuRow(body, "端末からZIPを書き出す", 1, () -> { dialog.dismiss(); exportArchive(); });
+        showSheet(dialog);
+    }
+
+    private void editGitToken() {
+        final GitHubTokenStore tokens = new GitHubTokenStore(this, activePerson.id);
+        EditText token = sheetInput("GitHubトークン", true);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("GitHubトークン")
+                .setMessage("Contents: Read and write を許可したトークンを端末内に暗号化して保存します。")
+                .setView(token).setPositiveButton("保存", (view, which) -> {
+                    String value = token.getText().toString().trim(); token.setText("");
+                    worker.execute(() -> {
+                        try { tokens.set(value); ui(() -> { gitStatus = "接続情報を保存しました"; queueGitSync(true); }); }
+                        catch (Exception error) { ui(() -> showError(safeError(error))); }
+                    });
+                }).setNeutralButton("接続情報を削除", (view, which) -> worker.execute(() -> {
+                    try { tokens.clear(); ui(() -> gitStatus = "自動保存は接続情報の設定待ちです"); }
+                    catch (Exception error) { ui(() -> showError(safeError(error))); }
+                })).setNegativeButton("キャンセル", null).create();
+        dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE); dialog.show();
+    }
+
+    private void scheduleGitSync() {
+        syncTimer.removeCallbacks(autoSync);
+        if (!closed && !changingPerson && activePerson.repository != null) syncTimer.postDelayed(autoSync, 120_000);
+    }
+
+    private void queueGitSync(boolean report) {
+        if (!ready || closed || changingPerson || activePerson.repository == null || isDestroyed()) return;
+        final PersonRegistry.Person person = activePerson;
+        gitStatus = "Gitに保存しています";
+        // Capture on the chat worker; network work must never read the subsequently active database.
+        worker.execute(() -> {
+            synchronized (syncingPeople) {
+                if (!syncingPeople.add(person.id)) {
+                    if (report) ui(() -> showError("この人物のGit保存を進めています。"));
+                    return;
+                }
+            }
+            try {
+                synchronized (storeGate) { requireCurrentPerson(); }
+                String token = new GitHubTokenStore(this, person.id).get();
+                if (token.isEmpty()) throw new java.io.IOException("GitHubトークンの設定待ちです。会話は端末に保存されています。");
+                File stateFile = new File(person.directory, ".git-sync.json");
+                if (stateFile.length() > 16384) throw new java.io.IOException("Git保存の状態ファイルが不正です。");
+                GitHubBackup.SyncState prior = stateFile.exists() ? GitHubBackup.SyncState.fromJson(new JSONObject(
+                        new String(Files.readAllBytes(stateFile.toPath()), StandardCharsets.UTF_8))) : GitHubBackup.SyncState.empty();
+                JSONObject delta;
+                synchronized (storeGate) { requireCurrentPerson(); delta = new JSONObject(nativeArchiveDelta(prior.cursor)); }
+                if (delta.has("error")) throw new java.io.IOException("保存する履歴を読み出せませんでした。");
+                gitWorker.execute(() -> {
+                    boolean more = false;
+                    try {
+                        GitHubBackup.SyncResult result = new GitHubBackup(new GitHubBackup.HttpTransport(token))
+                                .sync(new GitHubBackup.PersonIdentity(person.id), person.repository, person.rawMarkdown, delta, prior, person.remoteId);
+                        if (result.repoId != person.remoteId) throw new java.io.IOException("保存先のリポジトリIDが一致しません。");
+                        File pending = new File(person.directory, ".git-sync.pending");
+                        try (java.io.FileOutputStream stream = new java.io.FileOutputStream(pending)) {
+                            stream.write(bytes(result.toJson().toString())); stream.getFD().sync();
+                        }
+                        Files.move(pending.toPath(), stateFile.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                        more = delta.optBoolean("has_more") || result.cursor < delta.optLong("through_cursor");
+                        final boolean remaining = more;
+                        ui(() -> { gitStatus = remaining ? "続きの履歴を保存しています" : "Gitへの保存が完了しました";
+                            if (report && !remaining) showError("Gitへの保存が完了しました。"); });
+                    } catch (Exception error) { syncFailed(error, report); }
+                    finally {
+                        synchronized (syncingPeople) { syncingPeople.remove(person.id); }
+                        if (more) ui(() -> { if (activePerson.id.equals(person.id)) queueGitSync(report); });
+                    }
+                });
+            } catch (Exception error) {
+                synchronized (syncingPeople) { syncingPeople.remove(person.id); }
+                syncFailed(error, report);
+            }
+        });
+    }
+
+    private void syncFailed(Exception error, boolean report) {
+        String detail = safeError(error);
+        ui(() -> { gitStatus = detail + "\n会話は端末に保存されています。";
+            if (report) showError(gitStatus); scheduleGitSync(); });
     }
 
     private void exportArchive() {
+        final File exportDirectory = new File(activePerson.directory, "export");
         worker.execute(() -> {
             String error = nativeExport();
             ui(() -> {
                 if (!error.isEmpty()) { showError(error); return; }
+                pendingExportDirectory = exportDirectory;
                 Intent destination = new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/zip")
                         .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE, "Conversation-backup.zip");
                 startActivityForResult(destination, 81);
@@ -465,17 +701,42 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == 82 && result == RESULT_OK && data != null && data.getData() != null) {
+            final Uri source = data.getData();
+            worker.execute(() -> {
+                try (InputStream stream = getContentResolver().openInputStream(source);
+                     ByteArrayOutputStream buffer = new ByteArrayOutputStream()) {
+                    if (stream == null) throw new java.io.IOException("人物ファイルを開けませんでした。");
+                    byte[] chunk = new byte[8192]; int count;
+                    while ((count = stream.read(chunk)) != -1) {
+                        if (buffer.size() + count > PersonDocument.MAX_BYTES)
+                            throw new java.io.IOException("人物ファイルは512KiB以内にしてください。");
+                        buffer.write(chunk, 0, count);
+                    }
+                    PersonDocument document = PersonDocument.parse(buffer.toByteArray());
+                    ui(() -> previewPerson(document));
+                } catch (Exception error) {
+                    final String detail = error instanceof IllegalArgumentException ? error.getMessage() : safeError(error);
+                    ui(() -> showError(detail));
+                }
+            });
+            return;
+        }
         if (request != 81 || result != RESULT_OK || data == null || data.getData() == null) return;
         Uri destination = data.getData();
+        final File exportDirectory = pendingExportDirectory;
         worker.execute(() -> {
             try (java.io.OutputStream destinationStream = getContentResolver().openOutputStream(destination, "w")) {
                 if (destinationStream == null) throw new java.io.IOException("Backup destination unavailable");
-                BackupArchive.write(new java.io.File(getFilesDir(), "export"), destinationStream);
+                if (exportDirectory == null) throw new java.io.IOException("Backup person unavailable");
+                BackupArchive.write(exportDirectory, destinationStream);
             } catch (Exception error) { ui(() -> showError("バックアップを書き出せませんでした。保存先を確認してください。")); }
         });
     }
 
     @Override protected void onDestroy() {
+        synchronized (storeGate) { closed = true; }
+        syncTimer.removeCallbacks(autoSync);
         if (session != null) session.cancel();
         if (connection != null) connection.cancel();
         worker.shutdownNow();
@@ -747,8 +1008,8 @@ public final class MainActivity extends Activity {
     @Override public void onPause() {
         if (connection != null) connection.setForeground(false);
         if (input != null) saveDisplaySettings();
-        if (input != null) getPreferences(MODE_PRIVATE).edit()
-                .putString("draft", input.getText().toString()).commit();
+        saveDraft();
+        if (!busy && !changingPerson) queueGitSync(false);
         if (surface != null) {
             nativePause();
             surface.onPause();

@@ -11,13 +11,14 @@ public final class ChatSessionTest {
         final List<String> roles = new ArrayList<>();
         final List<String> texts = new ArrayList<>();
         boolean pending = true, reject;
+        JSONObject person;
         int applied;
         public long add(String role, String text) { roles.add(role); texts.add(text); return roles.size(); }
         public JSONObject context(String query) throws Exception {
             JSONArray turns = new JSONArray();
             for (int i = 0; i < roles.size(); ++i) turns.put(new JSONObject().put("id", i + 1)
                     .put("role", roles.get(i)).put("content", texts.get(i)).put("created_at", "2026-11-13T14:00:00Z"));
-            return new JSONObject().put("messages", turns).put("memories", new JSONArray());
+            return new JSONObject().put("messages", turns).put("memories", new JSONArray()).put("person", person);
         }
         public JSONObject pending() throws Exception {
             return pending ? new JSONObject().put("id", 1).put("messages", context("").getJSONArray("messages")) : new JSONObject();
@@ -109,6 +110,29 @@ public final class ChatSessionTest {
             assert input.getJSONObject(input.length() - 1).getString("content").startsWith("[発言の記録時刻:");
             return "全文に返答";
         }, new Listener());
+        String[] profiles = {"一人称は私。静かに短く話す。", "一人称は俺。快活に率直に話す。"};
+        for (int person = 0; person < profiles.length; ++person) {
+            final String profile = profiles[person], otherProfile = profiles[1 - person];
+            Store selected = new Store();
+            selected.person = new JSONObject().put("id", "person-" + person).put("name", "人物" + person).put("profile", profile);
+            new ChatSession(selected).reply("無関係な新しい話題", true, (instructions, input, delta) -> {
+                if (instructions.equals(ChatSession.EXTRACT)) {
+                    JSONObject data = new JSONObject(input.getJSONObject(0).getString("content"));
+                    assert data.getJSONObject("person").getString("profile").equals(profile);
+                    assert data.getJSONObject("job").getJSONArray("messages").length() == 2;
+                    assert instructions.contains("reported_handover") && instructions.contains("source_ids");
+                    return "{\"memories\":[]}";
+                }
+                assert instructions.contains(profile) && !instructions.contains(otherProfile);
+                assert instructions.contains("新しい明示的な発言") && instructions.contains("更新済みの記憶を優先");
+                assert !instructions.startsWith("あなたはユーザーと継続して会話する親しい友達です。");
+                assert input.length() == 2; // Reference data plus this real user message only.
+                assert input.getJSONObject(1).getString("content").endsWith("無関係な新しい話題");
+                assert new JSONObject(input.getJSONObject(0).getString("content").split("\\n", 2)[1]).getJSONArray("memories").length() == 0;
+                return "人物に沿った返答";
+            }, new Listener());
+            assert selected.applied == 1;
+        }
         System.out.println("PASS: chat completion, cancellation, raw evidence, memory retry and query bounds");
     }
 }

@@ -138,6 +138,60 @@ bool load_page(int first) {
     return true;
 }
 
+bool switch_person(std::string requested_path, const std::string& payload) {
+    if (requested_path.empty() || requested_path.find('\0') != std::string::npos || payload.find('\0') != std::string::npos) {
+        error = "人物の保存先・資料が無効です。";
+        return false;
+    }
+    if (core_ready && requested_path == storage_path && payload.empty()) { error.clear(); return true; }
+    const bool had_previous = core_ready;
+    auto restore_previous = [&] {
+        conversation_close();
+        core_ready = had_previous && conversation_init(storage_path.c_str());
+        if (core_ready && page_first >= 0 && page_count > 0)
+            conversation_load_window(page_first, page_count);
+    };
+    conversation_close();
+    core_ready = false;
+    try {
+        if (conversation_init(requested_path.c_str()) &&
+                (payload.empty() || conversation_import_person(payload.c_str()))) {
+            storage_path.swap(requested_path);
+            core_ready = true;
+            page_first = -1; page_count = 0; page_total = 0;
+            streaming.clear(); message_positions.clear();
+            anchor_index = -1; anchor_offset = 0;
+            pending_scroll = 0; touch = {};
+            list_min = {}; list_max = {};
+            following_bottom = true; scroll_to_bottom = true;
+            if (context) {
+                ImGui::SetCurrentContext(context);
+                ImGui::GetIO().ClearInputKeys();
+                ImGui::GetIO().ClearEventsQueue();
+            }
+            error.clear();
+            return true;
+        }
+        core_error();
+    } catch (...) {
+        restore_previous();
+        throw;
+    }
+    std::string failure = std::move(error);
+    restore_previous();
+    error = std::move(failure);
+    if (had_previous && !core_ready) error += "\n元の会話も開けませんでした。保存先を確認してください。";
+    return false;
+}
+
+std::string archive_delta(int64_t after_cursor) {
+    if (!core_ready) { error = "保存先を初期化できていません。"; return {}; }
+    const char* result = conversation_archive_delta(after_cursor);
+    if (!result) { core_error(); return {}; }
+    error.clear();
+    return result;
+}
+
 void history_changed() {
     const int total = core_ready ? conversation_message_count() : 0;
     if (page_first < 0 || following_bottom) {
@@ -346,18 +400,37 @@ Java_jp_tekewo_conversation_MainActivity_nativeInit(JNIEnv* env, jclass, jbyteAr
         std::string requested_path;
         if (!read_text(env, path, requested_path) || requested_path.empty())
             return java_string(env, "保存先が無効です。");
-        if (core_ready) return java_string(env, requested_path == storage_path ? "" : "保存先は変更できません。");
+        if (core_ready) return java_string(env, switch_person(std::move(requested_path), "") ? "" : error);
         if (!read_bytes(env, jp_font, japanese_font) || japanese_font.size() < 12 ||
             !read_bytes(env, symbols_font, emoji_font) || emoji_font.size() < 12)
             return java_string(env, "日本語・絵文字フォントを読み込めませんでした。");
-        if (!conversation_init(requested_path.c_str())) { core_error(); return java_string(env, error); }
-        storage_path = std::move(requested_path);
-        core_ready = true;
-        error.clear();
-        return java_string(env, "");
+        return java_string(env, switch_person(std::move(requested_path), "") ? "" : error);
     } catch (const std::exception&) {
         return java_string(env, "初期化に必要なメモリを確保できませんでした。");
     }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeSwitchPerson(JNIEnv* env, jclass, jbyteArray path, jbyteArray payload) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        std::string requested_path, text;
+        if (!read_text(env, path, requested_path) || (payload && !read_text(env, payload, text))) {
+            error = "人物の保存先・資料が無効です。";
+            return java_string(env, error);
+        }
+        return java_string(env, switch_person(std::move(requested_path), text) ? "" : error);
+    } catch (const std::exception&) {
+        error = "人物を切り替えるためのメモリを確保できませんでした。";
+        return java_string(env, error);
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeArchiveDelta(JNIEnv* env, jclass, jlong after_cursor) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try { return java_string(env, archive_delta(after_cursor)); }
+    catch (const std::exception&) { error = "バックアップ内容を読み込めませんでした。"; return java_string(env, ""); }
 }
 
 extern "C" JNIEXPORT void JNICALL

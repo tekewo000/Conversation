@@ -22,6 +22,14 @@ const char* conversation_pending_job(void);
 bool conversation_apply_job(int64_t id, const char* extraction_json);
 // {memories:[...]} includes source snippets, IDs, versions, and current flag.
 const char* conversation_memories(const char* query);
+// Fresh person DB only; retries with the same UUID and source SHA256 are idempotent.
+// {person_id,name,profile,source_md,source_sha256,seeds:[typed document-sourced memories]}
+bool conversation_import_person(const char* payload_json);
+// <=2 MiB. Immutable, contiguous SQLite transaction records after the cursor.
+// {format:1,person,from_cursor,through_cursor,has_more,records:[{cursor,events}]}
+const char* conversation_archive_delta(int64_t after_cursor);
+// Replay into a fresh or matching DB; rejects conflicting owners/cursors atomically.
+bool conversation_apply_archive(const char* delta_json);
 bool conversation_export(const char* output_dir);
 // Legacy read compatibility. Pin modification is retired (returns false).
 bool conversation_remember(int32_t index);

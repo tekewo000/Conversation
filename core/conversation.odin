@@ -36,12 +36,30 @@ fail :: proc(message: cstring) -> bool { last_error = message; return false }
 valid_text :: proc(text: string) -> bool {
  return len(text) <= MAX_MESSAGE_BYTES && utf8.valid_string(text) && !strings.contains_rune(text, 0) && len(strings.trim_space(text)) > 0
 }
+make_storage_directories :: proc(path: string) -> os.Error {
+ // Android permits traversal through /data but denies the ancestor directory reads used by mkdir_all.
+ error:=os.make_directory(path)
+ if error==.Exist {
+  info,stat_error:=os.stat(path,context.allocator)
+  defer os.file_info_delete(info,context.allocator)
+  if stat_error!=nil do return stat_error
+  if info.type!=.Directory do return .Invalid_Dir
+  return .Exist
+ }
+ if error!=.Not_Exist do return error
+ parent,_:=os.split_path(strings.trim_right(path,"/\\"))
+ if len(parent)==0 || len(parent)>=len(path) do return error
+ parent_error:=make_storage_directories(parent)
+ if parent_error!=nil && parent_error!=.Exist do return parent_error
+ return os.make_directory(path)
+}
 clear_cache :: proc() {
  for row in cache { delete(row.text); delete(row.role) }
  delete(cache)
  cache = nil
 }
 release_state :: proc() {
+ archive_group=0
  clear_cache()
  if db != nil do sqlite3_close(db)
  db = nil
@@ -129,7 +147,9 @@ insert_message :: proc(role, text: string) -> i64 {
  if stmt == nil do return 0
  defer sqlite3_finalize(stmt)
  if !bind_text(stmt, 1, role) || !bind_text(stmt, 2, text) || sqlite3_step(stmt) != 101 { fail("Could not append the message."); return 0 }
- return sqlite3_last_insert_rowid(db)
+ id:=sqlite3_last_insert_rowid(db)
+ if !archive_capture("messages",id) do return 0
+ return id
 }
 // Jobs are bounded before enqueueing, including JSON escaping. Long source text stays intact in messages.
 enqueue_uncovered :: proc() -> bool {
@@ -159,7 +179,7 @@ insert_job :: proc(first, end: i64) -> bool {
  stmt := prepare("INSERT INTO jobs(first_id,end_id) VALUES(?1,?2)")
  if stmt == nil do return false
  defer sqlite3_finalize(stmt)
- return bind_int(stmt, 1, first) && bind_int(stmt, 2, end) && sqlite3_step(stmt) == 101
+ return bind_int(stmt, 1, first) && bind_int(stmt, 2, end) && sqlite3_step(stmt) == 101 && archive_capture("jobs",sqlite3_last_insert_rowid(db))
 }
 
 parse_json :: proc(bytes: []byte, max_depth: int = 6) -> (json.Value, bool) {
@@ -216,7 +236,7 @@ conversation_init :: proc "c" (storage_dir: cstring) -> bool {
  if e != nil do return fail("Not enough memory to open history.")
  info, stat_e := os.stat(directory, context.allocator)
  if stat_e == .Not_Exist {
-  create_e := os.make_directory_all(directory)
+  create_e := make_storage_directories(directory)
   if create_e != nil && create_e != .Exist { release_state(); return fail("Could not create storage directory.") }
   info, stat_e = os.stat(directory, context.allocator)
  }
@@ -229,7 +249,7 @@ conversation_init :: proc "c" (storage_dir: cstring) -> bool {
  if path_e != nil || sqlite3_open_v2(cpath, &db, 6, nil) != 0 { release_state(); return fail("Could not open SQLite database.") }
  sqlite3_busy_timeout(db, 5000)
  version:=scalar("PRAGMA user_version")
- if version!=0 && version!=1 { release_state(); return fail("Unsupported database version; database was preserved.") }
+ if version!=0 && version!=1 && version!=2 { release_state(); return fail("Unsupported database version; database was preserved.") }
  tables:=scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
  if tables<0 { release_state(); return fail("Could not inspect database schema.") }
  if tables>0 {
@@ -242,10 +262,11 @@ conversation_init :: proc "c" (storage_dir: cstring) -> bool {
   }
  }
  if !execute(SCHEMA) || !execute("BEGIN IMMEDIATE") { release_state(); return false }
+ if !execute(PERSON_SCHEMA) || !execute(ARCHIVE_SCHEMA) { execute("ROLLBACK"); release_state(); return false }
  initialized := scalar("SELECT count(*) FROM meta WHERE key='initialized' AND value='1'")
  search_ready:=scalar("SELECT count(*) FROM meta WHERE key='search_version' AND value='1'")
  if initialized < 0 || search_ready<0 || (initialized == 0 && !migrate_legacy()) ||
-  (search_ready==0 && !execute(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild'); INSERT INTO memories_fts(memories_fts) VALUES('rebuild'); DELETE FROM memory_current; INSERT INTO memory_current SELECT id,kind,status FROM memories m WHERE NOT EXISTS(SELECT 1 FROM memories n WHERE n.supersedes_id=m.id); INSERT OR REPLACE INTO meta VALUES('search_version','1');`)) || !execute("PRAGMA user_version=1") || !execute("COMMIT") {
+  (search_ready==0 && !execute(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild'); INSERT INTO memories_fts(memories_fts) VALUES('rebuild'); DELETE FROM memory_current; INSERT INTO memory_current SELECT id,kind,status FROM memories m WHERE NOT EXISTS(SELECT 1 FROM memories n WHERE n.supersedes_id=m.id); INSERT OR REPLACE INTO meta VALUES('search_version','1');`)) || !archive_backfill() || !execute("PRAGMA user_version=2") || !execute("COMMIT") {
   execute("ROLLBACK")
   release_state()
   return false
@@ -267,9 +288,10 @@ conversation_add_message :: proc "c" (role, text: cstring) -> i64 {
  if role == nil || (string(role) != "user" && string(role) != "assistant") || text == nil || !valid_text(string(text)) { fail("A user/assistant role and nonempty UTF-8 text of at most 64KiB are required."); return 0 }
  if message_count == 0x7fffffff || !execute("BEGIN IMMEDIATE") do return 0
  committed := false
- defer if !committed do execute("ROLLBACK")
+ defer { archive_group=0; if !committed do execute("ROLLBACK") }
+ if !archive_begin() do return 0
  id := insert_message(string(role), string(text))
- if id == 0 || (string(role) == "assistant" && !enqueue_uncovered()) || !execute("COMMIT") do return 0
+ if id == 0 || (string(role) == "assistant" && !enqueue_uncovered()) || !archive_finish() || !execute("COMMIT") do return 0
  committed = true
  message_count += 1
  clear_cache()
@@ -332,7 +354,7 @@ insert_source :: proc(memory_id, message_id: i64) -> bool {
  stmt := prepare("INSERT INTO memory_sources(memory_id,message_id) VALUES(?1,?2)")
  if stmt == nil do return false
  defer sqlite3_finalize(stmt)
- return bind_int(stmt, 1, memory_id) && bind_int(stmt, 2, message_id) && sqlite3_step(stmt) == 101
+ return bind_int(stmt, 1, memory_id) && bind_int(stmt, 2, message_id) && sqlite3_step(stmt) == 101 && archive_capture("memory_sources",sqlite3_last_insert_rowid(db))
 }
 string_field :: proc(obj: json.Object, key: string, max_size: int) -> (string, bool) {
  value, ok := obj[key].(json.String)
@@ -369,7 +391,7 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
  if !obj_ok || len(obj) != 1 || !items_ok || len(items) > 32 do return fail("Expected at most 32 memory records.")
  if !execute("BEGIN IMMEDIATE") do return false
  committed := false
- defer if !committed do execute("ROLLBACK")
+ defer { archive_group=0; if !committed do execute("ROLLBACK") }
  job := prepare("SELECT end_id,processed FROM jobs WHERE id=?1")
  if job == nil do return false
  defer sqlite3_finalize(job)
@@ -380,6 +402,7 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
   if committed do last_error = ""
   return committed
  }
+ if !archive_begin() do return false
  for value, ordinal in items {
   record, is_record := value.(json.Object)
   if !is_record do return fail("Every memory must be an object.")
@@ -439,13 +462,14 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
   sqlite3_finalize(stmt)
   if !valid do return fail("Could not save extracted memory.")
   memory_id := sqlite3_last_insert_rowid(db)
+  if !archive_capture("memories",memory_id) do return false
   for src in sources { if !insert_source(memory_id, i64(src.(json.Integer))) do return false }
  }
  done := prepare("UPDATE jobs SET processed=1 WHERE id=?1")
  if done == nil do return false
  success := bind_int(done,1,job_id) && sqlite3_step(done)==101
  sqlite3_finalize(done)
- if !success || !execute("COMMIT") do return false
+ if !success || !archive_capture("jobs",job_id,"update") || !archive_finish() || !execute("COMMIT") do return false
  committed = true
  last_error = ""
  return true
@@ -496,7 +520,7 @@ MEMORY_JSON :: `WITH RECURSIVE query_grams(i,token) AS (
 ), selected AS (
  SELECT m.*,min(h.score) AS score FROM memory_hits h JOIN memories m ON m.id=h.id GROUP BY m.id
  UNION ALL SELECT *,0.0 FROM (SELECT * FROM memories ORDER BY id DESC LIMIT 30) WHERE ?1=''
-) SELECT json_object('memories',json_group_array(json_object('id',m.id,'kind',kind,'actor',actor,'subject',subject,'key',key,'text',text,'scope',scope,'certainty',certainty,'status',status,'supersedes_id',supersedes_id,'valid_from',valid_from,'created_at',created_at,'source_ids',json((SELECT json_group_array(message_id) FROM memory_sources WHERE memory_id=m.id)),'sources',json((SELECT json_group_array(json_object('id',x.id,'role',x.role,'content',substr(x.content,1,256),'created_at',x.created_at)) FROM memory_sources s JOIN messages x ON x.id=s.message_id WHERE s.memory_id=m.id)),'current',json(CASE WHEN EXISTS(SELECT 1 FROM memory_current c WHERE c.id=m.id) THEN 'true' ELSE 'false' END)))) FROM (SELECT * FROM selected ORDER BY score,id DESC LIMIT 30) m`
+) SELECT json_object('memories',json_group_array(json_object('id',m.id,'kind',kind,'actor',actor,'subject',subject,'key',key,'text',text,'scope',scope,'certainty',certainty,'status',status,'supersedes_id',supersedes_id,'valid_from',valid_from,'created_at',created_at,'imported_sources',json(` + IMPORTED_SOURCES_JSON + `),'source_ids',json((SELECT json_group_array(message_id) FROM memory_sources WHERE memory_id=m.id)),'sources',json((SELECT json_group_array(json_object('id',x.id,'role',x.role,'content',substr(x.content,1,256),'created_at',x.created_at)) FROM memory_sources s JOIN messages x ON x.id=s.message_id WHERE s.memory_id=m.id)),'current',json(CASE WHEN EXISTS(SELECT 1 FROM memory_current c WHERE c.id=m.id) THEN 'true' ELSE 'false' END)))) FROM (SELECT * FROM selected ORDER BY score,id DESC LIMIT 30) m`
 @(export)
 conversation_memories :: proc "c" (query: cstring) -> cstring {
  context=runtime.default_context()
@@ -538,7 +562,7 @@ CONTEXT_JSON :: `WITH RECURSIVE query_grams(i,token) AS (
  JOIN (SELECT id,min(priority) AS priority,min(score) AS score FROM prioritized GROUP BY id ORDER BY priority,score,id DESC LIMIT 12) pick ON pick.id=m.id
  ORDER BY pick.priority,pick.score,m.id DESC
 ), memory_rows AS (
- SELECT json_object('id',id,'kind',kind,'actor',actor,'subject',subject,'key',key,'text',substr(text,1,512),'scope',scope,'certainty',certainty,'status',status,'valid_from',valid_from,'supersedes_id',supersedes_id,'current',json(CASE WHEN current THEN 'true' ELSE 'false' END),'truncated',json(CASE WHEN length(text)>512 THEN 'true' ELSE 'false' END),'source_ids',json((SELECT json_group_array(message_id) FROM memory_sources WHERE memory_id=m.id))) AS row FROM selected m
+ SELECT json_object('id',id,'kind',kind,'actor',actor,'subject',subject,'key',key,'text',substr(text,1,512),'scope',scope,'certainty',certainty,'status',status,'valid_from',valid_from,'supersedes_id',supersedes_id,'current',json(CASE WHEN current THEN 'true' ELSE 'false' END),'truncated',json(CASE WHEN length(text)>512 THEN 'true' ELSE 'false' END),'imported_sources',json(` + IMPORTED_SOURCES_JSON + `),'source_ids',json((SELECT json_group_array(message_id) FROM memory_sources WHERE memory_id=m.id))) AS row FROM selected m
 ), memory_budget AS (
  SELECT row,sum(length(CAST(row AS BLOB))+1) OVER(ROWS UNBOUNDED PRECEDING) AS bytes FROM memory_rows
 ), past_messages AS MATERIALIZED (
@@ -551,7 +575,7 @@ CONTEXT_JSON :: `WITH RECURSIVE query_grams(i,token) AS (
 ), message_budget AS (
  SELECT id,row,sum(length(CAST(row AS BLOB))+1) OVER(ORDER BY id DESC ROWS UNBOUNDED PRECEDING) AS bytes FROM message_rows
 )
-SELECT json_object('messages',json((SELECT json_group_array(json(row)) FROM (SELECT row FROM message_budget WHERE bytes<=18000 ORDER BY id))),'memories',json((SELECT json_group_array(json(row)) FROM memory_budget WHERE bytes<=14000)))`
+SELECT json_object('person',json(` + PERSON_JSON + `),'messages',json((SELECT json_group_array(json(row)) FROM (SELECT row FROM message_budget WHERE bytes<=18000 ORDER BY id))),'memories',json((SELECT json_group_array(json(row)) FROM memory_budget WHERE bytes<=14000)))`
 @(export)
 conversation_context :: proc "c" (query: cstring) -> cstring {
  context=runtime.default_context()
@@ -592,7 +616,7 @@ conversation_export :: proc "c" (output_dir: cstring) -> bool {
  context=runtime.default_context()
  if !ready || output_dir==nil || !valid_text(string(output_dir)) do return fail("A valid export directory is required.")
  base:=string(output_dir)
- create_e:=os.make_directory_all(base)
+ create_e:=make_storage_directories(base)
  if create_e!=nil && create_e!=.Exist do return fail("Could not create export directory.")
  if !execute("BEGIN") do return false
  defer execute("ROLLBACK")
@@ -605,13 +629,10 @@ conversation_export :: proc "c" (output_dir: cstring) -> bool {
  folder:=strings.concatenate({base,"/",name})
  defer delete(folder)
  if os.make_directory(folder)!=nil do return fail("Could not create export snapshot directory.")
- counts:[4]i64
- chunks:[4]int
- for table,i in ([]string{"messages","memories","memory_sources","jobs"}) {
-  row_sql:=`json_object('id',id,'role',role,'content',content,'created_at',created_at)` if table=="messages" else
-   `json_object('id',id,'job_id',job_id,'ordinal',ordinal,'kind',kind,'actor',actor,'subject',subject,'key',key,'text',text,'scope',scope,'certainty',certainty,'status',status,'supersedes_id',supersedes_id,'valid_from',valid_from,'created_at',created_at)` if table=="memories" else
-   `json_object('memory_id',memory_id,'message_id',message_id)` if table=="memory_sources" else
-   `json_object('id',id,'first_id',first_id,'end_id',end_id,'processed',processed)`
+ counts:[7]i64
+ chunks:[7]int
+ for table,i in ([]string{"messages","memories","memory_sources","jobs","person_profiles","source_documents","memory_document_sources"}) {
+  row_sql:=archive_table(table).row_json
   sql:=fmt.aprintf("SELECT %s FROM %s ORDER BY rowid",row_sql,table)
   csql,e:=strings.clone_to_cstring(sql)
   delete(sql)
@@ -658,7 +679,11 @@ conversation_export :: proc "c" (output_dir: cstring) -> bool {
   sqlite3_finalize(stmt)
   if !success do return fail("Could not finish export; previous export manifest was preserved.")
  }
- metadata:=fmt.aprintf(`{"format":1,"snapshot":"%s","messages":%d,"memories":%d,"sources":%d,"jobs":%d,"chunks":{"messages":%d,"memories":%d,"memory_sources":%d,"jobs":%d},"chunk_bytes_max":1048576}`,name,counts[0],counts[1],counts[2],counts[3],chunks[0],chunks[1],chunks[2],chunks[3])
+ person_sql:=strings.clone_to_cstring("SELECT "+PERSON_JSON+" WHERE ?1=''")
+ person:=json_query(person_sql)
+ delete(person_sql)
+ if person==nil do return false
+ metadata:=fmt.aprintf(`{{"format":2,"snapshot":"%s","person":%s,"messages":%d,"memories":%d,"sources":%d,"jobs":%d,"profiles":%d,"documents":%d,"document_sources":%d,"chunks":{{"messages":%d,"memories":%d,"memory_sources":%d,"jobs":%d,"person_profiles":%d,"source_documents":%d,"memory_document_sources":%d}},"chunk_bytes_target":1048576,"chunk_bytes_max":2097152}}`,name,string(person),counts[0],counts[1],counts[2],counts[3],counts[4],counts[5],counts[6],chunks[0],chunks[1],chunks[2],chunks[3],chunks[4],chunks[5],chunks[6])
  defer delete(metadata)
  temporary:=strings.concatenate({base,"/metadata.json.tmp"})
  defer delete(temporary)

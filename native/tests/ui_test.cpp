@@ -16,6 +16,12 @@ int texture_requests = 0;
 int text_requests = 0;
 int cache_first = 0;
 int cache_count = 0;
+std::string opened_path;
+std::string mock_error;
+int init_calls = 0;
+int import_calls = 0;
+int64_t archive_cursor = -1;
+bool archive_fails = false;
 
 std::vector<unsigned char> read_font(const char* path) {
     std::ifstream stream(path, std::ios::binary);
@@ -148,10 +154,63 @@ void check_gestures() {
     test.begin(10, 10, false);
     assert(test.move(10, 30, 8) == 0 && !test.finish());
 }
+
+void check_person_switching() {
+    core_ready = conversation_init("previous-person");
+    storage_path = "previous-person";
+    page_first = 0; page_count = 1; page_total = static_cast<int>(messages.size());
+    streaming = "previous partial response";
+    message_positions = {{0, 12, 30}};
+    anchor_index = 0; anchor_offset = 7;
+    following_bottom = false; scroll_to_bottom = false; pending_scroll = 8;
+    touch.begin(10, 12, true);
+    const int before = init_calls;
+    assert(switch_person("previous-person", ""));
+    assert(init_calls == before && streaming == "previous partial response" && anchor_index == 0);
+    assert(!switch_person("bad-path", ""));
+    assert(error == "cannot open requested path" && core_ready);
+    assert(opened_path == "previous-person" && storage_path == "previous-person");
+    assert(page_first == 0 && page_count == 1 && cache_first == 0 && cache_count == 1);
+    assert(streaming == "previous partial response" && message_positions.size() == 1);
+    assert(anchor_index == 0 && anchor_offset == 7 && pending_scroll == 8 && touch.down);
+    assert(!following_bottom && !scroll_to_bottom);
+    assert(!switch_person("new-person", "bad-import"));
+    assert(error == "invalid import" && core_ready && opened_path == "previous-person");
+    assert(page_first == 0 && streaming == "previous partial response" && anchor_index == 0);
+    assert(switch_person("new-person", "valid-import"));
+    assert(storage_path == "new-person" && opened_path == "new-person" && error.empty());
+    assert(page_first == -1 && page_count == 0 && page_total == 0);
+    assert(streaming.empty() && message_positions.empty() && anchor_index == -1 && anchor_offset == 0);
+    assert(pending_scroll == 0 && !touch.down && following_bottom && scroll_to_bottom);
+    const int before_no_import = import_calls;
+    assert(switch_person("another-person", ""));
+    assert(import_calls == before_no_import && opened_path == "another-person");
+    assert(archive_delta(17) == "{\"records\":[]}" && archive_cursor == 17 && error.empty());
+    archive_fails = true;
+    assert(archive_delta(17).empty() && error == "archive failed");
+    archive_fails = false;
+    core_ready = false;
+    assert(archive_delta(17).empty() && !error.empty());
+    core_ready = true;
+}
 } // namespace
 
 extern "C" {
-bool conversation_init(const char*) { return true; }
+bool conversation_init(const char* path) {
+    ++init_calls; cache_first = -1; cache_count = 0;
+    if (std::string(path) == "bad-path") { mock_error = "cannot open requested path"; return false; }
+    opened_path = path; mock_error.clear(); return true;
+}
+bool conversation_import_person(const char* payload) {
+    ++import_calls;
+    if (std::string(payload) == "bad-import") { mock_error = "invalid import"; return false; }
+    return true;
+}
+const char* conversation_archive_delta(int64_t after_cursor) {
+    archive_cursor = after_cursor;
+    if (archive_fails) { mock_error = "archive failed"; return nullptr; }
+    return "{\"records\":[]}";
+}
 bool conversation_send(const char* text) { messages.emplace_back(text); return true; }
 int32_t conversation_message_count() { return static_cast<int32_t>(messages.size()); }
 bool conversation_load_window(int32_t first, int32_t limit) {
@@ -173,12 +232,13 @@ int64_t conversation_message_id(int32_t index) { return index + 1; }
 bool conversation_remember(int32_t index) { memories.push_back(messages.at(index)); return true; }
 int32_t conversation_memory_count() { return static_cast<int32_t>(memories.size()); }
 const char* conversation_memory_text(int32_t index) { return memories.at(index).c_str(); }
-const char* conversation_error() { return ""; }
-void conversation_close() {}
+const char* conversation_error() { return mock_error.c_str(); }
+void conversation_close() { opened_path.clear(); cache_first = -1; cache_count = 0; mock_error.clear(); }
 }
 
 int main() {
     check_gestures();
+    check_person_switching();
     core_ready = true;
     const auto original = messages;
     messages.clear();
@@ -280,5 +340,5 @@ int main() {
         ImGui::DestroyContext(context);
         context = nullptr;
     }
-    std::puts("PASS: 20k history bounded to 80, role layout, anchored paging, streaming/follow, accessibility, Japanese+emoji, swipe, density, context recreation");
+    std::puts("PASS: person switch/import rollback, view reset, archive delta, 20k history bounded to 80, role layout, anchored paging, streaming/follow, accessibility, Japanese+emoji, swipe, density, context recreation");
 }
