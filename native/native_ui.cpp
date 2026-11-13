@@ -118,13 +118,13 @@ void core_error() {
 bool remember_message(int index) {
     if (!conversation_remember(index)) { core_error(); return false; }
     error.clear();
-    notice = "記憶に保存しました";
+    notice = "大切な会話として固定しました";
     return true;
 }
 
 void apply_style() {
     ImGui::GetStyle() = ImGuiStyle();
-    ImGui::StyleColorsLight();
+    ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowPadding = ImVec2(16, 16);
     style.FramePadding = ImVec2(12, 10);
@@ -133,13 +133,14 @@ void apply_style() {
     style.FrameRounding = 8;
     style.ScrollbarSize = 12;
     style.WindowBorderSize = 0;
-    style.Colors[ImGuiCol_Text] = ImVec4(0.12f, 0.16f, 0.18f, 1);
-    style.Colors[ImGuiCol_TextDisabled] = ImVec4(0.36f, 0.40f, 0.42f, 1);
-    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.96f, 0.96f, 0.94f, 1);
-    style.Colors[ImGuiCol_ChildBg] = ImVec4(1, 1, 1, 1);
-    style.Colors[ImGuiCol_Button] = ImVec4(0.87f, 0.91f, 0.88f, 1);
-    style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.78f, 0.86f, 0.81f, 1);
-    style.Colors[ImGuiCol_ButtonActive] = ImVec4(0.67f, 0.79f, 0.72f, 1);
+    style.Colors[ImGuiCol_Text] = ImVec4(0.90f, 0.93f, 0.95f, 1);
+    style.Colors[ImGuiCol_TextDisabled] = ImVec4(0.61f, 0.67f, 0.71f, 1);
+    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.075f, 0.09f, 0.11f, 1);
+    style.Colors[ImGuiCol_ChildBg] = ImVec4(0.10f, 0.12f, 0.145f, 1);
+    style.Colors[ImGuiCol_Border] = ImVec4(0.23f, 0.28f, 0.32f, 1);
+    style.Colors[ImGuiCol_Button] = ImVec4(0.16f, 0.20f, 0.23f, 1);
+    style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.22f, 0.29f, 0.32f, 1);
+    style.Colors[ImGuiCol_ButtonActive] = ImVec4(0.25f, 0.36f, 0.34f, 1);
     style.ScaleAllSizes(density);
     style.FontSizeBase = 17.0f * density;
 }
@@ -165,9 +166,9 @@ void draw_ui() {
     ImGui::PushFont(nullptr, 23.0f * d);
     ImGui::TextUnformatted("Conversation");
     ImGui::PopFont();
-    ImGui::TextDisabled("AI未接続・端末に保存");
+    ImGui::TextDisabled("AI未接続・会話は自動保存");
     if (!error.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.17f, 0.13f, 1));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.49f, 1));
         ImGui::PushTextWrapPos(0);
         ImGui::TextUnformatted(error.c_str());
         ImGui::PopTextWrapPos();
@@ -177,14 +178,14 @@ void draw_ui() {
     }
     const float tab_width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2;
     const bool chat_active = tab == 0;
-    if (chat_active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.73f, 0.83f, 0.77f, 1));
+    if (chat_active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.32f, 0.28f, 1));
     if (ImGui::Button("会話", ImVec2(tab_width, 48 * d))) tab = 0;
     if (chat_active) ImGui::PopStyleColor();
     ImGui::SameLine();
     char memory_label[64];
     std::snprintf(memory_label, sizeof(memory_label), "記憶 (%d)", core_ready ? conversation_memory_count() : 0);
     const bool memory_active = tab == 1;
-    if (memory_active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.73f, 0.83f, 0.77f, 1));
+    if (memory_active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.32f, 0.28f, 1));
     if (ImGui::Button(memory_label, ImVec2(tab_width, 48 * d))) tab = 1;
     if (memory_active) ImGui::PopStyleColor();
 
@@ -202,7 +203,7 @@ void draw_ui() {
     if (count == 0) {
         ImGui::PushTextWrapPos(0);
         ImGui::TextUnformatted(current_tab == 0 ? "まだ会話がありません。\n下の入力欄から、話したいことを残せます。"
-                                               : "残したい会話で「記憶に残す」を押すと、ここに保存されます。");
+                                               : "AI接続後、会話から記憶を自動で整理します。\n現在は会話の全文を自動保存しています。");
         ImGui::PopTextWrapPos();
     }
     for (int i = 0; i < count; ++i) {
@@ -212,9 +213,6 @@ void draw_ui() {
         ImGui::PushTextWrapPos(0);
         ImGui::TextUnformatted(text ? text : "");
         ImGui::PopTextWrapPos();
-        if (current_tab == 0 && ImGui::Button("記憶に残す", ImVec2(0, 48 * d))) {
-            remember_message(i);
-        }
         if (i + 1 != count) { ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing(); }
         ImGui::PopID();
     }
@@ -337,7 +335,7 @@ Java_jp_tekewo_conversation_MainActivity_nativeRender(JNIEnv*, jclass) {
     draw_ui();
     ImGui::Render();
     glViewport(0, 0, width, height);
-    glClearColor(0.96f, 0.96f, 0.94f, 1);
+    glClearColor(0.075f, 0.09f, 0.11f, 1);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     const GLenum gl_error = glGetError();

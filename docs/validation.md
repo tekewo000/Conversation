@@ -70,3 +70,16 @@
 - Debug APK now sets debuggable explicitly to permit app-scoped adb diagnostics.
   No app data was cleared or app uninstalled. Manual Japanese IME, actual message
   saving, TalkBack and battery measurements remain to be checked.
+
+## Dark theme and automatic-memory direction
+
+- ImGui, Activity, editor, dialogs and system bars use a dark palette. A rebuilt
+  APK was installed on Pixel 10 Pro and the actual display was inspected.
+- Native CPU UI/font/gesture tests and APK build tests passed; device startup
+  smoke check passed. Existing local conversation and fixed records survived
+  the update. The standard clipboard dialog follows the dark Android theme.
+- Manual memory buttons no longer interrupt the conversation view. Explicit
+  pinning remains available as an optional action in the history menu.
+- Automatic semantic memory extraction is specified separately and remains
+  unimplemented until AI integration; the UI explicitly distinguishes this
+  from the existing automatic transcript persistence.

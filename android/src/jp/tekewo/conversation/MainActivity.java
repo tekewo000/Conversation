@@ -46,7 +46,7 @@ public final class MainActivity extends Activity {
     private ChatSurface surface;
     private EditText input;
     private boolean ready;
-    private static final int BACKGROUND = Color.rgb(245, 245, 240);
+    private static final int BACKGROUND = Color.rgb(19, 23, 28);
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -60,7 +60,7 @@ public final class MainActivity extends Activity {
         getWindow().setStatusBarColor(BACKGROUND);
         getWindow().setNavigationBarColor(BACKGROUND);
         getWindow().getDecorView().setSystemUiVisibility(getWindow().getDecorView().getSystemUiVisibility()
-                | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+                & ~(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR));
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -87,7 +87,7 @@ public final class MainActivity extends Activity {
         header.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = new TextView(this);
         title.setText("入力・保存プレビュー");
-        title.setTextColor(Color.rgb(40, 50, 55));
+        title.setTextColor(Color.rgb(220, 230, 238));
         title.setTextSize(14);
         title.setPadding(dp(16), dp(6), dp(8), dp(6));
         header.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
@@ -107,7 +107,7 @@ public final class MainActivity extends Activity {
         } catch (Exception | UnsatisfiedLinkError error) {
             TextView failure = new TextView(this);
             failure.setText("起動できませんでした。\n" + error.getMessage());
-            failure.setTextColor(Color.rgb(80, 30, 25));
+            failure.setTextColor(Color.rgb(255, 140, 125));
             failure.setPadding(dp(16), dp(16), dp(16), dp(16));
             root.addView(failure);
             return;
@@ -123,8 +123,8 @@ public final class MainActivity extends Activity {
         input.setId(0x434f4e);
         // Drafts live in app storage, outside Android's size-limited activity-state transaction.
         input.setSaveEnabled(false);
-        input.setTextColor(Color.rgb(32, 42, 47));
-        input.setHintTextColor(Color.rgb(95, 110, 120));
+        input.setTextColor(Color.rgb(230, 238, 242));
+        input.setHintTextColor(Color.rgb(156, 171, 181));
         input.setHint("メッセージを書く（この版はAI未接続）");
         input.setTextSize(17);
         input.setMinLines(1);
@@ -179,17 +179,17 @@ public final class MainActivity extends Activity {
     private void showHistoryMenu() {
         if (!ready) return;
         new AlertDialog.Builder(this).setTitle("履歴と記憶")
-                .setItems(new String[]{"会話を読む・コピー", "記憶を読む・コピー", "会話を記憶に残す"}, (dialog, which) -> {
+                .setItems(new String[]{"会話を読む・コピー", "固定した会話を読む・コピー", "大切な会話を固定（任意）"}, (dialog, which) -> {
                     if (which < 2) showTranscript(which == 1);
                     else {
                         String[] messages = nativeMessageTexts();
                         if (messages.length == 0) { showError("まだ会話がありません。"); return; }
-                        new AlertDialog.Builder(this).setTitle("記憶に残す会話を選ぶ")
+                        new AlertDialog.Builder(this).setTitle("固定する会話を選ぶ")
                                 .setItems(messages, (selection, index) -> {
                                     String error = nativeRemember(index);
                                     if (!error.isEmpty()) showError(error);
                                     else {
-                                        input.announceForAccessibility("記憶に保存しました");
+                                        input.announceForAccessibility("会話を固定しました");
                                         surface.renderBurst();
                                     }
                                 }).setNegativeButton("閉じる", null).show();
