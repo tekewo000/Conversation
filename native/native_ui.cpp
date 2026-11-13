@@ -115,10 +115,21 @@ void core_error() {
     __android_log_print(ANDROID_LOG_ERROR, kLogTag, "%s", error.c_str());
 }
 
-bool remember_message(int index) {
-    if (!conversation_remember(index)) { core_error(); return false; }
-    error.clear();
-    return true;
+std::string recent_transcript() {
+    std::string transcript;
+    const int count = core_ready ? conversation_message_count() : 0;
+    for (int i = std::max(0, count - 20); i < count; ++i) {
+        const char* text = conversation_message_text(i);
+        if (!text) continue;
+        if (!transcript.empty()) transcript += "\n\n";
+        transcript += text;
+    }
+    if (transcript.size() > 16384) {
+        size_t start = transcript.size() - 16384;
+        while (start < transcript.size() && (static_cast<unsigned char>(transcript[start]) & 0xc0) == 0x80) ++start;
+        transcript.erase(0, start);
+    }
+    return transcript;
 }
 
 void apply_style() {
@@ -365,47 +376,9 @@ Java_jp_tekewo_conversation_MainActivity_nativePause(JNIEnv*, jclass) {
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_jp_tekewo_conversation_MainActivity_nativeTranscript(JNIEnv* env, jclass, jboolean memories) {
+Java_jp_tekewo_conversation_MainActivity_nativeRecentTranscript(JNIEnv* env, jclass) {
     std::lock_guard<std::mutex> lock(mutex);
-    try {
-        std::string transcript;
-        const int count = core_ready ? (memories ? conversation_memory_count() : conversation_message_count()) : 0;
-        for (int i = 0; i < count; ++i) {
-            if (i != 0) transcript += "\n\n";
-            transcript += memories ? "記憶 " + std::to_string(i + 1) + "\n" : "あなた\n";
-            const char* text = memories ? conversation_memory_text(i) : conversation_message_text(i);
-            if (text) transcript += text;
-        }
-        return java_string(env, transcript);
-    } catch (const std::exception&) {
-        return java_string(env, "表示に必要なメモリを確保できませんでした。");
-    }
-}
-
-extern "C" JNIEXPORT jobjectArray JNICALL
-Java_jp_tekewo_conversation_MainActivity_nativeMessageTexts(JNIEnv* env, jclass) {
-    std::lock_guard<std::mutex> lock(mutex);
-    jclass string_class = env->FindClass("java/lang/String");
-    if (!string_class) return nullptr;
-    const int count = core_ready ? conversation_message_count() : 0;
-    jobjectArray result = env->NewObjectArray(count, string_class, nullptr);
-    env->DeleteLocalRef(string_class);
-    if (!result) return nullptr;
-    for (int i = 0; i < count; ++i) {
-        const char* text = conversation_message_text(i);
-        jstring value = java_string(env, text ? text : "");
-        if (!value) { env->DeleteLocalRef(result); return nullptr; }
-        env->SetObjectArrayElement(result, i, value);
-        env->DeleteLocalRef(value);
-        if (env->ExceptionCheck()) { env->DeleteLocalRef(result); return nullptr; }
-    }
-    return result;
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_jp_tekewo_conversation_MainActivity_nativeRemember(JNIEnv* env, jclass, jint index) {
-    std::lock_guard<std::mutex> lock(mutex);
-    if (!core_ready) return java_string(env, "保存先を初期化できていません。");
-    return java_string(env, remember_message(index) ? "" : error);
+    try { return java_string(env, recent_transcript()); }
+    catch (const std::exception&) { return java_string(env, "表示に必要なメモリを確保できませんでした。"); }
 }
 #endif

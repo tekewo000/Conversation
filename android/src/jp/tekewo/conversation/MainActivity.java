@@ -3,8 +3,6 @@ package jp.tekewo.conversation;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Canvas;
@@ -53,9 +51,7 @@ public final class MainActivity extends Activity {
     private static native void nativeSetTypography(float pixels, float gapDp);
     private static native void nativeTouch(int action, float x, float y);
     private static native String nativeSend(byte[] text);
-    private static native String nativeTranscript(boolean memories);
-    private static native String[] nativeMessageTexts();
-    private static native String nativeRemember(int index);
+    private static native String nativeRecentTranscript();
     private static native void nativePause();
 
     private ChatSurface surface;
@@ -195,32 +191,23 @@ public final class MainActivity extends Activity {
         input.clearFocus();
         Dialog sheet = newSheet();
         LinearLayout body = sheetBody(sheet, "メニュー");
-        String[] labels = {"会話", "一覧とコピー", "記憶", "会話を固定", "表示設定", "接続状態"};
+        String[] labels = {"会話", "記憶", "表示設定", "接続状態"};
+        int[] icons = {0, 2, 4, 5};
         for (int i = 0; i < labels.length; ++i) {
             final int action = i;
-            menuRow(body, labels[i], i, () -> {
+            menuRow(body, labels[i], icons[i], () -> {
                 sheet.dismiss();
                 if (action == 0) surface.renderBurst();
-                else if (action == 1 || action == 2) showTranscript(action == 2);
-                else if (action == 3) showPinSelection();
-                else if (action == 4) showDisplaySettings();
+                else if (action == 1) new AlertDialog.Builder(this).setTitle("記憶")
+                        .setMessage("会話から記憶を自動で整理する機能は、まだ実装していません。現在は会話の原文を保存しています。")
+                        .setPositiveButton("閉じる", null).show();
+                else if (action == 2) showDisplaySettings();
                 else new AlertDialog.Builder(this).setTitle("接続状態")
                         .setMessage("AIはまだ接続されていません。会話の全文は端末に保存されます。記憶の自動整理は未実装です。")
                         .setPositiveButton("閉じる", null).show();
             });
         }
         showSheet(sheet);
-    }
-
-    private void showPinSelection() {
-        String[] messages = nativeMessageTexts();
-        if (messages.length == 0) { showError("まだ会話がありません。"); return; }
-        new AlertDialog.Builder(this).setTitle("固定する会話を選ぶ")
-                .setItems(messages, (selection, index) -> {
-                    String error = nativeRemember(index);
-                    if (!error.isEmpty()) showError(error);
-                    else { input.announceForAccessibility("会話を固定しました"); surface.renderBurst(); }
-                }).setNegativeButton("閉じる", null).show();
     }
 
     private Dialog newSheet() {
@@ -379,25 +366,14 @@ public final class MainActivity extends Activity {
         return slider;
     }
 
-    private void showTranscript(boolean memories) {
-        String transcript = nativeTranscript(memories);
-        TextView text = new TextView(this);
-        text.setText(transcript.isEmpty() ? "まだ記録がありません。" : transcript);
-        text.setTextSize(textSize);
+    private void showRecentConversation() {
+        TextView text = sheetText(nativeRecentTranscript(), textSize);
         text.setTextIsSelectable(true);
         text.setPadding(dp(20), dp(16), dp(20), dp(16));
         ScrollView scroll = new ScrollView(this);
         scroll.addView(text);
-        new AlertDialog.Builder(this).setTitle(memories ? "記憶" : "会話")
-                .setView(scroll).setPositiveButton("閉じる", null)
-                .setNeutralButton("コピー", (dialog, which) -> {
-                    try {
-                        ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE))
-                                .setPrimaryClip(ClipData.newPlainText("Conversation", transcript));
-                    } catch (RuntimeException error) {
-                        showError("一度にコピーできない長さです。必要な部分を選択してコピーしてください。");
-                    }
-                }).show();
+        new AlertDialog.Builder(this).setTitle("最近の会話")
+                .setView(scroll).setPositiveButton("閉じる", null).show();
     }
 
     private int dp(int value) {
@@ -523,7 +499,16 @@ public final class MainActivity extends Activity {
     private final class ChatSurface extends GLSurfaceView implements GLSurfaceView.Renderer {
         ChatSurface() {
             super(MainActivity.this);
-            setContentDescription("会話履歴と記憶帳");
+            setContentDescription("会話。ダブルタップで最近の会話をテキスト表示");
+            setAccessibilityDelegate(new View.AccessibilityDelegate() {
+                @Override public boolean performAccessibilityAction(View host, int action, Bundle arguments) {
+                    if (action == android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK) {
+                        showRecentConversation();
+                        return true;
+                    }
+                    return super.performAccessibilityAction(host, action, arguments);
+                }
+            });
             setEGLContextClientVersion(3);
             setPreserveEGLContextOnPause(false);
             setRenderer(this);

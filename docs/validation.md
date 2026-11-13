@@ -127,3 +127,14 @@
   indicator. The display-settings sheet was left open at defaults20/12.
 - Final APK build, signature check and device startup check passed. Other
   Android devices and navigation modes were not available for visual testing.
+
+## Remove unbounded utility flows
+
+- Removed whole-history list/copy, manual pin selection and their unbounded JNI
+  string/array builders after the user rejected these operations for long-lived
+  conversations. Legacy pinned data remains intact in the stored schema.
+- Kept an accessibility-only native text view bounded to the most recent20
+  messages and16 KiB, with UTF-8-safe truncation. Native tests cover the count
+  bound, byte bound and empty case. This does not make the underlying storage
+  or full chat layout scalable; those are still explicit follow-up design work.
+- Native checks, APK build and connected-phone startup smoke check passed.

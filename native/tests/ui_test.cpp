@@ -65,6 +65,21 @@ void conversation_close() {}
 
 int main() {
     check_gestures();
+    core_ready = true;
+    const auto original = messages;
+    messages.clear();
+    for (int i = 0; i < 30; ++i) messages.push_back("message-" + std::to_string(i));
+    const std::string recent = recent_transcript();
+    assert(recent.find("message-9\n") == std::string::npos);
+    assert(recent.find("message-10") == 0 && recent.find("message-29") != std::string::npos);
+    std::string japanese;
+    for (int i = 0; i < 10000; ++i) japanese += "あ";
+    messages = {japanese};
+    const std::string bounded = recent_transcript();
+    assert(bounded.size() <= 16384 && bounded.size() % 3 == 0 && bounded.find("あ") == 0);
+    messages.clear();
+    assert(recent_transcript().empty());
+    messages = original;
     japanese_font = read_font("android/assets/NotoSansJP-Regular.ttf");
     emoji_font = read_font("android/assets/NotoEmoji-Regular.ttf");
     assert(!japanese_font.empty() && !emoji_font.empty());
