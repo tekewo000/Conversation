@@ -21,8 +21,8 @@ ARCHIVE_TABLES := [?]Archive_Table{
  {"memory_document_sources","memory_id,document_id,section,occurred_at",`json_object('memory_id',memory_id,'document_id',document_id,'section',section,'occurred_at',occurred_at)`},
 }
 archive_group:i64
-ARCHIVE_GROUP_MAX :: 1800000
-ARCHIVE_DELTA_MAX :: 2097152
+ARCHIVE_GROUP_MAX :: 16*1048576
+ARCHIVE_DELTA_MAX :: 20*1048576
 
 archive_table :: proc(name: string) -> ^Archive_Table {
  for &table in ARCHIVE_TABLES { if table.name==name do return &table }
@@ -68,7 +68,7 @@ archive_bytes :: proc() -> i64 {
 }
 archive_finish :: proc() -> bool {
  bytes:=archive_bytes()
- if bytes<1 || bytes>ARCHIVE_GROUP_MAX do return fail("Archive transaction exceeds its 1.8 MB bound; nothing was saved.")
+ if bytes<1 || bytes>ARCHIVE_GROUP_MAX do return fail("Archive transaction exceeds 16 MiB; nothing was saved.")
  archive_group=0
  return true
 }
@@ -144,7 +144,7 @@ conversation_archive_delta :: proc "c" (after_cursor: i64) -> cstring {
  defer sqlite3_finalize(stmt)
  if !bind_int(stmt,1,after_cursor) || !bind_int(stmt,2,through) || sqlite3_step(stmt)!=100 { fail("Could not serialize archive delta."); return nil }
  output:=sqlite3_column_text(stmt,0)
- if len(string(output))>ARCHIVE_DELTA_MAX { fail("Archive delta exceeds 2 MiB."); return nil }
+ if len(string(output))>ARCHIVE_DELTA_MAX { fail("Archive delta exceeds 20 MiB."); return nil }
  last_error=""
  return result_text(output)
 }
@@ -174,9 +174,10 @@ archive_row_valid :: proc(table: ^Archive_Table, row: json.Object) -> bool {
    maximum=4096
    _,legacy_job:=row["job_id"].(json.Null)
    key,key_ok:=row["key"].(json.String)
+   if table.name=="memories" && legacy_job do maximum=PERSON_SEED_TEXT_MAX_BYTES
    if table.name=="memories" && legacy_job && key_ok && string(key)=="legacy_pin" do maximum=MAX_MESSAGE_BYTES
-  case "profile":maximum=32768
-  case "raw_markdown":maximum=524288
+  case "profile":maximum=PERSON_PROFILE_MAX_BYTES
+  case "raw_markdown":maximum=PERSON_SOURCE_MAX_BYTES
   case "section":maximum=512
   }
   if !ok || len(text)>maximum || !utf8.valid_string(text) || strings.contains_rune(text,0) || (column!="valid_from" && len(strings.trim_space(text))==0) do return false
@@ -235,7 +236,7 @@ archive_restore_event :: proc(event: json.Object, encoded: string) -> bool {
 conversation_apply_archive :: proc "c" (payload: cstring) -> bool {
  context=runtime.default_context()
  if !ready do return fail("History is not open.")
- if payload==nil || len(string(payload))>ARCHIVE_DELTA_MAX do return fail("Archive delta exceeds 2 MiB.")
+ if payload==nil || len(string(payload))>ARCHIVE_DELTA_MAX do return fail("Archive delta exceeds 20 MiB.")
  root,parsed:=parse_json(transmute([]byte)string(payload),10)
  if !parsed do return false
  defer json.destroy_value(root)
@@ -251,7 +252,7 @@ conversation_apply_archive :: proc "c" (payload: cstring) -> bool {
  if person_ok {
   id,id_ok:=string_field(person,"id",36)
   name,name_ok:=string_field(person,"name",256)
-  profile,profile_ok:=string_field(person,"profile",32768)
+  profile,profile_ok:=string_field(person,"profile",PERSON_PROFILE_MAX_BYTES)
   sha,sha_ok:=string_field(person,"source_sha256",64)
   version,v_ok:=person["version"].(json.Integer)
   if len(person)!=5 || !id_ok || !person_uuid_valid(id) || !name_ok || !profile_ok || !sha_ok || len(sha)!=64 || !v_ok || version!=1 do return fail("Invalid archive person.")

@@ -329,7 +329,7 @@ final class GitHubBackup {
                 connection.setRequestProperty("User-Agent", "Conversation-Android");
                 if (body != null) {
                     byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
-                    if (bytes.length > 8 * 1024 * 1024) throw new IOException();
+                    if (bytes.length > 64 * 1024 * 1024) throw new IOException();
                     connection.setDoOutput(true);
                     connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
                     connection.setFixedLengthStreamingMode(bytes.length);

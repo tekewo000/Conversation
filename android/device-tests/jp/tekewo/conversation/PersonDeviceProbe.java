@@ -148,6 +148,7 @@ public final class PersonDeviceProbe extends Instrumentation {
             }
             check(sawMetadata && sawMessage && sawSource, "ZIP includes metadata, conversation, and original source");
             report("PASS: native export metadata JSON and BackupArchive ZIP preserve Unicode and original source");
+            probeExpandedPerson(root);
         } finally {
             cleanupOwned(app, probeId);
             check(!root.exists() && !fileA.exists() && !fileB.exists(), "Probe files removed");
@@ -155,6 +156,92 @@ public final class PersonDeviceProbe extends Instrumentation {
             check(!keys.containsAlias(alias(idA)) && !keys.containsAlias(alias(idB)), "Probe keys removed");
             report("PASS: cleaned only synthetic UUID directories and token aliases");
         }
+    }
+
+    private void probeExpandedPerson(File root) throws Exception {
+        PersonDocument document = expandedDocument();
+        String id = UUID.randomUUID().toString();
+        JSONObject payload = document.importPayload(id);
+        JSONArray seeds = payload.getJSONArray("seeds");
+        check(bytes(document.rawMarkdown).length == PersonDocument.MAX_BYTES
+                && bytes(document.profile).length == PersonDocument.MAX_PROFILE_BYTES
+                && seeds.length() == PersonDocument.MAX_SEEDS
+                && bytes(seeds.getJSONObject(0).getString("text")).length == PersonDocument.MAX_SEED_BYTES, "One parsed fixture reaches all four expanded limits exactly");
+        File directory = new File(root, id);
+        switchPerson(directory, payload.toString());
+        JSONObject context = context();
+        check(context.getJSONObject("person").getString("profile").equals(document.profile)
+                && context.getJSONArray("messages").length() == 0, "Full 128 KiB person profile is always present without invented messages");
+        String encoded = (String)call("nativeArchiveDelta", new Class<?>[]{long.class}, 0L);
+        check(bytes(encoded).length > 2 * 1024 * 1024, "Expanded native delta exceeds the former 2 MiB limit");
+        JSONObject delta = new JSONObject(encoded);
+        int memories = 0, links = 0; boolean source = false, fullSeed = false;
+        JSONArray records = delta.getJSONArray("records");
+        for (int i = 0; i < records.length(); i++) {
+            JSONArray events = records.getJSONObject(i).getJSONArray("events");
+            for (int j = 0; j < events.length(); j++) {
+                JSONObject event = events.getJSONObject(j), row = event.getJSONObject("row");
+                String table = event.getString("table");
+                if (table.equals("source_documents")) source = row.getString("raw_markdown").equals(document.rawMarkdown);
+                if (table.equals("memory_document_sources")) links++;
+                if (table.equals("memories")) { memories++; fullSeed |= row.getString("text").equals(seeds.getJSONObject(0).getString("text")); }
+            }
+        }
+        check(source && fullSeed && memories == PersonDocument.MAX_SEEDS && links == PersonDocument.MAX_SEEDS,
+                "Expanded journal retains original source, 16 KiB seed, and every seed source link");
+        GitArchiveFiles.Batch git = GitArchiveFiles.build(id, 424242, document.rawMarkdown, delta);
+        check(git.manifest.getLong("cursor") == delta.getLong("through_cursor")
+                && java.util.Arrays.equals(git.files.get("person.md"), bytes(document.rawMarkdown)), "Installed Git archive writer accepts the expanded native delta");
+        success(call("nativeExport", new Class<?>[]{}));
+        File export = new File(directory, "export");
+        JSONObject metadata = new JSONObject(new String(Files.readAllBytes(new File(export, "metadata.json").toPath()), StandardCharsets.UTF_8));
+        check(metadata.getJSONObject("person").getString("profile").equals(document.profile)
+                && metadata.getInt("memories") == PersonDocument.MAX_SEEDS && metadata.getInt("document_sources") == PersonDocument.MAX_SEEDS,
+                "Expanded native export metadata retains the full profile and seed counts");
+        ByteArrayOutputStream output = new ByteArrayOutputStream(); BackupArchive.write(export, output);
+        int zipMemories = 0; boolean zipSource = false, zipSeed = false, zipMetadata = false;
+        try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(output.toByteArray()))) {
+            ZipEntry entry; byte[] buffer = new byte[8192];
+            while ((entry = zip.getNextEntry()) != null) {
+                ByteArrayOutputStream content = new ByteArrayOutputStream(); int count;
+                while ((count = zip.read(buffer)) != -1) content.write(buffer, 0, count);
+                String text = new String(content.toByteArray(), StandardCharsets.UTF_8);
+                if (entry.getName().equals("metadata.json")) {
+                    zipMetadata = new JSONObject(text).getJSONObject("person").getString("profile").equals(document.profile);
+                    continue;
+                }
+                check(entry.getName().startsWith(metadata.getString("snapshot") + "/"), "Expanded ZIP contains only its selected snapshot");
+                for (String line : text.split("\n")) {
+                    if (line.isEmpty()) continue;
+                    JSONObject row = new JSONObject(line);
+                    if (entry.getName().contains("/source_documents-")) zipSource = row.getString("raw_markdown").equals(document.rawMarkdown);
+                    if (entry.getName().contains("/memories-")) { zipMemories++; zipSeed |= row.getString("text").equals(seeds.getJSONObject(0).getString("text")); }
+                }
+            }
+        }
+        check(zipMetadata && zipSource && zipSeed && zipMemories == PersonDocument.MAX_SEEDS, "Expanded ZIP preserves all four limits without truncation");
+        report("PASS: real parser/JNI/Git writer/export ZIP preserve exact 2 MiB source, 128 KiB profile, 2048 seeds, and 16 KiB seed");
+    }
+
+    private static PersonDocument expandedDocument() {
+        String profileStart = "## 基本プロフィール\n- 名前: Probe C\n## しゃべり方\n";
+        String profileEnd = "\n## 考え方\n## ユーザーとの関係\n## 不明・推測・矛盾\n";
+        String profilePadding = utf8Padding(PersonDocument.MAX_PROFILE_BYTES - bytes(profileStart + profileEnd).length);
+        String seedPrefix = "引き継ぎ資料に記載（区分未指定）: 項目0: 本人";
+        StringBuilder ongoing = new StringBuilder("- 項目0: 本人").append(utf8Padding(PersonDocument.MAX_SEED_BYTES - bytes(seedPrefix).length)).append('\n');
+        for (int i = 1; i < PersonDocument.MAX_SEEDS; i++) ongoing.append("- 項目").append(i).append(": 本人の合成試験記録").append(i).append('\n');
+        String before = "形式: conversation-person-v1\n<!--";
+        String after = "-->\n" + profileStart + profilePadding + "\n## 考え方\n## ユーザーとの関係\n## これまでの出来事\n## 続いていること\n"
+                + ongoing + "## 不明・推測・矛盾";
+        return PersonDocument.parse(bytes(before + utf8Padding(PersonDocument.MAX_BYTES - bytes(before + after).length) + after));
+    }
+
+    private static String utf8Padding(int byteCount) {
+        check(byteCount >= 0, "Fixture padding remains within its limit");
+        StringBuilder result = new StringBuilder();
+        for (int i = 0; i < byteCount / 3; i++) result.append('あ');
+        for (int i = 0; i < byteCount % 3; i++) result.append('x');
+        return result.toString();
     }
 
     private void report(String line) {

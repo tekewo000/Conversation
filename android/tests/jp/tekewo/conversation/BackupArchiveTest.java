@@ -32,6 +32,15 @@ public final class BackupArchiveTest {
                 }
             }
             assert names.size() == 2 && names.contains("metadata.json") && names.contains("snapshot-current/messages-0001.jsonl");
+            char[] profile = new char[128 * 1024]; java.util.Arrays.fill(profile, '\u0001');
+            String metadata = new org.json.JSONObject().put("snapshot", "snapshot-current")
+                    .put("person", new org.json.JSONObject().put("profile", new String(profile))).toString();
+            assert metadata.getBytes(StandardCharsets.UTF_8).length > 65536;
+            Files.write(new File(root, "metadata.json").toPath(), metadata.getBytes(StandardCharsets.UTF_8));
+            BackupArchive.write(root, new ByteArrayOutputStream());
+            Files.write(new File(root, "metadata.json").toPath(), new byte[1024 * 1024 + 1]);
+            try { BackupArchive.write(root, new ByteArrayOutputStream()); throw new AssertionError("Oversized metadata accepted"); }
+            catch (IOException expected) {}
             Files.write(new File(root, "metadata.json").toPath(), "{\"snapshot\":\"../outside\"}".getBytes(StandardCharsets.UTF_8));
             try { BackupArchive.write(root, new ByteArrayOutputStream()); throw new AssertionError(); } catch (IOException expected) {}
             System.out.println("PASS: backup current snapshot only, exact Unicode data and traversal rejection");

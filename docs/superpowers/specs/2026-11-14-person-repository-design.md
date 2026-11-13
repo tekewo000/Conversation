@@ -12,7 +12,7 @@ the original and parse a compact always-used profile from basic identity,
 speech, thinking and relationship sections. Import episodes/promises as sourced
 handover claims, not invented historical chat turns. Mark inferred meanings
 separately from explicit reported events; unknown reality is never asserted real.
-Limits:512KiB original,32KiB core profile,512 seed records. Unknown fields remain
+Limits (0.3.1):2MiB original,128KiB core profile,2048 seed records with16KiB text each. Unknown fields remain
 unknown. Preview name/profile before creation.
 
 Each person receives a stable UUID and an isolated SQLite directory under

@@ -241,3 +241,31 @@ Actual private-repository writes still require the user's repository and token.
 Fixture success does not prove live GitHub permissions or long-term AI quality.
 GitHub download/restore UI, multi-device merging and scheduled transfers while
 the app is closed are not implemented.
+
+## 2026-11-14: Larger person files (0.3.1)
+
+- Raised all four person limits4x: UTF-8 source2MiB, profile128KiB,
+  imported memories2048, each imported memory16KiB. Names/headings and the4KiB
+  limit on newly extracted AI memories retain their existing bounds.
+- Matched core import, replay, Git file validation and error messages. Import
+  payloads permit32MiB, journal transactions16MiB, native deltas20MiB, Git JSON
+  encoding40MiB and HTTP requests64MiB. Ordinary batch target stays1MiB.
+  Snapshot rows permit16MiB; ZIP metadata permits1MiB for the larger profile.
+-21 core tests and C ABI roundtrip passed, including exact/new limit+1 atomic
+  rejection, a2MiB heavily escaped source, full archive replay and export.
+  JVM suites passed; the new Git regression preserves900 long em-dash memories
+  whose native JSON fits but encoded JSON exceeded the previous transfer cap.
+- Android instrumentation passed one real Markdown file at all four exact caps
+  simultaneously through the installed parser, JNI import, full-profile context,
+  source/link journal, Git archive generation and ZIP export. Synthetic probe
+  files, credentials and its test APK were removed. Existing native tests passed.
+- Before/after hashes verified all original rows in both actual phone databases.
+  A user message added during work was retained as an append. No actual person's
+  file, conversation, credentials or remote repository was used by the probe.
+- Final signed0.3.1 APK SHA256:
+  `bb6f52b6e75284ea166addb5e33a189e7fe01ec4005d3ae516cba71d36d1280d`.
+  Data-preserving installation and app startup smoke check passed.
+
+Large live GitHub upload is not verified here. Large profiles are sent on every
+reply and increase model input usage; aggregate serialized import limits still
+reject atomically rather than truncating oversized input.

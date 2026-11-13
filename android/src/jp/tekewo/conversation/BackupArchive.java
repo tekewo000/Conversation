@@ -14,7 +14,7 @@ final class BackupArchive {
     static void write(File directory, OutputStream destination) throws Exception {
         File root = directory.getCanonicalFile();
         File metadata = new File(root, "metadata.json");
-        if (metadata.length() == 0 || metadata.length() > 65536) throw new IOException("Invalid backup metadata");
+        if (metadata.length() == 0 || metadata.length() > 1024 * 1024) throw new IOException("Invalid backup metadata");
         String manifest = new String(Files.readAllBytes(metadata.toPath()), StandardCharsets.UTF_8);
         File snapshot = new File(root, new JSONObject(manifest).getString("snapshot"));
         validate(root, snapshot);

@@ -13,7 +13,8 @@ import java.util.Map;
 
 /** Builds only one bounded journal batch; previous event files are never read or rewritten. */
 final class GitArchiveFiles {
-    static final int MAX_DELTA_BYTES = 2 * 1024 * 1024;
+    // org.json can double SQLite's 20 MiB UTF-8 output by escaping U+2000..U+20FF.
+    static final int MAX_DELTA_BYTES = 40 * 1024 * 1024;
     static final String FORMAT = "conversation-person-git-v1";
 
     static final class Batch {
@@ -33,10 +34,10 @@ final class GitArchiveFiles {
         if (from < 0 || through < from) throw new IOException("Invalid archive cursor.");
         JSONObject person = delta.getJSONObject("person");
         byte[] source = utf8(rawMd);
-        if (source.length > 512 * 1024 || !sha256(source).equals(person.getString("source_sha256")))
+        if (source.length > PersonDocument.MAX_BYTES || !sha256(source).equals(person.getString("source_sha256")))
             throw new IOException("Original person document does not match its fingerprint.");
         String profile = person.getString("profile");
-        if (utf8(profile).length > 32 * 1024) throw new IOException("Person profile is too large.");
+        if (utf8(profile).length > PersonDocument.MAX_PROFILE_BYTES) throw new IOException("Person profile is too large.");
         String name = person.getString("name");
         if (name.isEmpty() || utf8(name).length > 256) throw new IOException("Invalid person name.");
         JSONObject persona = new JSONObject().put("format", 1).put("id", personId)

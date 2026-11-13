@@ -717,7 +717,7 @@ public final class MainActivity extends Activity {
                     byte[] chunk = new byte[8192]; int count;
                     while ((count = stream.read(chunk)) != -1) {
                         if (buffer.size() + count > PersonDocument.MAX_BYTES)
-                            throw new java.io.IOException("人物ファイルは512KiB以内にしてください。");
+                            throw new java.io.IOException("人物ファイルは2MiB以内にしてください。");
                         buffer.write(chunk, 0, count);
                     }
                     PersonDocument document = PersonDocument.parse(buffer.toByteArray());

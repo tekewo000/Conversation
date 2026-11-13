@@ -13,7 +13,7 @@
 ## Global Constraints
 - Keep existing data, chat-only dark main UI and saved typography.
 - One stable person UUID per private repository; no public uploads, forced pushes or secret exports.
-- Source Markdown512KiB/profile32KiB/seeds512; incremental archives bounded and transactional.
+- Source Markdown2MiB/profile128KiB/seeds2048 with16KiB text each (raised in0.3.1); incremental archives bounded and transactional.
 - Creation/switching cannot race with response/extraction persistence.
 
 ## Review Focus

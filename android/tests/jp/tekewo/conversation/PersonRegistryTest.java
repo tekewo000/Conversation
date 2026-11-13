@@ -47,6 +47,10 @@ public final class PersonRegistryTest {
             PersonRegistry.Person draft = reloaded.stage(doc, "another/draft");
             reloaded.discard(draft);
             assert !draft.directory.exists() && reloaded.list().size() == 3;
+            PersonDocument largeDoc = PersonDocument.parse(PersonDocumentTest.rawAtLimit(PersonDocumentTest.document()));
+            PersonRegistry.Person large = reloaded.stage(largeDoc, "another/large");
+            reloaded.commit(large);
+            assert new PersonRegistry(root).active().rawMarkdown.equals(largeDoc.rawMarkdown);
             for (String invalid : new String[] { "https://evil.example/owner/repo", "https://user:pass@github.com/a/b", "https://github.com/a/b?q=x", "https://github.com/a/b#x", "https://github.com/a/../b", "https://github.com/a/%2e%2e", "a/b/c", "http://github.com/a/b", "" }) {
                 expectFailure(() -> PersonRegistry.normalizeRepository(invalid));
             }

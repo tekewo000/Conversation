@@ -6,6 +6,12 @@ import "core:encoding/json"
 import "core:strings"
 import "core:unicode/utf8"
 
+PERSON_SOURCE_MAX_BYTES :: 2*1048576
+PERSON_PROFILE_MAX_BYTES :: 128*1024
+PERSON_SEED_MAX :: 2048
+PERSON_SEED_TEXT_MAX_BYTES :: 16*1024
+PERSON_IMPORT_MAX_BYTES :: 32*1048576
+
 PERSON_SCHEMA :: `
 CREATE TABLE IF NOT EXISTS person_profiles(slot INTEGER PRIMARY KEY CHECK(slot=1),person_id TEXT NOT NULL UNIQUE,name TEXT NOT NULL,profile TEXT NOT NULL,source_sha256 TEXT NOT NULL,version INTEGER NOT NULL CHECK(version=1));
 CREATE TABLE IF NOT EXISTS source_documents(id INTEGER PRIMARY KEY,person_id TEXT NOT NULL REFERENCES person_profiles(person_id),format TEXT NOT NULL CHECK(format='conversation-person-v1'),provenance TEXT NOT NULL CHECK(provenance='reported_handover'),source_sha256 TEXT NOT NULL UNIQUE,raw_markdown TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')));
@@ -48,7 +54,7 @@ source_hash_valid :: proc(source, expected: string) -> bool {
 conversation_import_person :: proc "c" (payload: cstring) -> bool {
  context=runtime.default_context()
  if !ready do return fail("History is not open.")
- if payload==nil || len(string(payload))>4*1048576 do return fail("Person import exceeds 4 MiB.")
+ if payload==nil || len(string(payload))>PERSON_IMPORT_MAX_BYTES do return fail("Person import exceeds 32 MiB.")
  root,parsed:=parse_json(transmute([]byte)string(payload),6)
  if !parsed do return false
  defer json.destroy_value(root)
@@ -56,12 +62,12 @@ conversation_import_person :: proc "c" (payload: cstring) -> bool {
  if !obj_ok || len(obj)!=6 do return fail("Expected the version 1 person import fields.")
  id,id_ok:=string_field(obj,"person_id",36)
  name,name_ok:=string_field(obj,"name",256)
- profile,profile_ok:=string_field(obj,"profile",32768)
+ profile,profile_ok:=string_field(obj,"profile",PERSON_PROFILE_MAX_BYTES)
  source_value,source_ok:=obj["source_md"].(json.String)
  source:=string(source_value)
  sha,sha_ok:=string_field(obj,"source_sha256",64)
  seeds,seeds_ok:=obj["seeds"].(json.Array)
- if !id_ok || !person_uuid_valid(id) || !name_ok || !profile_ok || !source_ok || !person_text_valid(source,524288) || !sha_ok || !source_hash_valid(source,sha) || !seeds_ok || len(seeds)>512 do return fail("Invalid person profile, source hash, or seed count.")
+ if !id_ok || !person_uuid_valid(id) || !name_ok || !profile_ok || !source_ok || !person_text_valid(source,PERSON_SOURCE_MAX_BYTES) || !sha_ok || !source_hash_valid(source,sha) || !seeds_ok || len(seeds)>PERSON_SEED_MAX do return fail("Invalid person profile, source hash, or seed count.")
  if !execute("BEGIN IMMEDIATE") do return false
  committed:=false
  defer { archive_group=0; if !committed do execute("ROLLBACK") }
@@ -100,7 +106,7 @@ conversation_import_person :: proc "c" (payload: cstring) -> bool {
   actor,a_ok:=string_field(record,"actor",256)
   subject,s_ok:=string_field(record,"subject",256)
   key,key_ok:=string_field(record,"key",256)
-  text,t_ok:=string_field(record,"text",4096)
+  text,t_ok:=string_field(record,"text",PERSON_SEED_TEXT_MAX_BYTES)
   scope,sc_ok:=string_field(record,"scope",32)
   certainty,c_ok:=string_field(record,"certainty",32)
   section,section_ok:=string_field(record,"section",512)

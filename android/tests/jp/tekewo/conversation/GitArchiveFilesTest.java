@@ -47,11 +47,76 @@ public final class GitArchiveFilesTest {
         reject(() -> GitArchiveFiles.build(ID, 42, RAW, partial));
         JSONObject fractional = delta(0, 1); fractional.put("through_cursor", 1.5);
         reject(() -> GitArchiveFiles.build(ID, 42, RAW, fractional));
+        expandedPersonBounds();
+        sqliteUnicodeExpansionFitsEncodedBudget();
+        expandedDeltaBound();
         JSONObject oversized = delta(0, 1);
         char[] chars = new char[GitArchiveFiles.MAX_DELTA_BYTES]; Arrays.fill(chars, 'x');
         oversized.getJSONArray("records").getJSONObject(0).put("extra", new String(chars));
         reject(() -> GitArchiveFiles.build(ID, 42, RAW, oversized));
         System.out.println("GitArchiveFilesTest passed");
+    }
+
+    private static void expandedPersonBounds() throws Exception {
+        String source = repeated('s', 2 * 1024 * 1024 - 4) + "🎾";
+        String profile = repeated('p', 128 * 1024 - 3) + "葵";
+        JSONObject large = delta(0, 1);
+        large.getJSONObject("person").put("source_sha256", GitArchiveFiles.sha256(GitArchiveFiles.utf8(source))).put("profile", profile);
+        GitArchiveFiles.Batch atBound = GitArchiveFiles.build(ID, 42, source, large);
+        assert atBound.files.get("person.md").length == 2 * 1024 * 1024;
+        assert new JSONObject(new String(atBound.files.get("persona.json"), StandardCharsets.UTF_8)).getString("profile").equals(profile);
+        String overSource = source + "x";
+        JSONObject sourceOver = new JSONObject(large.toString());
+        sourceOver.getJSONObject("person").put("source_sha256", GitArchiveFiles.sha256(GitArchiveFiles.utf8(overSource)));
+        reject(() -> GitArchiveFiles.build(ID, 42, overSource, sourceOver));
+        JSONObject profileOver = new JSONObject(large.toString()); profileOver.getJSONObject("person").put("profile", profile + "x");
+        reject(() -> GitArchiveFiles.build(ID, 42, source, profileOver));
+    }
+
+    private static void expandedDeltaBound() throws Exception {
+        JSONObject large = delta(0, 1);
+        JSONObject record = large.getJSONArray("records").getJSONObject(0);
+        record.put("padding", "");
+        int limit = GitArchiveFiles.MAX_DELTA_BYTES;
+        int padding = limit - large.toString().getBytes(StandardCharsets.UTF_8).length;
+        record.put("padding", repeated('d', padding));
+        assert large.toString().getBytes(StandardCharsets.UTF_8).length == limit;
+        GitArchiveFiles.Batch atBound = GitArchiveFiles.build(ID, 42, RAW, large);
+        String path = atBound.manifest.getJSONObject("latest_batch").getString("path");
+        assert atBound.files.get(path).length > 2 * 1024 * 1024;
+        assert atBound.manifest.getLong("cursor") == 1;
+        record.put("padding", repeated('d', padding + 1));
+        reject(() -> GitArchiveFiles.build(ID, 42, RAW, large));
+    }
+
+    private static void sqliteUnicodeExpansionFitsEncodedBudget() throws Exception {
+        JSONObject expanded = delta(1, 2);
+        JSONArray events = new JSONArray();
+        String text = repeated('\u2014', 5461) + "x";
+        assert text.getBytes(StandardCharsets.UTF_8).length == 16 * 1024;
+        for (int i = 1; i <= 900; i++) {
+            JSONObject row = new JSONObject().put("id", i).put("job_id", JSONObject.NULL).put("ordinal", JSONObject.NULL)
+                    .put("kind", "fact").put("actor", "friend").put("subject", "friend").put("key", "unicode/" + i)
+                    .put("text", text).put("scope", "shared").put("certainty", "explicit").put("status", "active")
+                    .put("supersedes_id", JSONObject.NULL).put("valid_from", "").put("created_at", "2026-11-14T00:00:00Z");
+            events.put(new JSONObject().put("table", "memories").put("op", "insert").put("row", row));
+        }
+        expanded.getJSONArray("records").getJSONObject(0).put("events", events);
+        String javaJson = expanded.toString();
+        int javaBytes = javaJson.getBytes(StandardCharsets.UTF_8).length;
+        int sqliteBytes = javaJson.replace("\\u2014", "\u2014").getBytes(StandardCharsets.UTF_8).length;
+        assert sqliteBytes < 16 * 1024 * 1024;
+        assert javaBytes > 20 * 1024 * 1024;
+        GitArchiveFiles.Batch batch = GitArchiveFiles.build(ID, 42, RAW, expanded);
+        String path = batch.manifest.getJSONObject("latest_batch").getString("path");
+        String line = new String(batch.files.get(path), StandardCharsets.UTF_8);
+        JSONArray restored = new JSONObject(line).getJSONArray("events");
+        assert restored.length() == 900;
+        assert restored.getJSONObject(0).getJSONObject("row").getString("text").equals(text);
+    }
+
+    private static String repeated(char value, int size) {
+        char[] chars = new char[size]; Arrays.fill(chars, value); return new String(chars);
     }
     interface Checked { void run() throws Exception; }
     static void reject(Checked action) throws Exception {

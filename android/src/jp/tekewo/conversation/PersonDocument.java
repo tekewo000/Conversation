@@ -20,7 +20,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 final class PersonDocument {
-    static final int MAX_BYTES = 512 * 1024;
+    static final int MAX_BYTES = 2 * 1024 * 1024;
+    static final int MAX_PROFILE_BYTES = 128 * 1024;
+    static final int MAX_SEEDS = 2048;
+    static final int MAX_SEED_BYTES = 16 * 1024;
     private static final String[] SECTIONS = { "基本プロフィール", "しゃべり方", "考え方", "ユーザーとの関係", "これまでの出来事", "続いていること", "不明・推測・矛盾" };
     private static final Pattern FIELD = Pattern.compile("^\\s*(?:[-*+]\\s+)?([^:：]+)[:：]\\s*(.*)$");
     private static final Pattern HEADING = Pattern.compile("^(#{2,3})\\s+(.+?)\\s*#*\\s*$");
@@ -36,7 +39,7 @@ final class PersonDocument {
     }
 
     static PersonDocument parse(byte[] bytes) {
-        if (bytes == null || bytes.length > MAX_BYTES) throw invalid("人物ファイルは512 KiB以内にしてください。");
+        if (bytes == null || bytes.length > MAX_BYTES) throw invalid("人物ファイルは2 MiB以内にしてください。");
         try {
             return parse(StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                 .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString());
@@ -45,7 +48,7 @@ final class PersonDocument {
 
     static PersonDocument parse(String markdown) {
         if (markdown == null || markdown.length() > MAX_BYTES || utf8(markdown).length > MAX_BYTES || markdown.indexOf('\0') >= 0)
-            throw invalid("人物ファイルはUTF-8の512 KiB以内のMarkdownにしてください。");
+            throw invalid("人物ファイルはUTF-8の2 MiB以内のMarkdownにしてください。");
         String[] lines = markdown.split("\\r\\n|\\n|\\r", -1);
         Map<String, Section> sections = new LinkedHashMap<>();
         Section section = null; int markerCount = 0;
@@ -78,7 +81,7 @@ final class PersonDocument {
             profile.append("## ").append(current.title).append('\n');
             for (Line line : current.lines) profile.append(line.text).append('\n');
         }
-        if (utf8(profile.toString()).length > 32 * 1024) throw invalid("基本プロフィール・しゃべり方・考え方・関係・不明点の合計を32 KiB以内にしてください。");
+        if (utf8(profile.toString()).length > MAX_PROFILE_BYTES) throw invalid("基本プロフィール・しゃべり方・考え方・関係・不明点の合計を128 KiB以内にしてください。");
         JSONArray seeds = new JSONArray();
         try {
             for (int n : new int[] { 0, 3 }) {
@@ -164,9 +167,9 @@ final class PersonDocument {
     private static void addSeed(JSONArray seeds, String kind, String actor, String subject, String key, String value,
             String scope, boolean scopeKnown, String section, String date) throws JSONException {
         String text = "引き継ぎ資料に記載" + (scopeKnown ? "" : "（区分未指定）") + ": " + value;
-        if (utf8(text).length > 4096 || utf8(key).length > 256 || utf8(section).length > 512)
-            throw invalid("一つの出来事・項目が長すぎます。本文は4 KiB以内、見出しは短くしてください。");
-        if (seeds.length() >= 512) throw invalid("記憶にする項目は512件以内にしてください。");
+        if (utf8(text).length > MAX_SEED_BYTES || utf8(key).length > 256 || utf8(section).length > 512)
+            throw invalid("一つの出来事・項目が長すぎます。本文は16 KiB以内、見出しは短くしてください。");
+        if (seeds.length() >= MAX_SEEDS) throw invalid("記憶にする項目は2048件以内にしてください。");
         JSONObject seed = new JSONObject().put("kind", kind).put("actor", actor).put("subject", subject)
             .put("key", key).put("text", text).put("scope", scope)
             .put("certainty", kind.equals("interpretation") ? "inferred" : "explicit").put("section", section);

@@ -33,8 +33,8 @@ message_count: i32
 result_buffer: cstring
 
 fail :: proc(message: cstring) -> bool { last_error = message; return false }
-valid_text :: proc(text: string) -> bool {
- return len(text) <= MAX_MESSAGE_BYTES && utf8.valid_string(text) && !strings.contains_rune(text, 0) && len(strings.trim_space(text)) > 0
+valid_text :: proc(text: string, maximum: int = MAX_MESSAGE_BYTES) -> bool {
+ return len(text) <= maximum && utf8.valid_string(text) && !strings.contains_rune(text, 0) && len(strings.trim_space(text)) > 0
 }
 make_storage_directories :: proc(path: string) -> os.Error {
  // Android permits traversal through /data but denies the ancestor directory reads used by mkdir_all.
@@ -359,7 +359,7 @@ insert_source :: proc(memory_id, message_id: i64) -> bool {
 string_field :: proc(obj: json.Object, key: string, max_size: int) -> (string, bool) {
  value, ok := obj[key].(json.String)
  text := string(value)
- return text, ok && valid_text(text) && len(text) <= max_size
+ return text, ok && valid_text(text,max_size)
 }
 valid_date :: proc(text: string) -> bool {
  // An ISO calendar date or UTC timestamp; SQLite additionally validates the calendar.
@@ -683,7 +683,7 @@ conversation_export :: proc "c" (output_dir: cstring) -> bool {
  person:=json_query(person_sql)
  delete(person_sql)
  if person==nil do return false
- metadata:=fmt.aprintf(`{{"format":2,"snapshot":"%s","person":%s,"messages":%d,"memories":%d,"sources":%d,"jobs":%d,"profiles":%d,"documents":%d,"document_sources":%d,"chunks":{{"messages":%d,"memories":%d,"memory_sources":%d,"jobs":%d,"person_profiles":%d,"source_documents":%d,"memory_document_sources":%d}},"chunk_bytes_target":1048576,"chunk_bytes_max":2097152}}`,name,string(person),counts[0],counts[1],counts[2],counts[3],counts[4],counts[5],counts[6],chunks[0],chunks[1],chunks[2],chunks[3],chunks[4],chunks[5],chunks[6])
+ metadata:=fmt.aprintf(`{{"format":2,"snapshot":"%s","person":%s,"messages":%d,"memories":%d,"sources":%d,"jobs":%d,"profiles":%d,"documents":%d,"document_sources":%d,"chunks":{{"messages":%d,"memories":%d,"memory_sources":%d,"jobs":%d,"person_profiles":%d,"source_documents":%d,"memory_document_sources":%d}},"chunk_bytes_target":1048576,"chunk_bytes_max":16777216}}`,name,string(person),counts[0],counts[1],counts[2],counts[3],counts[4],counts[5],counts[6],chunks[0],chunks[1],chunks[2],chunks[3],chunks[4],chunks[5],chunks[6])
  defer delete(metadata)
  temporary:=strings.concatenate({base,"/metadata.json.tmp"})
  defer delete(temporary)

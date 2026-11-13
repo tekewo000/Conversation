@@ -54,7 +54,7 @@ if (-not (Test-Path -LiteralPath $key)) {
         '-keypass', 'android', '-alias', 'androiddebugkey', '-keyalg', 'RSA', '-keysize', '2048',
         '-validity', '10000', '-dname', 'CN=Android Debug,O=Conversation,C=JP', '-noprompt')
 }
-$apk = Join-Path $dist 'Conversation-0.3.0-arm64-debug.apk'
+$apk = Join-Path $dist 'Conversation-0.3.1-arm64-debug.apk'
 Run "$($tools.BuildTools)/apksigner.bat" @('sign', '--ks', $key, '--ks-key-alias', 'androiddebugkey',
     '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--out', $apk, "$build/aligned.apk")
 Run "$($tools.BuildTools)/apksigner.bat" @('verify', '--verbose', $apk)

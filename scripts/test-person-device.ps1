@@ -14,6 +14,8 @@ New-Item -ItemType Directory -Force -Path "$build/classes", "$build/dex" | Out-N
 & "$($tools.JavaHome)/bin/javac.exe" '-J-Duser.language=en' '-Xlint:-options' -encoding UTF-8 --release 8 -classpath $tools.PlatformJar -d "$build/classes" `
     (Join-Path $repo 'android/src/jp/tekewo/conversation/GitHubTokenStore.java') `
     (Join-Path $repo 'android/src/jp/tekewo/conversation/BackupArchive.java') `
+    (Join-Path $repo 'android/src/jp/tekewo/conversation/PersonDocument.java') `
+    (Join-Path $repo 'android/src/jp/tekewo/conversation/GitArchiveFiles.java') `
     (Join-Path $repo 'android/device-tests/jp/tekewo/conversation/PersonDeviceProbe.java')
 if ($LASTEXITCODE -ne 0) { throw 'Person device probe compilation failed.' }
 # Only the harness enters the dex; production classes come from the installed APK.
