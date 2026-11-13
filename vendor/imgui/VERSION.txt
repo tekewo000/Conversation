@@ -1,0 +1,5 @@
+Dear ImGui v1.92.5
+Upstream: https://github.com/ocornut/imgui
+Tag commit: 6d910d5487d11ca567b61c7824b0c78c569d62f0
+Only core sources and the matching OpenGL3 renderer backend are included.
+Source files are unmodified. See LICENSE.txt for the MIT license.
