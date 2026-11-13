@@ -32,7 +32,6 @@ bool renderer_ready = false;
 bool scroll_to_bottom = true;
 int width = 1;
 int height = 1;
-int tab = 0;
 float density = 1.0f;
 float pending_scroll = 0.0f;
 ImVec2 list_min;
@@ -41,7 +40,6 @@ std::vector<unsigned char> japanese_font;
 std::vector<unsigned char> emoji_font;
 std::string storage_path;
 std::string error;
-std::string notice;
 std::chrono::steady_clock::time_point last_frame;
 
 struct Touch {
@@ -118,7 +116,6 @@ void core_error() {
 bool remember_message(int index) {
     if (!conversation_remember(index)) { core_error(); return false; }
     error.clear();
-    notice = "大切な会話として固定しました";
     return true;
 }
 
@@ -129,14 +126,14 @@ void apply_style() {
     style.WindowPadding = ImVec2(16, 16);
     style.FramePadding = ImVec2(12, 10);
     style.ItemSpacing = ImVec2(10, 12);
-    style.ChildRounding = 12;
+    style.ChildRounding = 0;
     style.FrameRounding = 8;
     style.ScrollbarSize = 12;
     style.WindowBorderSize = 0;
     style.Colors[ImGuiCol_Text] = ImVec4(0.90f, 0.93f, 0.95f, 1);
     style.Colors[ImGuiCol_TextDisabled] = ImVec4(0.61f, 0.67f, 0.71f, 1);
     style.Colors[ImGuiCol_WindowBg] = ImVec4(0.075f, 0.09f, 0.11f, 1);
-    style.Colors[ImGuiCol_ChildBg] = ImVec4(0.10f, 0.12f, 0.145f, 1);
+    style.Colors[ImGuiCol_ChildBg] = ImVec4(0.075f, 0.09f, 0.11f, 1);
     style.Colors[ImGuiCol_Border] = ImVec4(0.23f, 0.28f, 0.32f, 1);
     style.Colors[ImGuiCol_Button] = ImVec4(0.16f, 0.20f, 0.23f, 1);
     style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.22f, 0.29f, 0.32f, 1);
@@ -163,35 +160,7 @@ void draw_ui() {
     ImGui::SetNextWindowSize(ImVec2(static_cast<float>(width), static_cast<float>(height)));
     ImGui::Begin("Conversation", nullptr, ImGuiWindowFlags_NoDecoration |
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-    ImGui::PushFont(nullptr, 23.0f * d);
-    ImGui::TextUnformatted("Conversation");
-    ImGui::PopFont();
-    ImGui::TextDisabled("AI未接続・会話は自動保存");
-    if (!error.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.49f, 1));
-        ImGui::PushTextWrapPos(0);
-        ImGui::TextUnformatted(error.c_str());
-        ImGui::PopTextWrapPos();
-        ImGui::PopStyleColor();
-    } else if (!notice.empty()) {
-        ImGui::TextUnformatted(notice.c_str());
-    }
-    const float tab_width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2;
-    const bool chat_active = tab == 0;
-    if (chat_active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.32f, 0.28f, 1));
-    if (ImGui::Button("会話", ImVec2(tab_width, 48 * d))) tab = 0;
-    if (chat_active) ImGui::PopStyleColor();
-    ImGui::SameLine();
-    char memory_label[64];
-    std::snprintf(memory_label, sizeof(memory_label), "記憶 (%d)", core_ready ? conversation_memory_count() : 0);
-    const bool memory_active = tab == 1;
-    if (memory_active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.32f, 0.28f, 1));
-    if (ImGui::Button(memory_label, ImVec2(tab_width, 48 * d))) tab = 1;
-    if (memory_active) ImGui::PopStyleColor();
-
-    const int current_tab = tab;
-    ImGui::BeginChild(current_tab == 0 ? "chat" : "memory", ImVec2(0, 0),
-                      ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::BeginChild("chat", ImVec2(0, 0), ImGuiChildFlags_None);
     list_min = ImGui::GetWindowPos();
     list_max = ImVec2(list_min.x + ImGui::GetWindowSize().x, list_min.y + ImGui::GetWindowSize().y);
     if (pending_scroll != 0) {
@@ -199,24 +168,29 @@ void draw_ui() {
         pending_scroll = 0;
         scroll_to_bottom = false;
     }
-    const int count = core_ready ? (current_tab == 0 ? conversation_message_count() : conversation_memory_count()) : 0;
-    if (count == 0) {
-        ImGui::PushTextWrapPos(0);
-        ImGui::TextUnformatted(current_tab == 0 ? "まだ会話がありません。\n下の入力欄から、話したいことを残せます。"
-                                               : "AI接続後、会話から記憶を自動で整理します。\n現在は会話の全文を自動保存しています。");
-        ImGui::PopTextWrapPos();
-    }
+    const int count = core_ready ? conversation_message_count() : 0;
+    const float available = ImGui::GetContentRegionAvail().x;
+    const float padding = 12 * d;
+    const float max_width = std::max(1.0f, std::min(available * 0.86f, 600 * d));
+    const float wrap = std::max(1.0f, max_width - padding * 2);
     for (int i = 0; i < count; ++i) {
-        ImGui::PushID(i);
-        ImGui::TextDisabled(current_tab == 0 ? "あなた" : "記憶 %d", i + 1);
-        const char* text = current_tab == 0 ? conversation_message_text(i) : conversation_memory_text(i);
-        ImGui::PushTextWrapPos(0);
-        ImGui::TextUnformatted(text ? text : "");
-        ImGui::PopTextWrapPos();
-        if (i + 1 != count) { ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing(); }
-        ImGui::PopID();
+        const char* text = conversation_message_text(i);
+        if (!text) continue;
+        const ImVec2 size = ImGui::CalcTextSize(text, nullptr, false, wrap);
+        const float bubble_width = std::min(max_width, size.x + padding * 2);
+        const float bubble_height = size.y + 10 * d * 2;
+        const ImVec2 cursor = ImGui::GetCursorScreenPos();
+        const ImVec2 origin(cursor.x + available - bubble_width, cursor.y);
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        draw->AddRectFilled(origin, ImVec2(origin.x + bubble_width, origin.y + bubble_height),
+                            IM_COL32(39, 49, 57, 255), 16 * d);
+        draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                      ImVec2(origin.x + padding, origin.y + 10 * d),
+                      ImGui::GetColorU32(ImGuiCol_Text), text, nullptr, wrap);
+        ImGui::Dummy(ImVec2(available, bubble_height));
+        ImGui::Spacing();
     }
-    if (current_tab == 0 && scroll_to_bottom) {
+    if (scroll_to_bottom) {
         ImGui::SetScrollHereY(1);
         scroll_to_bottom = false;
     }
@@ -357,8 +331,6 @@ Java_jp_tekewo_conversation_MainActivity_nativeSend(JNIEnv* env, jclass, jbyteAr
         if (!read_text(env, text, message)) return java_string(env, "入力に無効な文字が含まれています。");
         if (!conversation_send(message.c_str())) { core_error(); return java_string(env, error); }
         error.clear();
-        notice.clear();
-        tab = 0;
         scroll_to_bottom = true;
         return java_string(env, "");
     } catch (const std::exception&) {

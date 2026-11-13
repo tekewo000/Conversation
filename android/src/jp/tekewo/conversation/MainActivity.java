@@ -6,6 +6,13 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.graphics.Color;
 import android.graphics.Insets;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.ColorFilter;
+import android.graphics.PixelFormat;
 import android.opengl.GLSurfaceView;
 import android.os.Build;
 import android.os.Bundle;
@@ -18,7 +25,7 @@ import android.view.WindowManager;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
-import android.widget.Button;
+import android.widget.ImageButton;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -83,21 +90,6 @@ public final class MainActivity extends Activity {
         });
         setContentView(root);
 
-        LinearLayout header = new LinearLayout(this);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = new TextView(this);
-        title.setText("入力・保存プレビュー");
-        title.setTextColor(Color.rgb(220, 230, 238));
-        title.setTextSize(14);
-        title.setPadding(dp(16), dp(6), dp(8), dp(6));
-        header.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-        Button history = new Button(this);
-        history.setText("一覧");
-        history.setContentDescription("履歴と記憶をテキストで読む・コピーする");
-        history.setOnClickListener(view -> showHistoryMenu());
-        header.addView(history, new LinearLayout.LayoutParams(dp(76), dp(48)));
-        root.addView(header);
-
         try {
             System.loadLibrary("conversation");
             String error = nativeInit(getFilesDir().getAbsolutePath().getBytes(StandardCharsets.UTF_8),
@@ -117,15 +109,21 @@ public final class MainActivity extends Activity {
         root.addView(surface, new LinearLayout.LayoutParams(-1, 0, 1));
 
         LinearLayout composer = new LinearLayout(this);
-        composer.setGravity(Gravity.BOTTOM);
-        composer.setPadding(dp(10), dp(6), dp(10), dp(8));
+        composer.setGravity(Gravity.CENTER_VERTICAL);
+        composer.setPadding(dp(8), dp(6), dp(12), dp(10));
+        ImageButton menu = iconButton(false, "メニュー");
+        menu.setOnClickListener(view -> showHistoryMenu());
+        composer.addView(menu, new LinearLayout.LayoutParams(dp(48), dp(48)));
         input = new EditText(this);
         input.setId(0x434f4e);
         // Drafts live in app storage, outside Android's size-limited activity-state transaction.
         input.setSaveEnabled(false);
         input.setTextColor(Color.rgb(230, 238, 242));
         input.setHintTextColor(Color.rgb(156, 171, 181));
-        input.setHint("メッセージを書く（この版はAI未接続）");
+        input.setContentDescription("メッセージ入力");
+        input.setBackground(roundBackground(Color.rgb(28, 34, 41), 24));
+        input.setPadding(dp(16), dp(10), dp(16), dp(10));
+        input.setMinHeight(dp(48));
         input.setTextSize(17);
         input.setMinLines(1);
         input.setMaxLines(5);
@@ -135,13 +133,12 @@ public final class MainActivity extends Activity {
         input.setEnabled(ready);
         composer.addView(input, new LinearLayout.LayoutParams(0, -2, 1));
 
-        Button send = new Button(this);
-        send.setText("保存");
-        send.setContentDescription("メッセージを端末に保存");
-        send.setMinHeight(dp(48));
+        ImageButton send = iconButton(true, "送信");
         send.setEnabled(ready);
         send.setOnClickListener(view -> sendMessage());
-        composer.addView(send, new LinearLayout.LayoutParams(dp(76), -2));
+        LinearLayout.LayoutParams sendLayout = new LinearLayout.LayoutParams(dp(48), dp(48));
+        sendLayout.leftMargin = dp(8);
+        composer.addView(send, sendLayout);
         root.addView(composer);
 
         input.setText(getPreferences(MODE_PRIVATE).getString("draft", ""));
@@ -178,9 +175,18 @@ public final class MainActivity extends Activity {
 
     private void showHistoryMenu() {
         if (!ready) return;
-        new AlertDialog.Builder(this).setTitle("履歴と記憶")
-                .setItems(new String[]{"会話を読む・コピー", "固定した会話を読む・コピー", "大切な会話を固定（任意）"}, (dialog, which) -> {
-                    if (which < 2) showTranscript(which == 1);
+        ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE))
+                .hideSoftInputFromWindow(input.getWindowToken(), 0);
+        input.clearFocus();
+        new AlertDialog.Builder(this).setTitle("メニュー")
+                .setItems(new String[]{"会話", "一覧・コピー", "記憶", "会話を固定", "接続状態"}, (dialog, which) -> {
+                    if (which == 0) { surface.renderBurst(); return; }
+                    if (which == 1 || which == 2) showTranscript(which == 2);
+                    else if (which == 4) {
+                        new AlertDialog.Builder(this).setTitle("接続状態")
+                                .setMessage("AIはまだ接続されていません。現在は会話の全文を端末に保存します。記憶の自動整理は未実装です。")
+                                .setPositiveButton("閉じる", null).show();
+                    }
                     else {
                         String[] messages = nativeMessageTexts();
                         if (messages.length == 0) { showError("まだ会話がありません。"); return; }
@@ -220,6 +226,55 @@ public final class MainActivity extends Activity {
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private GradientDrawable roundBackground(int color, int radius) {
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(color);
+        background.setCornerRadius(dp(radius));
+        return background;
+    }
+
+    private ImageButton iconButton(boolean send, String label) {
+        ImageButton button = new ImageButton(this);
+        button.setContentDescription(label);
+        button.setImageDrawable(new ControlIcon(send));
+        button.setPadding(dp(12), dp(12), dp(12), dp(12));
+        android.util.TypedValue ripple = new android.util.TypedValue();
+        getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, ripple, true);
+        button.setBackgroundResource(ripple.resourceId);
+        if (send) button.setBackground(roundBackground(Color.rgb(130, 197, 176), 24));
+        return button;
+    }
+
+    private static final class ControlIcon extends Drawable {
+        private final boolean send;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        ControlIcon(boolean send) { this.send = send; }
+        @Override public void draw(Canvas canvas) {
+            canvas.save();
+            canvas.translate(getBounds().left, getBounds().top);
+            canvas.scale(getBounds().width() / 24f, getBounds().height() / 24f);
+            paint.setColor(send ? Color.rgb(16, 30, 27) : Color.rgb(222, 232, 239));
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(1.8f);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeJoin(Paint.Join.ROUND);
+            if (send) {
+                Path arrow = new Path();
+                arrow.moveTo(6, 11); arrow.lineTo(12, 5); arrow.lineTo(18, 11);
+                canvas.drawPath(arrow, paint);
+                canvas.drawLine(12, 5, 12, 20, paint);
+            } else {
+                canvas.drawLine(4, 6, 20, 6, paint);
+                canvas.drawLine(4, 12, 20, 12, paint);
+                canvas.drawLine(4, 18, 20, 18, paint);
+            }
+            canvas.restore();
+        }
+        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
+        @Override public void setColorFilter(ColorFilter filter) { paint.setColorFilter(filter); }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
     }
 
     @Override public void onPause() {

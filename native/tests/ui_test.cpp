@@ -93,14 +93,10 @@ int main() {
         ImFontBaked* baked = font->GetFontBaked(51);
         assert(baked->FindGlyphNoFallback(0x3042));
         assert(baked->FindGlyphNoFallback(0x1f600));
-        tab = 0;
         frame();
         frame();
-        // Centers of the 48dp tabs at 3x density, below the title and status.
-        tap(780, 312);
-        assert(tab == 1);
-        tap(240, 312);
-        assert(tab == 0);
+        // The transcript uses the full surface; headers/tabs must not take space.
+        assert(list_min.y <= 48 && list_max.y >= height - 48);
 
         if (generation == 0) {
             for (int i = 0; i < 30; ++i) messages.push_back(messages.front());

@@ -83,3 +83,23 @@
 - Automatic semantic memory extraction is specified separately and remains
   unimplemented until AI integration; the UI explicitly distinguishes this
   from the existing automatic transcript persistence.
+
+## Chat-first interface
+
+- User requested that only conversation content be visible as text on the main
+  screen, with almost all available space dedicated to chat and other actions
+  grouped in one menu.
+- Removed header/title/status/role labels, tab bar, empty-state text and large
+  bordered panel. Messages now appear as right-aligned user bubbles. No AI
+  messages are invented while the connection is not implemented.
+- The native composer has a blank rounded editor plus authored menu/send icons
+  with 48dp targets and accessibility labels. Menu opens conversation, list/copy,
+  memory, optional pinning and connection state. Errors remain contextual dialogs.
+- A native geometry regression failed with the old header/tab layout and passed
+  after the transcript occupied the full GL surface. Font, scroll and context
+  recreation checks also passed; Odin tests ran in the APK build.
+- Installed the rebuilt APK on Pixel 10 Pro and inspected the actual chat and
+  menu/keyboard states. Startup smoke check passed. Existing messages and pins
+  were retained; no app storage was cleared.
+- Android briefly showed its package-update activity immediately after the
+  incremental install; a subsequent launch/startup check completed successfully.
