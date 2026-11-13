@@ -4,7 +4,7 @@ AndroidでAIの友達と会話し、出来事・好み・約束を自動で記�
 Odinが会話・記憶・SQLiteを管理し、Dear ImGuiでチャットを描画します。
 Android標準の入力欄、ChatGPTのサブスク認証を組み合わせています。
 
-## 0.3.1 人物・Gitプレビュー
+## 0.3.2 人物・Gitプレビュー
 
 - 暗いチャット画面に本文と入力欄、メニュー・送信アイコンだけを表示。
 - メニューから人物切り替え、ChatGPTログイン、モデル選択、表示設定、Gitバックアップ。
@@ -41,7 +41,17 @@ APIキーは要求しません。接続情報はAndroid Keystoreで暗号化し�
 旧版の`notebook.json`は起動時に一度だけ移行し、元ファイルは削除しません。
 既存の旧固定データも出典付きの互換記録として保全します。
 
-人物を作る手順:
+名前だけで人物を作る手順:
+
+1. メニュー → 人物 → **人物を追加**。
+2. 好きな名前を入力して「作成」。人物ファイルやGitHub設定は不要です。
+
+最初は名前だけを設定し、性格や過去の出来事は追加しません。会話と記憶は人物ごとに端末内へ保存します。
+メニュー → 人物 → **人物を削除** で対象を選び、確認すると、端末の会話・記憶・下書き・GitHub接続情報も削除します。
+GitHub上のリポジトリや外部に書き出したZIPは残ります。「これまでの会話」は削除対象に含めません。
+選択中の人物を削除すると「これまでの会話」に戻ります。応答・記憶整理中や対象人物のGit保存中は削除しません。
+
+人物ファイルを引き継いでGit保存する手順:
 
 1. [人物形式](docs/formats/person-v1.md)に合わせたUTF-8のMarkdownをスマホへ保存。
 2. GitHubで人物専用の**空の非公開リポジトリ**を用意。
@@ -85,14 +95,25 @@ Windows PowerShellで実行します。初回はSDK／NDK／Odin等の準備に�
 新規SDKでライセンス確認が必要な場合はセットアップが確認を表示します。
 
 ```powershell
-.\scripts\build-android.ps1
-.\scripts\install-android.ps1
+.\scripts\build-android.ps1 -Configuration Release
+.\scripts\install-android.ps1 -Configuration Release
 ```
 
-出力は`dist/Conversation-0.3.1-arm64-debug.apk`。
-Android10/API29以降・ARM64・OpenGL ES3向けの開発用APKです。
+出力は`dist/Conversation-0.3.2-arm64-release.apk`。既定の構成はReleaseです。
+Android10/API29以降・ARM64・OpenGL ES3向けです。
 USBデバッグを有効にし、このPCをスマホで許可してからインストールしてください。
 複数端末の場合は`install-android.ps1 -Serial <シリアル>`を指定します。
+
+Releaseはデバッグを無効にし、Odinを`-o:speed`、C/C++をCMake Release、DEXをreleaseモードでビルドします。
+署名・パッケージ・バージョン・デバッグ無効・16KiBページ対応を検証してからAPKを出力します。
+署名鍵とDPAPI保護されたパスワードは`%LOCALAPPDATA%/Conversation/signing/`に保管し、GitやAPKへ含めません。
+このフォルダは今後の更新に必要です。パスワードは作成したWindowsユーザーで復号するため、
+別PCへの移行には事前の鍵移行が必要です。ビルド用の`build/`や`.tools/`とは分けています。
+
+旧開発署名からは[APK署名ローテーション](https://developer.android.com/tools/apksigner#rotate-signing-keys)で、
+アプリを削除せず更新します。Releaseへの移行後は、旧署名のDebug APKでは上書きできません。
+署名エラー時にもアンインストールやデータ消去をせず、同じRelease鍵でビルドしてください。
+新規テスト環境用のDebugビルドは`-Configuration Debug`で明示的に作成できます。
 
 ## 検証
 
@@ -102,6 +123,7 @@ USBデバッグを有効にし、このPCをスマホで許可してからイン
 .\scripts\test-connection.ps1
 .\scripts\test-device.ps1 -Serial <シリアル>
 .\scripts\test-person-device.ps1 -Serial <シリアル>
+.\scripts\test-signing.ps1
 ```
 
 - Core: 移行・破損データ保全・2万件の会話／記憶・人物資料の出典・差分の再生・ロールバック。
@@ -109,6 +131,7 @@ USBデバッグを有効にし、このPCをスマホで許可してからイン
 - Connection: OAuth/SSE、人物ファイル・一覧、プロフィール注入、Gitの競合・中断復帰・公開先拒否。
 - Device: 起動と初期化エラーの確認。実機の実通信や長期的な会話品質を代替するテストではありません。
 - Person device: 署名済みテストAPKから合成人物だけを使い、Keystore・JNI取り込み・切替・書き出しを実機確認。実行時はアプリを閉じます。
+- 署名移行時: 更新前に`test-person-device.ps1 -Configuration Debug -Mode Baseline`、更新後に`-Configuration Release -Mode Verify`で既存データと認証の引き継ぎを確認します。通常の合成人物試験は`-Mode Full`です。
 
 ## ソース構成
 

@@ -269,3 +269,43 @@ the app is closed are not implemented.
 Large live GitHub upload is not verified here. Large profiles are sent on every
 reply and increase model input usage; aggregate serialized import limits still
 reject atomically rather than truncating oversized input.
+
+## 2026-11-14: Optimized signed Release APK (0.3.2)
+
+- Release is the default build/install configuration. Each build uses fresh
+  isolated staging, Odin `-o:speed`, CMake Release and D8 release mode. Runtime
+  bounds checks remain enabled. Native debug sections are stripped from the APK;
+  the unstripped library remains under the ignored build directory.
+- The packaged manifest is generated with debuggable=false and version0.3.2,
+  code5. Signature, package/version, debug flag, ELF16KiB LOAD alignment and APK
+  alignment are checked before copying the output to dist/.
+- A new3072-bit RSA release key is kept outside the repository under
+  `%LOCALAPPDATA%/Conversation/signing/`. Its random password is protected with
+  Windows CurrentUser DPAPI and passed to tools through temporary environment
+  variables, cleared afterward. Repeated setup preserves the same key; incomplete
+  key/password state fails rather than silently generating a replacement.
+- Verified v3 signing lineage from the old development certificate to the release
+  certificate. The old certificate retains installed-data capability only;
+  shared-UID, permission, rollback and authenticator capabilities are disabled.
+  Rotation starts atAPI28, below the app's minimumAPI29.
+- Desktop verification passed21 Odin tests plus C ABI roundtrip, native tests,
+  seven JVM suites (58 connection checks), and signing-key stability/cleanup.
+- Before migration, a signed diagnostic saved only hashes/counts of existing rows,
+  registry hash, app UID and credential-presence booleans. The in-place Release
+  update succeeded. A diagnostic signed with the new certificate then verified
+  unchanged UID, registry, old row prefixes and readable existing credentials.
+  The baseline contained1 history,10 messages and3 memories. The diagnostic did
+  not export passwords, token values or conversation text.
+- Release instrumentation passed the real Keystore/isolation/rollback/Unicode
+  checks and the2MiB/128KiB/2048/16KiB combined person fixture through parser,
+  optimized native import, Git archive generation and ZIP export. Synthetic
+  directories/keys and the temporary diagnostic APK were removed. The installed
+  package reports version0.3.2 and no DEBUGGABLE flag; startup smoke check passed.
+- Final signed APK: `dist/Conversation-0.3.2-arm64-release.apk`,5,542,525 bytes.
+  SHA256: `c7dbff892549349f8e44d0c7cda7ec42c266faddcec86d6e843220db0ddde9d6`.
+  This build includes the completed local-person and model/Effort/Fast controls.
+
+Fresh live AI inference and a large live GitHub upload were not sent during this
+release check. No app-store or GitHub Release publication was performed. Future
+updates must retain the release key/password/lineage; old-key Debug APKs cannot
+overwrite this migrated installation, and the non-debuggable app denies run-as.

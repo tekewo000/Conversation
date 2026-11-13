@@ -3,12 +3,19 @@ package jp.tekewo.conversation;
 import android.app.Activity;
 import android.app.Instrumentation;
 import android.content.Context;
+import android.database.Cursor;
+import android.database.CursorWindow;
+import android.database.sqlite.SQLiteCursor;
+import android.database.sqlite.SQLiteDatabase;
 import android.os.Bundle;
+import android.util.AtomicFile;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Method;
@@ -17,6 +24,8 @@ import java.nio.file.Files;
 import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.util.UUID;
+import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipEntry;
@@ -34,6 +43,8 @@ public final class PersonDeviceProbe extends Instrumentation {
             String probeId = arguments.getString("probe_id");
             check(probeId != null && UUID.fromString(probeId).toString().equals(probeId), "Valid synthetic probe ID");
             if ("true".equals(arguments.getString("cleanup_only"))) cleanupOwned(getTargetContext(), probeId);
+            else if ("snapshot-existing".equals(arguments.getString("mode"))) existingData(getTargetContext(), false);
+            else if ("verify-existing".equals(arguments.getString("mode"))) existingData(getTargetContext(), true);
             else runProbe(getTargetContext(), probeId);
             result.putString("stream", "PERSON_DEVICE_PROBE_PASS\n");
             finish(Activity.RESULT_OK, result);
@@ -42,6 +53,126 @@ public final class PersonDeviceProbe extends Instrumentation {
             result.putString("stream", "PERSON_DEVICE_PROBE_FAIL\n" + trace);
             finish(Activity.RESULT_CANCELED, result);
         }
+    }
+
+    private void existingData(Context app, boolean verify) throws Exception {
+        AtomicFile marker = new AtomicFile(new File(app.getNoBackupFilesDir(), "release-verification.json"));
+        JSONObject baseline = null;
+        if (verify) {
+            try (FileInputStream input = marker.openRead()) { baseline = new JSONObject(new String(readBounded(input, 1024 * 1024), StandardCharsets.UTF_8)); }
+            check(baseline.getInt("format") == 1 && baseline.getInt("uid") == android.os.Process.myUid(), "Installed upgrade retained the app UID");
+        }
+        File root = app.getFilesDir().getCanonicalFile();
+        File registry = new File(root, "people-registry.json");
+        check(!Files.isSymbolicLink(registry.toPath()) && (!registry.exists() || registry.length() <= 1024 * 1024), "Valid existing registry path");
+        byte[] registryBytes = registry.exists() ? Files.readAllBytes(registry.toPath()) : new byte[0];
+        String registryHash = digest(registryBytes);
+        JSONObject index = registryBytes.length == 0 ? new JSONObject().put("people", new JSONArray()) : new JSONObject(new String(registryBytes, StandardCharsets.UTF_8));
+        Map<String, File> directories = new LinkedHashMap<>();
+        if (new File(root, "conversation.sqlite3").exists()) directories.put(digest(bytes("legacy")), root);
+        File people = new File(root, "people");
+        check(!Files.isSymbolicLink(people.toPath()), "Existing people directory is not a symbolic link");
+        JSONArray persons = index.getJSONArray("people");
+        JSONObject github = new JSONObject();
+        for (int i = 0; i < persons.length(); i++) {
+            String id = persons.getJSONObject(i).getString("id");
+            check(UUID.fromString(id).toString().equals(id), "Existing person ID is valid");
+            File directory = new File(people, id);
+            check(!Files.isSymbolicLink(directory.toPath()) && directory.getCanonicalFile().getParentFile().equals(people.getCanonicalFile()), "Existing person directory stays under people");
+            String identity = digest(bytes(id));
+            check(!directories.containsKey(identity), "Existing person identities are unique");
+            directories.put(identity, directory);
+            github.put(identity, !new GitHubTokenStore(app, id).get().isEmpty());
+        }
+        JSONObject connection = new ConnectionStore(app).load();
+        boolean access = !connection.optString("access_token").isEmpty(), refresh = !connection.optString("refresh_token").isEmpty();
+        JSONObject databases = new JSONObject();
+        long messages = 0, memories = 0;
+        for (Map.Entry<String, File> entry : directories.entrySet()) {
+            String identity = entry.getKey();
+            if (verify && !baseline.getJSONObject("databases").has(identity)) continue;
+            File database = new File(entry.getValue(), "conversation.sqlite3");
+            check(database.isFile() && !Files.isSymbolicLink(database.toPath())
+                    && database.getCanonicalFile().getParentFile().equals(entry.getValue().getCanonicalFile()), "Existing database path is valid");
+            JSONObject old = verify ? baseline.getJSONObject("databases").getJSONObject(identity) : null;
+            JSONObject tables = databaseDigests(database, old);
+            databases.put(identity, tables);
+            messages += tables.has("messages") ? tables.getJSONObject("messages").getLong("count") : 0;
+            memories += tables.has("memories") ? tables.getJSONObject("memories").getLong("count") : 0;
+        }
+        if (verify) {
+            check(registryHash.equals(baseline.getString("registry_sha256")), "Existing registry bytes are preserved");
+            check(databases.length() == baseline.getJSONObject("databases").length(), "All baseline histories remain present");
+            check(!baseline.getBoolean("chatgpt_access_present") || access, "Existing ChatGPT access credential remains readable");
+            check(!baseline.getBoolean("chatgpt_refresh_present") || refresh, "Existing ChatGPT refresh credential remains readable");
+            JSONObject oldGithub = baseline.getJSONObject("github_present");
+            java.util.Iterator<String> ids = oldGithub.keys();
+            while (ids.hasNext()) { String id = ids.next(); check(!oldGithub.getBoolean(id) || github.optBoolean(id), "Existing GitHub credential remains readable"); }
+            report("PASS: release upgrade preserved app UID, registry, old SQLite rows, and readable credential presence (" + databases.length() + " histories, " + messages + " messages, " + memories + " memories)");
+        } else {
+            JSONObject snapshot = new JSONObject().put("format", 1).put("uid", android.os.Process.myUid()).put("registry_sha256", registryHash)
+                    .put("databases", databases).put("github_present", github).put("chatgpt_access_present", access).put("chatgpt_refresh_present", refresh);
+            byte[] encoded = bytes(snapshot.toString());
+            FileOutputStream output = null;
+            try {
+                output = marker.startWrite(); output.write(encoded); marker.finishWrite(output); output = null;
+                try (FileInputStream input = marker.openRead()) { check(MessageDigest.isEqual(encoded, readBounded(input, 1024 * 1024)), "Baseline marker was saved atomically"); }
+            } finally { if (output != null) marker.failWrite(output); }
+            report("PASS: saved release baseline containing only row digests/counts, UID, registry digest, and credential-presence booleans (" + databases.length() + " histories, " + messages + " messages, " + memories + " memories)");
+        }
+    }
+
+    private static JSONObject databaseDigests(File file, JSONObject baseline) throws Exception {
+        String[] tables = {"meta", "messages", "jobs", "memories", "memory_sources", "person_profiles", "source_documents", "memory_document_sources", "archive_transactions", "archive_events"};
+        JSONObject result = new JSONObject();
+        try (SQLiteDatabase database = SQLiteDatabase.openDatabase(file.getPath(), null, SQLiteDatabase.OPEN_READONLY | SQLiteDatabase.NO_LOCALIZED_COLLATORS)) {
+            for (String table : tables) {
+                boolean exists;
+                try (Cursor check = database.rawQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", new String[]{table})) { exists = check.moveToFirst(); }
+                if (baseline != null && !baseline.has(table)) continue;
+                check(exists || baseline == null, "Baseline SQLite table still exists: " + table);
+                if (!exists) continue;
+                long limit;
+                if (baseline != null) limit = baseline.getJSONObject(table).getLong("max_rowid");
+                else try (Cursor maximum = database.rawQuery("SELECT coalesce(max(rowid),0) FROM " + table, null)) { check(maximum.moveToFirst(), "Read SQLite row boundary"); limit = maximum.getLong(0); }
+                MessageDigest sha = MessageDigest.getInstance("SHA-256");
+                long count = 0;
+                try (Cursor rows = database.rawQuery("SELECT rowid,* FROM " + table + " WHERE rowid<=? ORDER BY rowid", new String[]{Long.toString(limit)})) {
+                    ((SQLiteCursor)rows).setWindow(new CursorWindow("release-verification", 8 * 1024 * 1024L));
+                    for (String column : rows.getColumnNames()) hashValue(sha, Cursor.FIELD_TYPE_STRING, bytes(column));
+                    while (rows.moveToNext()) {
+                        count++;
+                        for (int column = 0; column < rows.getColumnCount(); column++) {
+                            int type = rows.getType(column); byte[] value;
+                            if (type == Cursor.FIELD_TYPE_NULL) value = new byte[0];
+                            else if (type == Cursor.FIELD_TYPE_BLOB) value = rows.getBlob(column);
+                            else if (type == Cursor.FIELD_TYPE_INTEGER) value = bytes(Long.toString(rows.getLong(column)));
+                            else if (type == Cursor.FIELD_TYPE_FLOAT) value = bytes(Long.toString(Double.doubleToLongBits(rows.getDouble(column))));
+                            else value = bytes(rows.getString(column));
+                            hashValue(sha, type, value);
+                        }
+                    }
+                }
+                String fingerprint = hex(sha.digest());
+                if (baseline != null) check(count == baseline.getJSONObject(table).getLong("count")
+                        && fingerprint.equals(baseline.getJSONObject(table).getString("sha256")), "Existing SQLite rows changed: " + table);
+                result.put(table, new JSONObject().put("max_rowid", limit).put("count", count).put("sha256", fingerprint));
+            }
+        }
+        return result;
+    }
+
+    private static void hashValue(MessageDigest digest, int type, byte[] value) {
+        digest.update((byte)type);
+        for (int shift = 24; shift >= 0; shift -= 8) digest.update((byte)(value.length >>> shift));
+        digest.update(value);
+    }
+    private static String digest(byte[] bytes) throws Exception { return hex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
+    private static String hex(byte[] bytes) { StringBuilder result = new StringBuilder(); for (byte b : bytes) result.append(String.format(java.util.Locale.ROOT, "%02x", b & 255)); return result.toString(); }
+    private static byte[] readBounded(InputStream input, int limit) throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream(); byte[] buffer = new byte[8192]; int count;
+        while ((count = input.read(buffer)) != -1) { if (output.size() + count > limit) throw new IOException("Verification marker is too large"); output.write(buffer, 0, count); }
+        return output.toByteArray();
     }
 
     private void runProbe(Context app, String probeId) throws Exception {
@@ -149,6 +280,7 @@ public final class PersonDeviceProbe extends Instrumentation {
             check(sawMetadata && sawMessage && sawSource, "ZIP includes metadata, conversation, and original source");
             report("PASS: native export metadata JSON and BackupArchive ZIP preserve Unicode and original source");
             probeExpandedPerson(root);
+            probeDigestRules(root);
         } finally {
             cleanupOwned(app, probeId);
             check(!root.exists() && !fileA.exists() && !fileB.exists(), "Probe files removed");
@@ -156,6 +288,21 @@ public final class PersonDeviceProbe extends Instrumentation {
             check(!keys.containsAlias(alias(idA)) && !keys.containsAlias(alias(idB)), "Probe keys removed");
             report("PASS: cleaned only synthetic UUID directories and token aliases");
         }
+    }
+
+    private void probeDigestRules(File root) throws Exception {
+        File file = new File(root, "release-digest-selfcheck.sqlite3");
+        try (SQLiteDatabase database = SQLiteDatabase.openOrCreateDatabase(file, null)) {
+            database.execSQL("CREATE TABLE jobs(id INTEGER PRIMARY KEY,processed INTEGER NOT NULL)");
+            database.execSQL("INSERT INTO jobs VALUES(1,0)");
+        }
+        JSONObject baseline = databaseDigests(file, null);
+        try (SQLiteDatabase database = SQLiteDatabase.openOrCreateDatabase(file, null)) { database.execSQL("INSERT INTO jobs VALUES(2,0)"); }
+        check(databaseDigests(file, baseline).getJSONObject("jobs").getLong("count") == 1, "Row-prefix verification permits appended rows");
+        try (SQLiteDatabase database = SQLiteDatabase.openOrCreateDatabase(file, null)) { database.execSQL("UPDATE jobs SET processed=1 WHERE id=1"); }
+        try { databaseDigests(file, baseline); throw new IOException("Changed old rows were not detected"); }
+        catch (AssertionError expected) { check(expected.getMessage().equals("Existing SQLite rows changed: jobs"), "Changed-row failure identifies only its table"); }
+        report("PASS: release row-prefix digests permit appended rows and detect changed old rows");
     }
 
     private void probeExpandedPerson(File root) throws Exception {
