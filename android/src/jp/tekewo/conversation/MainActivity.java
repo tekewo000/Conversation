@@ -185,7 +185,7 @@ public final class MainActivity extends Activity {
         input.setBackground(roundBackground(Color.rgb(28, 34, 41), 24));
         input.setPadding(dp(16), dp(10), dp(16), dp(10));
         input.setMinHeight(dp(48));
-        input.setTextSize(textSize);
+        input.setTextSize(20);
         input.setMinLines(1);
         input.setMaxLines(5);
         input.setVerticalScrollBarEnabled(false);
@@ -853,8 +853,9 @@ public final class MainActivity extends Activity {
     }
 
     private void applyTypography() {
-        input.setTextSize(textSize);
-        nativeSetTypography(input.getTextSize(), messageGap);
+        float pixels = android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP,
+                textSize, getResources().getDisplayMetrics());
+        nativeSetTypography(pixels, messageGap);
         if (surface != null) surface.renderBurst();
     }
 
