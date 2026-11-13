@@ -38,6 +38,18 @@ final class PersonDocument {
         sourceSha256 = sha256(utf8(raw)); this.seeds = seeds;
     }
 
+    static PersonDocument named(String input) {
+        if (input == null || !input.matches("[^\\p{Cntrl}\\u2028\\u2029]+"))
+            throw invalid("名前を一行で入力してください。");
+        StringBuilder markdown = new StringBuilder("形式: conversation-person-v1\n\n");
+        for (String section : SECTIONS) {
+            markdown.append("## ").append(section).append('\n');
+            if (section.equals(SECTIONS[0])) markdown.append("- 名前: ").append(input.trim()).append('\n');
+            markdown.append('\n');
+        }
+        return parse(markdown.toString());
+    }
+
     static PersonDocument parse(byte[] bytes) {
         if (bytes == null || bytes.length > MAX_BYTES) throw invalid("人物ファイルは2 MiB以内にしてください。");
         try {

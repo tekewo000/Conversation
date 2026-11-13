@@ -60,10 +60,11 @@ final class PersonRegistry {
                 JSONObject record = records.getJSONObject(i);
                 String id = record.getString("id");
                 if (!validId(id) || people.containsKey(id)) throw new IOException("人物IDが不正です。");
-                String repository = normalizeRepository(record.getString("repository"));
-                if (!repositories.add(repository)) throw new IOException("同じリポジトリが複数の人物に設定されています。");
+                String repository = record.isNull("repository") ? null : normalizeRepository(record.getString("repository"));
+                if (repository != null && !repositories.add(repository)) throw new IOException("同じリポジトリが複数の人物に設定されています。");
                 long remoteId = record.optLong("remote_id", 0);
-                if (remoteId < 0 || (remoteId != 0 && !remoteIds.add(remoteId))) throw new IOException("GitHubリポジトリIDが重複しています。");
+                if (remoteId < 0 || (repository == null && remoteId != 0) || (remoteId != 0 && !remoteIds.add(remoteId)))
+                    throw new IOException("GitHubリポジトリIDが不正、または重複しています。");
                 File personDirectory = personDirectory(id);
                 File rawFile = new File(personDirectory, "person.md");
                 if (rawFile.length() > PersonDocument.MAX_BYTES || Files.isSymbolicLink(rawFile.toPath())) throw new IOException("人物ファイルが不正です。");
@@ -81,7 +82,7 @@ final class PersonRegistry {
 
     synchronized Person stage(PersonDocument doc, String repositoryInput) throws IOException {
         if (doc == null) throw new IllegalArgumentException("人物ファイルが必要です。");
-        String repository = normalizeRepository(repositoryInput);
+        String repository = repositoryInput == null ? null : normalizeRepository(repositoryInput);
         ensureAvailable(repository, 0, null);
         String id = UUID.randomUUID().toString();
         File directory = personDirectory(id);
@@ -116,6 +117,19 @@ final class PersonRegistry {
         if (!people.containsKey(id)) throw new IllegalArgumentException("人物が見つかりません。");
         if (activeId.equals(id)) return;
         persist(people, id); activeId = id;
+    }
+
+    synchronized void delete(String id) throws IOException {
+        if (LEGACY_ID.equals(id)) throw new IllegalArgumentException("これまでの会話は削除できません。");
+        if (!people.containsKey(id)) throw new IllegalArgumentException("人物が見つかりません。");
+        File directory = personDirectory(id);
+        Map<String, Person> updated = new LinkedHashMap<>(people); updated.remove(id);
+        String selectedId = activeId.equals(id) ? LEGACY_ID : activeId;
+        // Save the index first so a failed write cannot leave it pointing at deleted data.
+        persist(updated, selectedId);
+        people.remove(id); activeId = selectedId;
+        try { deleteDirectory(directory); }
+        catch (IOException error) { throw new IOException("人物は一覧から削除しましたが、端末のデータを完全に削除できませんでした。", error); }
     }
 
     synchronized void bindRemoteId(String personId, long remoteId) throws IOException {
@@ -160,7 +174,7 @@ final class PersonRegistry {
         List<Person> all = new ArrayList<>(people.values()); all.addAll(staged.values());
         for (Person person : all) {
             if (person.id.equals(self)) continue;
-            if (repository.equals(person.repository)) throw new IllegalArgumentException("このGitHubリポジトリは既に別の人物が使用しています。");
+            if (repository != null && repository.equals(person.repository)) throw new IllegalArgumentException("このGitHubリポジトリは既に別の人物が使用しています。");
             if (remoteId > 0 && person.remoteId == remoteId) throw new IllegalArgumentException("このGitHubリポジトリIDは既に別の人物が使用しています。");
         }
     }
@@ -169,7 +183,7 @@ final class PersonRegistry {
             JSONArray array = new JSONArray();
             for (Person person : records.values()) if (!person.id.equals(LEGACY_ID)) {
                 array.put(new JSONObject().put("id", person.id).put("name", person.name)
-                    .put("repository", person.repository).put("remote_id", person.remoteId));
+                    .put("repository", person.repository == null ? JSONObject.NULL : person.repository).put("remote_id", person.remoteId));
             }
             writeAtomic(index, new JSONObject().put("version", 1).put("active_id", selectedId).put("people", array).toString());
         } catch (JSONException error) { throw new IOException("人物一覧を保存できません。", error); }
@@ -199,7 +213,7 @@ final class PersonRegistry {
         if (Files.isSymbolicLink(file.toPath())) { Files.delete(file.toPath()); return; }
         if (file.isDirectory()) {
             File[] children = file.listFiles();
-            if (children == null) throw new IOException("保存待ちの人物を削除できません。");
+            if (children == null) throw new IOException("人物のデータを削除できません。");
             for (File child : children) deleteDirectory(child);
         }
         Files.deleteIfExists(file.toPath());

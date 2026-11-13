@@ -97,7 +97,7 @@ public final class MainActivity extends Activity {
     private boolean busy;
     private volatile boolean changingPerson;
     private String connectionStatus = "";
-    private volatile List<ChatGptConnection.Model> availableModels;
+    private volatile List<ChatRequest.Model> availableModels;
     private static byte[] bytes(String value) { return value.getBytes(StandardCharsets.UTF_8); }
     private void ui(Runnable action) {
         runOnUiThread(() -> { if (!closed && !isDestroyed() && !isFinishing()) action.run(); });
@@ -250,7 +250,7 @@ public final class MainActivity extends Activity {
 
     private String draftKey() { return activePerson.id.equals(PersonRegistry.LEGACY_ID) ? "draft" : "draft_" + activePerson.id; }
     private void saveDraft() {
-        if (input != null && activePerson != null) getPreferences(MODE_PRIVATE).edit()
+        if (!changingPerson && input != null && activePerson != null) getPreferences(MODE_PRIVATE).edit()
                 .putString(draftKey(), input.getText().toString()).commit();
     }
 
@@ -266,20 +266,30 @@ public final class MainActivity extends Activity {
 
     private void setBusy(boolean value) {
         busy = value;
-        input.setEnabled(ready);
+        input.setEnabled(ready && !changingPerson);
         send.setEnabled(ready && !value);
         send.setAlpha(value ? 0.45f : 1.0f);
     }
 
-    private String selectedModel() throws Exception {
+    private ChatRequest selectedRequest() throws Exception {
         String selected = getPreferences(MODE_PRIVATE).getString("model_slug", "");
-        List<ChatGptConnection.Model> models = availableModels;
+        List<ChatRequest.Model> models = availableModels;
         if (models == null) availableModels = models = connection.listModels();
-        for (ChatGptConnection.Model model : models) if (model.slug.equals(selected)) return selected;
         if (models.isEmpty()) throw new java.io.IOException("利用できるモデルがありません。接続状態を確認してください。");
-        selected = models.get(0).slug;
-        getPreferences(MODE_PRIVATE).edit().putString("model_slug", selected).apply();
-        return selected;
+        ChatRequest.Model model = models.get(0);
+        for (ChatRequest.Model candidate : models) if (candidate.slug.equals(selected)) { model = candidate; break; }
+        ChatRequest request = savedRequest(model);
+        getPreferences(MODE_PRIVATE).edit().putString("model_slug", model.slug)
+                .putString("reasoning_effort:" + model.slug, request.effort)
+                .putBoolean("fast_mode:" + model.slug, request.fast).apply();
+        return request;
+    }
+
+    private ChatRequest savedRequest(ChatRequest.Model model) {
+        String effort = getPreferences(MODE_PRIVATE).getString("reasoning_effort:" + model.slug, "");
+        if (!model.efforts.contains(effort)) effort = "";
+        boolean fast = model.supportsFast && getPreferences(MODE_PRIVATE).getBoolean("fast_mode:" + model.slug, false);
+        return new ChatRequest(model, effort, fast);
     }
 
     private void sendMessage() {
@@ -297,10 +307,10 @@ public final class MainActivity extends Activity {
         AtomicBoolean saved = new AtomicBoolean(!persistUser);
         worker.execute(() -> {
             try {
-                final String[] model = {null};
+                final ChatRequest[] request = {null};
                 session.reply(text, persistUser, (instructions, turns, delta) -> {
-                    if (model[0] == null) model[0] = selectedModel();
-                    return connection.request(model[0], instructions, turns, delta);
+                    if (request[0] == null) request[0] = selectedRequest();
+                    return connection.request(request[0], instructions, turns, delta);
                 }, new ChatSession.Listener() {
                     private long lastRender;
                     public void userSaved() {
@@ -416,7 +426,21 @@ public final class MainActivity extends Activity {
                 }));
             });
         } else {
-            menuRow(body, "モデルを選ぶ", 4, () -> { dialog.dismiss(); showModels(); });
+            String slug = getPreferences(MODE_PRIVATE).getString("model_slug", "");
+            String name = slug.isEmpty() ? "既定" : slug;
+            String effort = getPreferences(MODE_PRIVATE).getString("reasoning_effort:" + slug, "");
+            boolean fast = getPreferences(MODE_PRIVATE).getBoolean("fast_mode:" + slug, false);
+            List<ChatRequest.Model> models = availableModels;
+            if (models != null) for (ChatRequest.Model model : models) if (model.slug.equals(slug)) {
+                ChatRequest request = savedRequest(model);
+                name = model.displayName; effort = request.effort; fast = request.fast;
+                break;
+            }
+            menuRow(body, "モデル · " + name, 4, () -> { if (!busy) { dialog.dismiss(); showModels(); } });
+            menuRow(body, "Effort · " + (effort.isEmpty() ? "既定" : effort), 4,
+                    () -> { if (!busy) { dialog.dismiss(); showRequestOption(false); } });
+            menuRow(body, "Fast · " + (fast ? "On" : "Off"), 4,
+                    () -> { if (!busy) { dialog.dismiss(); showRequestOption(true); } });
             menuRow(body, "記憶の整理を再試行", 2, () -> { dialog.dismiss(); retryMemories(); });
             menuRow(body, "ログアウト", 6, () -> {
                 if (busy) return;
@@ -444,14 +468,54 @@ public final class MainActivity extends Activity {
         if (busy) return;
         worker.execute(() -> {
             try {
-                List<ChatGptConnection.Model> models = connection.listModels();
+                List<ChatRequest.Model> models = connection.listModels();
                 availableModels = models;
                 String[] names = new String[models.size()];
                 for (int i = 0; i < names.length; ++i) names[i] = models.get(i).displayName;
-                ui(() -> new AlertDialog.Builder(this).setTitle("モデル · ChatGPTの利用枠")
-                        .setItems(names, (dialog, index) -> getPreferences(MODE_PRIVATE).edit()
-                                .putString("model_slug", models.get(index).slug).apply())
-                        .setNegativeButton("閉じる", null).show());
+                String selected = selectedRequest().model.slug;
+                int checked = 0;
+                for (int i = 0; i < models.size(); i++) if (models.get(i).slug.equals(selected)) checked = i;
+                final int selectedIndex = checked;
+                ui(() -> {
+                    if (busy || !connection.hasSession()) return;
+                    new AlertDialog.Builder(this).setTitle("モデル · ChatGPTの利用枠")
+                            .setSingleChoiceItems(names, selectedIndex, (dialog, index) -> {
+                                if (busy) return;
+                                getPreferences(MODE_PRIVATE).edit().putString("model_slug", models.get(index).slug).apply();
+                                dialog.dismiss(); showConnection();
+                            }).setNegativeButton("戻る", (dialog, which) -> showConnection()).show();
+                });
+            } catch (Exception error) { ui(() -> showError(safeError(error))); }
+        });
+    }
+
+    private void showRequestOption(boolean fast) {
+        if (busy) return;
+        worker.execute(() -> {
+            try {
+                ChatRequest request = selectedRequest();
+                ChatRequest.Model model = request.model;
+                ui(() -> {
+                    if (busy || !connection.hasSession()) return;
+                    if (fast ? !model.supportsFast : model.efforts.isEmpty()) {
+                        new AlertDialog.Builder(this).setTitle(fast ? "Fast" : "Effort")
+                                .setMessage(model.displayName + (fast ? "ではFastを利用できません。" : "ではEffortを変更できません。"))
+                                .setPositiveButton("戻る", (dialog, which) -> showConnection()).show();
+                        return;
+                    }
+                    List<String> values = new ArrayList<>();
+                    values.add(""); values.addAll(model.efforts);
+                    String[] labels = fast ? new String[]{"Off", "On"} : values.toArray(new String[0]);
+                    if (!fast) labels[0] = "既定（モデルに任せる）";
+                    int checked = fast ? (request.fast ? 1 : 0) : values.indexOf(request.effort);
+                    new AlertDialog.Builder(this).setTitle((fast ? "Fast" : "Effort") + " · " + model.displayName)
+                            .setSingleChoiceItems(labels, checked, (dialog, index) -> {
+                                if (busy) return;
+                                if (fast) getPreferences(MODE_PRIVATE).edit().putBoolean("fast_mode:" + model.slug, index == 1).apply();
+                                else getPreferences(MODE_PRIVATE).edit().putString("reasoning_effort:" + model.slug, values.get(index)).apply();
+                                dialog.dismiss(); showConnection();
+                            }).setNegativeButton("戻る", (dialog, which) -> showConnection()).show();
+                });
             } catch (Exception error) { ui(() -> showError(safeError(error))); }
         });
     }
@@ -461,8 +525,8 @@ public final class MainActivity extends Activity {
         setBusy(true); session.begin(); connectionStatus = "記憶を整理しています";
         worker.execute(() -> {
             try {
-                final String model = selectedModel();
-                session.processMemories((instructions, turns, delta) -> connection.request(model, instructions, turns, delta));
+                final ChatRequest request = selectedRequest();
+                session.processMemories((instructions, turns, delta) -> connection.request(request, instructions, turns, delta));
                 ui(() -> connectionStatus = "記憶の整理を進めました");
             } catch (Exception error) { ui(() -> connectionStatus = "記憶の整理は再試行待ちです。" + safeError(error)); }
             finally { ui(() -> { setBusy(false); scheduleGitSync(); }); }
@@ -472,6 +536,10 @@ public final class MainActivity extends Activity {
     private void showPeople() {
         Dialog dialog = newSheet();
         LinearLayout body = sheetBody(dialog, "人物");
+        menuRow(body, "人物を追加", 2, () -> {
+            if (busy) { showError("応答と記憶の整理が終わってから追加してください。"); return; }
+            dialog.dismiss(); showNewPerson();
+        });
         for (PersonRegistry.Person person : people.list()) {
             menuRow(body, person.name + (person.id.equals(activePerson.id) ? "  ✓" : ""), 5, () -> {
                 if (busy) { showError("応答と記憶の整理が終わってから人物を切り替えてください。"); return; }
@@ -484,12 +552,99 @@ public final class MainActivity extends Activity {
             startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*")
                     .addCategory(Intent.CATEGORY_OPENABLE), 82);
         });
+        if (people.list().size() > 1) menuRow(body, "人物を削除", 6, () -> {
+            if (busy) { showError("応答と記憶の整理が終わってから削除してください。"); return; }
+            dialog.dismiss(); showDeletePeople();
+        });
         showSheet(dialog);
+    }
+
+    private void showNewPerson() {
+        EditText name = sheetInput("名前", false);
+        name.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("人物を追加")
+                .setMessage("名前だけで始められます。人物のことは会話しながら決めていけます。")
+                .setView(name).setPositiveButton("作成", null).setNegativeButton("キャンセル", null).create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+            try {
+                PersonDocument document = PersonDocument.named(name.getText().toString());
+                dialog.dismiss(); createPerson(document, null, "");
+            } catch (IllegalArgumentException error) { name.setError(error.getMessage()); }
+        }));
+        dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        name.requestFocus(); dialog.show();
+    }
+
+    private void showDeletePeople() {
+        List<PersonRegistry.Person> removable = people.list();
+        removable.removeIf(person -> person.id.equals(PersonRegistry.LEGACY_ID));
+        String[] names = new String[removable.size()];
+        for (int i = 0; i < names.length; i++) names[i] = removable.get(i).name;
+        new AlertDialog.Builder(this).setTitle("削除する人物")
+                .setItems(names, (view, index) -> {
+                    PersonRegistry.Person person = removable.get(index);
+                    AlertDialog confirm = new AlertDialog.Builder(this).setTitle(person.name + "を削除しますか？")
+                            .setMessage("この端末の人物・会話・記憶・下書きを削除します。元には戻せません。\nGitHub上のバックアップと、書き出したZIPは残ります。")
+                            .setPositiveButton("人物を削除", (dialog, which) -> deletePerson(person))
+                            .setNegativeButton("キャンセル", null).create();
+                    confirm.setCanceledOnTouchOutside(false);
+                    confirm.show(); confirm.getButton(AlertDialog.BUTTON_NEGATIVE).requestFocus();
+                }).setNegativeButton("キャンセル", null).show();
+    }
+
+    private void deletePerson(PersonRegistry.Person person) {
+        if (busy) return;
+        saveDraft(); changingPerson = true; setBusy(true);
+        syncTimer.removeCallbacks(autoSync);
+        worker.execute(() -> {
+            Exception failure = null;
+            try {
+                synchronized (storeGate) {
+                    requireOpen();
+                    synchronized (syncingPeople) {
+                        if (syncingPeople.contains(person.id))
+                            throw new java.io.IOException("この人物のGit保存が終わってから削除してください。");
+                        boolean selected = person.id.equals(activePerson.id);
+                        if (selected) {
+                            PersonRegistry.Person legacy = people.list().get(0);
+                            requireSuccess(nativeSwitchPerson(bytes(legacy.directory.getAbsolutePath()), bytes("")));
+                        }
+                        try { people.delete(person.id); }
+                        catch (Exception error) {
+                            if (selected && people.list().contains(person)) restorePerson();
+                            throw error;
+                        }
+                    }
+                }
+            } catch (Exception error) { failure = error; }
+            boolean removed = !people.list().contains(person);
+            if (removed) {
+                try {
+                    if (person.repository != null) new GitHubTokenStore(this, person.id).clear();
+                } catch (Exception error) { if (failure == null) failure = error; else failure.addSuppressed(error); }
+                if (!getPreferences(MODE_PRIVATE).edit().remove("draft_" + person.id).commit() && failure == null)
+                    failure = new java.io.IOException("下書きの削除を保存できませんでした。");
+            }
+            final String detail = failure == null ? null : failure instanceof IllegalArgumentException
+                    ? failure.getMessage() : safeError(failure);
+            ui(() -> {
+                if (removed) {
+                    if (detail == null) recreate();
+                    else {
+                        AlertDialog warning = new AlertDialog.Builder(this).setTitle("削除後の処理を確認してください")
+                                .setMessage(detail).setPositiveButton("閉じる", null).create();
+                        warning.setOnDismissListener(dialog -> recreate()); warning.show();
+                    }
+                } else {
+                    changingPerson = false; setBusy(false); showError(detail); scheduleGitSync();
+                }
+            });
+        });
     }
 
     private void switchPerson(PersonRegistry.Person person) {
         if (person.id.equals(activePerson.id) || busy) return;
-        saveDraft(); setBusy(true); changingPerson = true;
+        saveDraft(); changingPerson = true; setBusy(true);
         syncTimer.removeCallbacks(autoSync);
         worker.execute(() -> {
             try {
@@ -557,7 +712,7 @@ public final class MainActivity extends Activity {
 
     private void createPerson(PersonDocument document, String repository, String suppliedToken) {
         if (busy) return;
-        saveDraft(); setBusy(true); changingPerson = true;
+        saveDraft(); changingPerson = true; setBusy(true);
         syncTimer.removeCallbacks(autoSync);
         worker.execute(() -> {
             PersonRegistry.Person staged = null;
@@ -565,14 +720,18 @@ public final class MainActivity extends Activity {
             boolean retainStaged = false;
             try {
                 String token = suppliedToken;
-                if (token.isEmpty()) throw new java.io.IOException("GitHubトークンを入力してください。");
                 synchronized (storeGate) { requireOpen(); staged = people.stage(document, repository); }
-                GitHubBackup client = new GitHubBackup(new GitHubBackup.HttpTransport(token));
-                GitHubBackup.Repository remote = client.verifyIdentity(new GitHubBackup.PersonIdentity(staged.id), repository);
+                if (repository != null) {
+                    if (token.isEmpty()) throw new java.io.IOException("GitHubトークンを入力してください。");
+                    GitHubBackup client = new GitHubBackup(new GitHubBackup.HttpTransport(token));
+                    GitHubBackup.Repository remote = client.verifyIdentity(new GitHubBackup.PersonIdentity(staged.id), repository);
+                    synchronized (storeGate) {
+                        requireOpen(); people.bindRemoteId(staged.id, remote.repoId);
+                        new GitHubTokenStore(this, staged.id).set(token);
+                    }
+                }
                 synchronized (storeGate) {
                     requireOpen();
-                    people.bindRemoteId(staged.id, remote.repoId);
-                    new GitHubTokenStore(this, staged.id).set(token);
                     requireSuccess(nativeSwitchPerson(bytes(staged.directory.getAbsolutePath()),
                             bytes(document.importPayload(staged.id).toString())));
                     try { people.commit(staged); committed = true; }
@@ -586,7 +745,7 @@ public final class MainActivity extends Activity {
             } catch (Exception error) {
                 try {
                     if (staged != null && !committed && !retainStaged) {
-                        new GitHubTokenStore(this, staged.id).clear();
+                        if (repository != null) new GitHubTokenStore(this, staged.id).clear();
                         people.discard(staged);
                     }
                 } catch (Exception cleanup) { error = cleanup; }
@@ -600,7 +759,7 @@ public final class MainActivity extends Activity {
         Dialog dialog = newSheet();
         LinearLayout body = sheetBody(dialog, "Gitバックアップ");
         TextView status = sheetText(activePerson.repository == null
-                ? "これまでの会話は、そのまま端末に残しています。人物ファイルを読み込むと、人物専用の保存先を設定できます。"
+                ? activePerson.name + "\n会話と記憶はこの端末に保存しています。ZIPに書き出して保管できます。"
                 : activePerson.name + "\n" + activePerson.repository + "\n" + gitStatus
                   + "\n会話の原文・人物ファイル・出来事と記憶の更新履歴を非公開リポジトリへ保存します。", 17);
         status.setPadding(dp(12), dp(12), dp(12), dp(20)); body.addView(status);

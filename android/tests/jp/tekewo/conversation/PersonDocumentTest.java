@@ -21,6 +21,17 @@ public final class PersonDocumentTest {
             .replace("- 不明なこと:", "- 不明なこと: 正確な誕生日は不明");
     }
     public static void main(String[] args) throws Exception {
+        PersonDocument named = PersonDocument.named("  小春 🎾  ");
+        assert named.name.equals("小春 🎾");
+        assert PersonDocument.parse(named.rawMarkdown).name.equals("小春 🎾");
+        JSONObject namedPayload = named.importPayload("43c56650-1792-4b38-a661-3c810bbd4679");
+        assert namedPayload.getJSONArray("seeds").length() == 0;
+        assert namedPayload.getString("profile").contains("小春 🎾");
+        for (String invalid : new String[] { null, "", "  ", "小春\n別人", "小春\r別人", "小春\0", "\ud800", repeat("あ", 86) }) {
+            try { PersonDocument.named(invalid); throw new AssertionError("Accepted invalid person name"); }
+            catch (IllegalArgumentException expected) {}
+        }
+        System.out.println("PASS: name-only profile round trip, zero invented memories and invalid-name rejection");
         String markdown = document();
         PersonDocument doc = PersonDocument.parse(markdown);
         assert doc.name.equals("小春");

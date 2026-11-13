@@ -48,11 +48,6 @@ public final class ChatGptConnection {
     static { TIMEOUTS.setRemoveOnCancelPolicy(true); }
 
     public interface LoginCallback { void complete(String error); }
-    public static final class Model {
-        public final String slug, displayName;
-        public Model(String slug, String displayName) { this.slug = slug; this.displayName = displayName; }
-        @Override public String toString() { return displayName; }
-    }
 
     private final Activity activity;
     private final ConnectionStore store;
@@ -236,19 +231,19 @@ public final class ChatGptConnection {
         throw new SafeFailure("サインインの待機時間が終了しました。もう一度お試しください。");
     }
 
-    public List<Model> listModels() throws IOException {
+    public List<ChatRequest.Model> listModels() throws IOException {
         synchronized (operationLock) {
             int attempt = generation.get();
             String token = accessToken(attempt);
             try {
                 JSONObject catalog = json(RESOURCE + "/models", "GET", null, token, attempt);
                 JSONArray models = catalog.getJSONArray("models");
-                List<Model> visible = new ArrayList<>();
+                List<ChatRequest.Model> visible = new ArrayList<>();
                 for (int i = 0; i < models.length(); i++) {
                     JSONObject model = models.getJSONObject(i);
                     if ("list".equals(model.optString("visibility"))) {
-                        String slug = model.getString("slug"), name = model.getString("display_name");
-                        if (!slug.isEmpty() && !name.isEmpty()) visible.add(new Model(slug, name));
+                        ChatRequest.Model parsed = new ChatRequest.Model(model);
+                        if (!parsed.slug.isEmpty() && !parsed.displayName.isEmpty()) visible.add(parsed);
                     }
                 }
                 if (visible.isEmpty()) throw new SafeFailure("このアカウントで利用できるモデルがありません。");
@@ -259,16 +254,14 @@ public final class ChatGptConnection {
         }
     }
 
-    public String request(String model, String instructions, JSONArray input, Consumer<String> onDelta) throws IOException {
+    public String request(ChatRequest request, String instructions, JSONArray input, Consumer<String> onDelta) throws IOException {
         synchronized (operationLock) {
             int attempt = generation.get();
             String token = accessToken(attempt);
             HttpURLConnection connection = null;
             ScheduledFuture<?> timeout = null;
             try {
-                if (model == null || model.isEmpty() || input == null || input.length() == 0) throw new SafeFailure("モデルとメッセージを指定してください。");
-                JSONObject body = new JSONObject().put("model", model).put("instructions", instructions == null ? "" : instructions)
-                        .put("input", input).put("stream", true).put("store", false);
+                JSONObject body = request.body(instructions, input);
                 byte[] encoded = body.toString().getBytes(StandardCharsets.UTF_8);
                 if (encoded.length > 4 * 1024 * 1024) throw new SafeFailure("会話が長すぎます。新しい会話を開始してください。");
                 connection = open(RESOURCE + "/responses", "POST", token, attempt);

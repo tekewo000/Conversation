@@ -55,7 +55,49 @@ public final class PersonRegistryTest {
                 expectFailure(() -> PersonRegistry.normalizeRepository(invalid));
             }
             assert PersonRegistry.normalizeRepository("github.com/A/B.git").equals("a/b");
+            checkLocalPeopleAndDeletion();
             System.out.println("PASS: person registry legacy preservation, isolation, canonical repo and remote ID uniqueness");
+        } finally { remove(root); }
+    }
+    private static void checkLocalPeopleAndDeletion() throws Exception {
+        File root = Files.createTempDirectory("conversation-local-people-").toFile();
+        try {
+            File legacyDb = new File(root, "conversation.db");
+            Files.write(legacyDb.toPath(), new byte[] { 1, 2, 3 });
+            PersonRegistry registry = new PersonRegistry(root);
+            PersonRegistry.Person first = registry.stage(PersonDocument.named("小春"), null);
+            registry.commit(first);
+            PersonRegistry.Person second = registry.stage(PersonDocument.named("夏"), null);
+            registry.commit(second);
+            Files.write(new File(first.directory, "conversation.db").toPath(), new byte[] { 4, 5 });
+            File nested = new File(first.directory, "export/snapshot");
+            assert nested.mkdirs();
+            Files.write(new File(nested, "messages.jsonl").toPath(), new byte[] { 6 });
+            PersonRegistry reloaded = new PersonRegistry(root);
+            assert reloaded.list().size() == 3 && reloaded.active().id.equals(second.id);
+            assert reloaded.active().repository == null && reloaded.active().remoteId == 0;
+            expectFailure(() -> reloaded.bindRemoteId(second.id, 123));
+            expectFailure(() -> reloaded.delete(PersonRegistry.LEGACY_ID));
+            expectFailure(() -> reloaded.delete("../outside"));
+            File blockedIndex = new File(root, "people-registry.json.tmp");
+            assert blockedIndex.mkdir();
+            byte[] before = Files.readAllBytes(new File(root, "people-registry.json").toPath());
+            expectFailure(() -> reloaded.delete(second.id));
+            assert reloaded.active().id.equals(second.id) && reloaded.list().size() == 3;
+            assert second.directory.isDirectory();
+            assert java.util.Arrays.equals(before, Files.readAllBytes(new File(root, "people-registry.json").toPath()));
+            Files.deleteIfExists(blockedIndex.toPath());
+            reloaded.delete(first.id);
+            assert !first.directory.exists() && second.directory.isDirectory();
+            assert reloaded.active().id.equals(second.id);
+            PersonRegistry afterInactiveDelete = new PersonRegistry(root);
+            assert afterInactiveDelete.list().size() == 2 && afterInactiveDelete.active().id.equals(second.id);
+            reloaded.delete(second.id);
+            assert !second.directory.exists();
+            assert reloaded.list().size() == 1 && reloaded.active().id.equals(PersonRegistry.LEGACY_ID);
+            assert new PersonRegistry(root).active().id.equals(PersonRegistry.LEGACY_ID);
+            assert java.util.Arrays.equals(new byte[] { 1, 2, 3 }, Files.readAllBytes(legacyDb.toPath()));
+            System.out.println("PASS: local-only people reload, isolated deletion, active fallback and failed-write preservation");
         } finally { remove(root); }
     }
     private interface Operation { void run() throws Exception; }

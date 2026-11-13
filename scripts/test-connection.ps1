@@ -15,7 +15,7 @@ $classes = Join-Path $repo 'build/connection-tests'
 New-Item -ItemType Directory -Force -Path $classes | Out-Null
 $sourceRoot = Join-Path $repo 'android/src/jp/tekewo/conversation'
 $tests = @(Get-ChildItem -LiteralPath 'android/tests' -Filter '*.java' -Recurse | ForEach-Object { $_.FullName })
-$sources = @("$sourceRoot/OAuthValidation.java", "$sourceRoot/SseReader.java") + $tests
+$sources = @("$sourceRoot/OAuthValidation.java", "$sourceRoot/SseReader.java", "$sourceRoot/ChatRequest.java") + $tests
 if (Test-Path -LiteralPath "$sourceRoot/ChatSession.java") { $sources += "$sourceRoot/ChatSession.java" }
 if (Test-Path -LiteralPath "$sourceRoot/BackupArchive.java") { $sources += "$sourceRoot/BackupArchive.java" }
 $sources += @('PersonDocument', 'PersonRegistry', 'GitArchiveFiles', 'GitHubBackup') | ForEach-Object { "$sourceRoot/$_.java" }

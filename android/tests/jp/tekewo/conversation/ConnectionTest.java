@@ -15,6 +15,33 @@ import java.util.Map;
 public final class ConnectionTest {
     private static int checks;
     public static void main(String[] args) throws Exception {
+        ChatRequest.Model model = new ChatRequest.Model(new JSONObject("{\"slug\":\"test-model\",\"display_name\":\"Test model\","
+                + "\"supported_reasoning_levels\":[{\"effort\":\"low\"},{\"effort\":\"high\"},{\"effort\":\"ultra\"}],"
+                + "\"service_tiers\":[{\"id\":\"default\"},{\"id\":\"priority\"}]}"));
+        check(model.efforts.size() == 3 && model.efforts.contains("ultra"), "catalog efforts retained without a hardcoded model list");
+        check(model.supportsFast, "priority tier enables Fast");
+        JSONArray turns = new JSONArray().put(new JSONObject().put("role", "user").put("content", "こんにちは"));
+        JSONObject request = new ChatRequest(model, "high", true).body("instructions", turns);
+        check("test-model".equals(request.getString("model")), "selected model reaches request");
+        check("high".equals(request.getJSONObject("reasoning").getString("effort")), "selected effort reaches request");
+        check("priority".equals(request.getString("service_tier")), "Fast uses priority tier");
+        check(request.getBoolean("stream") && !request.getBoolean("store")
+                && "こんにちは".equals(request.getJSONArray("input").getJSONObject(0).getString("content"))
+                && "instructions".equals(request.getString("instructions")), "streaming, privacy and conversation preserved");
+        JSONObject defaults = new ChatRequest(model, "", false).body(null, turns);
+        check(!defaults.has("reasoning") && "default".equals(defaults.getString("service_tier")), "default effort omitted and Fast off explicitly standard");
+        fails(() -> new ChatRequest(model, "unsupported", false).body("", turns));
+        fails(() -> new ChatRequest(model, "low", false).body("", new JSONArray()));
+        ChatRequest.Model basic = new ChatRequest.Model(new JSONObject("{\"slug\":\"basic\",\"display_name\":\"Basic\"}"));
+        check(basic.efforts.isEmpty() && !basic.supportsFast, "missing capabilities do not enable unsupported settings");
+        check(!new ChatRequest(basic, "", false).body("", turns).has("reasoning"), "models without reasoning still work");
+        fails(() -> new ChatRequest(basic, "", true).body("", turns));
+        ChatRequest.Model legacy = new ChatRequest.Model(new JSONObject("{\"slug\":\"legacy\",\"display_name\":\"Legacy\",\"additional_speed_tiers\":[\"fast\"]}"));
+        check(legacy.supportsFast, "legacy catalog Fast capability recognized");
+        ChatRequest.Model standardOnly = new ChatRequest.Model(new JSONObject("{\"slug\":\"standard\",\"display_name\":\"Standard\","
+                + "\"service_tiers\":[],\"additional_speed_tiers\":[\"fast\"]}"));
+        check(!standardOnly.supportsFast, "explicit current tier catalog takes precedence over legacy hint");
+
         Map<String,String> callback = OAuthValidation.callback("/auth/callback?state=ok&code=a%2Bb&client_id=oaiapp_test", "ok", "");
         check("a+b".equals(callback.get("code")), "query decoding");
         fails(() -> OAuthValidation.callback("/auth/callback?state=wrong&code=secret&client_id=oaiapp_test", "ok", ""));
