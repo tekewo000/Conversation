@@ -21,7 +21,7 @@ public final class GitHubBackupTest {
         boolean privateRepo = true, unrelatedRefs, unavailableRefs, loseBootstrap, loseCommit, failCommit, raceCommit, makePublicBeforeWrite;
         int writes, commits, repoReads, archiveReads;
         long repoId = 42;
-        String head = "";
+        String head = "", treeSha = TREE_SHA;
         final Map<String, byte[]> files = new LinkedHashMap<>();
         final Map<String, String> parents = new HashMap<>();
         final ArrayList<String> requests = new ArrayList<>();
@@ -56,11 +56,11 @@ public final class GitHubBackupTest {
                 if (method.equals("GET") && path.contains("/git/commits/")) {
                     String sha = path.substring(path.lastIndexOf('/') + 1);
                     String parent = parents.get(sha);
-                    return response(200, new JSONObject().put("tree", new JSONObject().put("sha", TREE_SHA)).put("parents", parent == null || parent.isEmpty() ? new JSONArray()
+                    return response(200, new JSONObject().put("tree", new JSONObject().put("sha", treeSha)).put("parents", parent == null || parent.isEmpty() ? new JSONArray()
                             : new JSONArray().put(new JSONObject().put("sha", parent))));
                 }
                 if (method.equals("GET") && path.contains("/git/trees/")) {
-                    assert path.equals("/repos/" + REPO + "/git/trees/" + TREE_SHA);
+                    assert path.equals("/repos/" + REPO + "/git/trees/" + treeSha);
                     JSONArray entries = new JSONArray();
                     for (String name : files.keySet()) entries.put(new JSONObject().put("path", name).put("type", "blob"));
                     return response(200, new JSONObject().put("sha", TREE_SHA).put("truncated", false).put("tree", entries));
@@ -126,6 +126,35 @@ public final class GitHubBackupTest {
             try { GitHubBackup.normalizeRepository(bad); throw new AssertionError("Bad URL accepted"); }
             catch (IOException expected) { assert !expected.getMessage().contains("secret"); }
         }
+        GitHubBackup inaccessible = new GitHubBackup((method, path, body) -> {
+            assert method.equals("GET") && path.equals("/repos/" + REPO) && body == null;
+            return new GitHubBackup.Response(404, "github_pat_SECRET");
+        });
+        try {
+            inaccessible.verifyIdentity(PERSON, REPO);
+            throw new AssertionError("Inaccessible repository accepted");
+        } catch (GitHubBackup.Failure expected) {
+            assert expected.code.equals("repository_access") : expected.code + ": " + expected.getMessage();
+            assert expected.getMessage().contains("404") && expected.getMessage().contains("URL");
+            assert expected.getMessage().contains("Resource owner") && expected.getMessage().contains("Repository access");
+            assert !expected.toString().contains("github_pat_SECRET") && expected.getCause() == null;
+        }
+        rejected("http", () -> new GitHubBackup((method, path, body) -> new GitHubBackup.Response(401, "{}"))
+                .verifyRepository(REPO));
+        for (String missing : Arrays.asList("commits", "trees")) {
+            Fake history = new Fake(); history.commit();
+            GitHubBackup client = new GitHubBackup((method, path, body) -> path.contains("/git/" + missing + "/")
+                    ? new GitHubBackup.Response(404, "github_pat_SECRET") : history.request(method, path, body));
+            try {
+                client.verifyIdentity(PERSON, REPO);
+                throw new AssertionError("Unavailable history accepted");
+            } catch (GitHubBackup.Failure expected) {
+                assert expected.code.equals("http") && expected.getMessage().contains("404");
+                assert expected.getMessage().contains(missing.equals("commits") ? "コミット" : "ツリー") : expected.getMessage();
+                assert !expected.toString().contains("github_pat_SECRET") && expected.getCause() == null;
+            }
+            assert history.writes == 0;
+        }
         Fake publicRepo = new Fake(); publicRepo.privateRepo = false;
         rejected("public_repository", () -> sync(publicRepo, delta(0, 1), GitHubBackup.SyncState.empty()));
         assert publicRepo.writes == 0 && publicRepo.requests.size() == 1;
@@ -160,6 +189,17 @@ public final class GitHubBackupTest {
         assert reused.manifest().getBoolean("complete") && reused.manifest().getString("previous_head").equals(deletedFilesHead);
         assert Arrays.equals(reused.files.get("person.md"), RAW.getBytes(StandardCharsets.UTF_8));
         assert sync(reused, delta(1, 2), reusedFirst).cursor == 2;
+        Fake emptyTree404 = new Fake();
+        emptyTree404.treeSha = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+        String emptyHead = emptyTree404.commit();
+        GitHubBackup emptyTreeClient = new GitHubBackup((method, path, body) -> path.contains("/git/trees/")
+                ? new GitHubBackup.Response(404, "{}") : emptyTree404.request(method, path, body));
+        assert emptyTreeClient.verifyIdentity(PERSON, REPO).repoId == 42 && emptyTree404.writes == 0;
+        GitHubBackup.SyncResult emptyTreeSaved = emptyTreeClient.sync(PERSON, REPO, RAW, delta(0, 1), GitHubBackup.SyncState.empty());
+        assert emptyTreeSaved.cursor == 1 && emptyTree404.writes == 1 && emptyTree404.commits == 2;
+        assert emptyTree404.parents.get(emptyTreeSaved.head).equals(emptyHead);
+        assert emptyTree404.manifest().getBoolean("complete");
+        assert Arrays.equals(emptyTree404.files.get("person.md"), RAW.getBytes(StandardCharsets.UTF_8));
         Fake reusedLostResponse = new Fake(); reusedLostResponse.commit(); reusedLostResponse.loseCommit = true;
         GitHubBackup.SyncResult reusedRecovered = sync(reusedLostResponse, delta(0, 1), GitHubBackup.SyncState.empty());
         assert reusedRecovered.status.equals("recovered") && reusedLostResponse.commits == 2;

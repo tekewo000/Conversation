@@ -102,7 +102,13 @@ final class GitHubBackup {
     Repository verifyRepository(String input) throws IOException {
         try {
             String requested = normalizeRepository(input);
-            JSONObject data = object(request("GET", "/repos/" + requested, null), 200);
+            Response response = request("GET", "/repos/" + requested, null);
+            if (response.status == 404) throw fail("repository_access",
+                    "GitHub のリポジトリが見つからないか、このトークンでアクセスできません (HTTP 404)。\n"
+                    + "リポジトリが作成済みで、URL が正しいか確認してください。\n"
+                    + "トークンの Resource owner を保存先の所有者に合わせ、Repository access でこのリポジトリを選択してください。Contents は Read and write に設定します。\n"
+                    + "組織の承認が必要な場合は、承認後に再試行してください。");
+            JSONObject data = object(response, 200, "リポジトリ情報の確認");
             if (!data.getBoolean("private")) throw fail("public_repository", "公開リポジトリには人物データを保存できません。");
             long id = GitArchiveFiles.integer(data, "id");
             String canonical = normalizeRepository(data.getString("full_name"));
@@ -150,7 +156,7 @@ final class GitHubBackup {
                         .put("branch", repository.branch).put("content", encode(GitArchiveFiles.utf8(GitArchiveFiles.canonical(marker) + "\n")));
                 checkWriteTarget(repository);
                 try {
-                    object(request("PUT", base(repository) + "/contents/archive.json", init), 201);
+                    object(request("PUT", base(repository) + "/contents/archive.json", init), 201, "アーカイブの初期化");
                 } catch (IOException uncertain) {
                     remote = readRemote(repository);
                     validateOwner(remote, identity.id, repository.repoId);
@@ -196,7 +202,7 @@ final class GitHubBackup {
                     .put("variables", new JSONObject().put("input", input));
             checkWriteTarget(repository);
             try {
-                JSONObject response = object(request("POST", "/graphql", body), 200);
+                JSONObject response = object(request("POST", "/graphql", body), 200, "アーカイブの保存");
                 if (response.has("errors")) throw fail("remote", "GitHub が保存を拒否しました。権限または競合を確認してください。");
                 String head = response.getJSONObject("data").getJSONObject("createCommitOnBranch").getJSONObject("commit").getString("oid");
                 if (!head.matches("[0-9a-f]{40,64}")) throw new IOException();
@@ -219,21 +225,23 @@ final class GitHubBackup {
     private Remote readRemote(Repository repository) throws Exception {
         Response response = request("GET", base(repository) + "/git/ref/heads/" + component(repository.branch), null);
         if (response.status == 404 || response.status == 409) return new Remote("", new JSONObject());
-        JSONObject ref = object(response, 200);
+        JSONObject ref = object(response, 200, "ブランチの確認");
         JSONObject target = ref.getJSONObject("object");
         String head = target.getString("sha");
         if (!target.getString("type").equals("commit") || !head.matches("[0-9a-f]{40,64}")) throw new IOException();
         Response file = request("GET", base(repository) + "/contents/archive.json?ref=" + head, null);
         if (file.status == 404) {
-            JSONObject commit = object(request("GET", base(repository) + "/git/commits/" + head, null), 200);
+            JSONObject commit = object(request("GET", base(repository) + "/git/commits/" + head, null), 200, "コミットの確認");
             String treeSha = commit.getJSONObject("tree").getString("sha");
             if (!treeSha.matches("[0-9a-f]{40,64}")) throw new IOException();
-            JSONObject tree = object(request("GET", base(repository) + "/git/trees/" + treeSha, null), 200);
+            // GitHub returns 404 for the canonical empty tree even when its commit exists.
+            if (treeSha.equals("4b825dc642cb6eb9a060e54bf8d69288fbee4904")) return new Remote(head, null);
+            JSONObject tree = object(request("GET", base(repository) + "/git/trees/" + treeSha, null), 200, "ファイルツリーの確認");
             if (tree.getBoolean("truncated") || tree.getJSONArray("tree").length() != 0)
                 throw conflict("保存先にファイルが残っています。初回保存には既定ブランチのファイルをすべて削除してください。");
             return new Remote(head, null);
         }
-        JSONObject data = object(file, 200);
+        JSONObject data = object(file, 200, "アーカイブの確認");
         if (!data.getString("encoding").equals("base64") || data.optLong("size", Long.MAX_VALUE) > 65536) throw new IOException();
         byte[] decoded = Base64.getDecoder().decode(data.getString("content").replace("\n", "").replace("\r", ""));
         if (decoded.length > 65536) throw new IOException();
@@ -248,7 +256,7 @@ final class GitHubBackup {
             String[] parts = repository.repo.split("/");
             JSONObject query = new JSONObject().put("query", "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){isEmpty}}")
                     .put("variables", new JSONObject().put("owner", parts[0]).put("name", parts[1]));
-            JSONObject response = object(request("POST", "/graphql", query), 200);
+            JSONObject response = object(request("POST", "/graphql", query), 200, "空リポジトリの確認");
             if (!response.has("errors") && Boolean.TRUE.equals(response.getJSONObject("data").getJSONObject("repository").get("isEmpty"))) return;
         }
         throw conflict("初回の保存先には完全に空のリポジトリを指定してください。");
@@ -293,7 +301,7 @@ final class GitHubBackup {
         }
         String parent = remote.manifest.optString("previous_head");
         if (!parent.matches("[0-9a-f]{40,64}") || (!prior.head.isEmpty() && !prior.head.equals(parent))) return false;
-        JSONObject commit = object(request("GET", base(repository) + "/git/commits/" + remote.head, null), 200);
+        JSONObject commit = object(request("GET", base(repository) + "/git/commits/" + remote.head, null), 200, "保存済みコミットの確認");
         JSONArray parents = commit.getJSONArray("parents");
         return parents.length() == 1 && parent.equals(parents.getJSONObject(0).getString("sha"));
     }
@@ -309,8 +317,8 @@ final class GitHubBackup {
         try { return transport.request(method, path, body); }
         catch (Exception e) { throw fail("network", "GitHub との通信に失敗しました。"); }
     }
-    private static JSONObject object(Response response, int expected) throws IOException {
-        if (response.status != expected) throw fail("http", "GitHub の要求に失敗しました (HTTP " + response.status + ")。");
+    private static JSONObject object(Response response, int expected, String operation) throws IOException {
+        if (response.status != expected) throw fail("http", "GitHub の" + operation + "に失敗しました (HTTP " + response.status + ")。");
         try { return new JSONObject(response.body); }
         catch (Exception e) { throw fail("response", "GitHub からの応答を確認できませんでした。"); }
     }
