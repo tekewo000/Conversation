@@ -26,7 +26,6 @@ import java.security.MessageDigest;
 import java.util.UUID;
 import java.util.Map;
 import java.util.LinkedHashMap;
-import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipEntry;
 
@@ -214,10 +213,8 @@ public final class PersonDeviceProbe extends Instrumentation {
             activity = Class.forName(PACKAGE + ".MainActivity");
             File directoryA = new File(root, idA), directoryB = new File(root, idB), bad = new File(root, UUID.randomUUID().toString());
             check(!directoryA.exists() && !directoryB.exists() && !bad.exists(), "Native operations receive fresh absent person directories");
-            try (ZipFile apk = new ZipFile(app.getApplicationInfo().sourceDir)) {
-                success(call("nativeInit", new Class<?>[]{byte[].class, byte[].class, byte[].class}, bytes(directoryA.getPath()),
-                        asset(apk, "NotoSansJP-Regular.ttf"), asset(apk, "NotoEmoji-Regular.ttf")));
-            }
+            success(call("nativeInit", new Class<?>[]{byte[].class, byte[].class, byte[].class}, bytes(directoryA.getPath()),
+                    new byte[0], new byte[0]));
             JSONObject payloadA = person(idA, "Probe A", "私は静かに話す。DEVICE_PROFILE_A");
             JSONObject payloadB = person(idB, "Probe B", "俺は快活に話す。DEVICE_PROFILE_B");
             switchPerson(directoryA, payloadA.toString());
@@ -440,16 +437,6 @@ public final class PersonDeviceProbe extends Instrumentation {
     private static void success(Object result) { check(result instanceof String && ((String)result).isEmpty(), "Native operation succeeded: " + result); }
     private static byte[] bytes(String value) { return value.getBytes(StandardCharsets.UTF_8); }
     private static void check(boolean value, String description) { if (!value) throw new AssertionError(description); }
-    private static byte[] asset(ZipFile apk, String name) throws Exception {
-        try (InputStream input = apk.getInputStream(apk.getEntry("assets/" + name)); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[8192]; int count;
-            while ((count = input.read(buffer)) != -1) {
-                if (output.size() + count > 32 * 1024 * 1024) throw new IOException("Font asset is too large");
-                output.write(buffer, 0, count);
-            }
-            return output.toByteArray();
-        }
-    }
     private static void deleteOwned(File root, File file) throws Exception {
         String canonicalRoot = root.getCanonicalPath(), canonical = file.getCanonicalPath();
         if ((!canonical.equals(canonicalRoot) && !canonical.startsWith(canonicalRoot + File.separator)) || Files.isSymbolicLink(file.toPath()))

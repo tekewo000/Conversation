@@ -13,11 +13,22 @@ function Run([string]$Program, [string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$Program failed (exit $LASTEXITCODE)." }
 }
 
+function Test-NativePageAlignment([string]$Library) {
+    $headers = @(Run "$llvmBin/llvm-readelf.exe" @('--program-headers', '--wide', $Library))
+    $loads = @($headers | Where-Object { $_ -match '^\s*LOAD\s' })
+    if ($loads.Count -eq 0) { throw "Native library has no ELF load segments: $Library" }
+    foreach ($segment in $loads) {
+        if ($segment -notmatch '\s0x([0-9a-fA-F]+)\s*$' -or [Convert]::ToInt64($Matches[1], 16) -lt 16384) {
+            throw "Native library does not support 16 KiB page alignment: $Library"
+        }
+    }
+}
+
 $flavor = $Configuration.ToLowerInvariant()
-# Each run starts empty so removed Java classes and packaged files cannot survive a rebuild.
+# Each run starts empty so removed Java/Kotlin classes cannot survive a rebuild.
 $build = Join-Path $repo "build/android-$flavor/run-$([guid]::NewGuid().ToString('N'))"
 $dist = Join-Path $repo 'dist'
-foreach ($directory in @($build, $dist, "$build/core", "$build/java", "$build/dex", "$build/symbols", "$build/package/lib/arm64-v8a")) {
+foreach ($directory in @($build, $dist, "$build/core", "$build/symbols", "$build/package/lib/arm64-v8a")) {
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
 }
 Write-Host "Build: $build"
@@ -38,6 +49,10 @@ $debuggable = if ($Configuration -eq 'Debug') { 'true' } else { 'false' }
 [void]$manifest.manifest.application.SetAttribute('debuggable', $androidNamespace, $debuggable)
 if ($Configuration -eq 'Release') { [void]$manifest.manifest.SetAttribute('versionName', $androidNamespace, $version) }
 $generatedManifest = Join-Path $build 'AndroidManifest.xml'
+# AGP owns the namespace and build-type flags; keep the source manifest for the version/install scripts.
+[void]$manifest.manifest.RemoveAttribute('package')
+[void]$manifest.manifest.application.RemoveAttribute('debuggable', $androidNamespace)
+[void]$manifest.manifest.application.RemoveAttribute('extractNativeLibs', $androidNamespace)
 $manifest.Save($generatedManifest)
 $expectedVersion = $manifest.manifest.GetAttribute('versionName', $androidNamespace)
 
@@ -61,27 +76,16 @@ $library = Join-Path $build 'package/lib/arm64-v8a/libconversation.so'
 Copy-Item -LiteralPath "$build/native/libconversation.so" -Destination "$build/symbols/libconversation.so" -Force
 Copy-Item -LiteralPath "$build/native/libconversation.so" -Destination $library -Force
 if ($Configuration -eq 'Release') { Run "$llvmBin/llvm-strip.exe" @('--strip-debug', $library) }
-$headers = @(Run "$llvmBin/llvm-readelf.exe" @('--program-headers', '--wide', $library))
-$loads = @($headers | Where-Object { $_ -match '^\s*LOAD\s' })
-if ($loads.Count -eq 0) { throw 'Native library has no ELF load segments.' }
-foreach ($segment in $loads) {
-    if ($segment -notmatch '\s0x([0-9a-fA-F]+)\s*$' -or [Convert]::ToInt64($Matches[1], 16) -lt 16384) {
-        throw 'Native library does not support 16 KiB page alignment.'
-    }
-}
+Test-NativePageAlignment $library
 
-$javaSources = @(Get-ChildItem -LiteralPath 'android/src' -Filter '*.java' -Recurse | ForEach-Object { $_.FullName })
-Run "$($tools.JavaHome)/bin/javac.exe" (@('-J-Duser.language=en', '-encoding', 'UTF-8', '--release', '8',
-    '-classpath', $tools.PlatformJar, '-d', "$build/java") + $javaSources)
-$classes = @(Get-ChildItem -LiteralPath "$build/java" -Filter '*.class' -Recurse | ForEach-Object { $_.FullName })
-$dexMode = if ($Configuration -eq 'Release') { '--release' } else { '--debug' }
-Run "$($tools.BuildTools)/d8.bat" (@($dexMode, '--min-api', '29', '--lib', $tools.PlatformJar, '--output', "$build/dex") + $classes)
-Run "$($tools.BuildTools)/aapt2.exe" @('compile', '--dir', 'android/res', '-o', "$build/resources.zip")
-Run "$($tools.BuildTools)/aapt2.exe" @('link', '-o', "$build/unpacked.apk", '-I', $tools.PlatformJar,
-    '--manifest', $generatedManifest, "$build/resources.zip", '-A', 'android/assets', '--min-sdk-version', '29', '--target-sdk-version', '36')
-Copy-Item -LiteralPath "$build/dex/classes.dex" -Destination "$build/package/classes.dex" -Force
-Run "$($tools.JavaHome)/bin/jar.exe" @('uf', "$build/unpacked.apk", '-C', "$build/package", 'classes.dex', '-C', "$build/package", 'lib')
-Run "$($tools.BuildTools)/zipalign.exe" @('-f', '-P', '16', '4', "$build/unpacked.apk", "$build/aligned.apk")
+Run $tools.Gradle @('-p', "$repo/android", '--console=plain', "assemble$Configuration",
+    "-PconversationBuildDir=$build/gradle", "-PconversationManifest=$generatedManifest",
+    "-PconversationJniDir=$build/package/lib", "-PconversationVersionCode=$versionCode",
+    "-PconversationVersionName=$expectedVersion")
+$gradleApkName = if ($Configuration -eq 'Release') { 'Conversation-release-unsigned.apk' } else { 'Conversation-debug.apk' }
+$gradleApk = Join-Path $build "gradle/outputs/apk/$flavor/$gradleApkName"
+if (-not (Test-Path -LiteralPath $gradleApk)) { throw "Gradle did not produce the APK: $gradleApk" }
+Run "$($tools.BuildTools)/zipalign.exe" @('-f', '-P', '16', '4', $gradleApk, "$build/aligned.apk")
 
 . "$PSScriptRoot/android-signing.ps1"
 $signing = $null
@@ -102,6 +106,20 @@ try {
 }
 Run "$($tools.BuildTools)/apksigner.bat" @('verify', '--verbose', '--print-certs', $signedApk)
 Run "$($tools.BuildTools)/zipalign.exe" @('-c', '-P', '16', '4', $signedApk)
+$apkArchive = [IO.Compression.ZipFile]::OpenRead($signedApk)
+try {
+    $nativeEntries = @($apkArchive.Entries | Where-Object { $_.FullName -match '^lib/.*\.so$' })
+    if ($nativeEntries.Count -eq 0) { throw 'APK has no native libraries.' }
+    New-Item -ItemType Directory -Force -Path "$build/elf-check" | Out-Null
+    foreach ($entry in $nativeEntries) {
+        if ($entry.FullName -notmatch '^lib/arm64-v8a/[a-zA-Z0-9._-]+\.so$') { throw "Unexpected native library path: $($entry.FullName)" }
+        $packagedLibrary = Join-Path "$build/elf-check" $entry.Name
+        [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $packagedLibrary, $true)
+        Test-NativePageAlignment $packagedLibrary
+    }
+} finally {
+    $apkArchive.Dispose()
+}
 $badging = (Run "$($tools.BuildTools)/aapt2.exe" @('dump', 'badging', $signedApk)) -join "`n"
 if ($badging -notmatch [regex]::Escape("name='$package'") -or
     $badging -notmatch [regex]::Escape("versionCode='$versionCode'") -or

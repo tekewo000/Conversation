@@ -33,6 +33,12 @@ if (-not $javaHome) {
 }
 $env:JAVA_HOME = $javaHome
 
+$gradle = Join-Path $toolsRoot 'gradle/gradle-8.13/bin/gradle.bat'
+if (-not (Test-Path -LiteralPath $gradle)) {
+    $zip = Get-Archive 'gradle-8.13-bin.zip' 'https://services.gradle.org/distributions/gradle-8.13-bin.zip' '20f1b1176237254a6fc204d8434196fa11a4cfb387567519c61556e8710aed78'
+    Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $toolsRoot 'gradle') -Force
+}
+
 function Test-Sdk([string]$Path) {
     if (-not $Path) { return $false }
     foreach ($file in @('platforms/android-36/android.jar', 'build-tools/36.0.0/aapt2.exe', 'build-tools/36.0.0/d8.bat', 'build-tools/36.0.0/zipalign.exe', 'build-tools/36.0.0/apksigner.bat', 'platform-tools/adb.exe', 'cmake/3.22.1/bin/cmake.exe', 'cmake/3.22.1/bin/ninja.exe')) {
@@ -91,6 +97,7 @@ $config = [pscustomobject]@{
     PlatformJar = Join-Path $sdk 'platforms/android-36/android.jar'
     Adb = Join-Path $sdk 'platform-tools/adb.exe'
     CMake = Join-Path $sdk 'cmake/3.22.1/bin/cmake.exe'
+    Gradle = $gradle
 }
 
 # These checks also catch interrupted extractions and incompatible existing installations.

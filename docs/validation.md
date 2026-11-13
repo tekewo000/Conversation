@@ -1,5 +1,10 @@
 # Validation record
 
+Entries below are historical records, in chronological order. Earlier renderer,
+font and milestone limitations describe those versions; the Compose migration
+record at the end describes 0.4.0. Physical-device evidence from older versions
+does not validate the new Compose interface.
+
 ## 2026-11-13
 
 - Toolchain: Odin dev-2026-11a (`9a69916`), Android NDK r30, Android API 36,
@@ -309,3 +314,77 @@ Fresh live AI inference and a large live GitHub upload were not sent during this
 release check. No app-store or GitHub Release publication was performed. Future
 updates must retain the release key/password/lineage; old-key Debug APKs cannot
 overwrite this migrated installation, and the non-debuggable app denies run-as.
+
+## 2026-11-14: Jetpack Compose migration (0.4.0)
+
+- Chat, composer, menus, display settings, person management, model/connection
+  controls and application dialogs now use Jetpack Compose Material 3. The
+  C++ library retains storage JNI only; Dear ImGui, OpenGL rendering and bundled
+  Noto font assets are no longer built or packaged. Text uses Android fonts.
+- Package identity, per-person SQLite paths, preferences, encrypted credential
+  stores and the existing Release signing lineage are retained. The source
+  manifest is version 0.4.0, code 7. The native-init font arguments remain in the
+  JNI signature for compatibility but are empty; the synthetic device probe no
+  longer reads font assets.
+- Build versions: Gradle 8.13 (download SHA256 checked), AGP 8.13.2, Kotlin and
+  Compose compiler plugin 2.2.21, Compose BOM 2025.10.01, activity-compose 1.11.0.
+  API 36 / Build Tools 36.0.0, NDK r30 and the existing Odin compiler remain in
+  use. Runtime floor remains Android 10 / API 29, ARM64.
+- An initial native-to-Gradle Release build passed packaging, v3 signature,
+  package/version/debug-flag and ZIP alignment checks. Both packaged libraries
+  (`libconversation.so`, `libandroidx.graphics.path.so`) had 0x4000 ELF LOAD
+  alignment. Final builds verify every packaged native library, including
+  transitive Compose dependencies. This initial build preceded completion of
+  the UI migration and is not the final release artifact.
+- `assembleDebugAndroidTest` compiled the Compose test APK. The font-free
+  `PersonDeviceProbe` also passed standalone javac compilation against API 36.
+- Reproduce desktop suites with `scripts/test-core.ps1`,
+  `scripts/test-native.ps1`, `scripts/test-connection.ps1`, and
+  `scripts/test-signing.ps1`; build using
+  `scripts/build-android.ps1 -Configuration Release`.
+- After a native build, `scripts/test-compose.ps1 -CompileOnly` compiles the app
+  and Compose instrumentation. `scripts/test-compose.ps1 -Serial emulator-5554`
+  executes on a disposable synthetic-data emulator. The runner rejects physical
+  devices and refuses to replace an installed package whose signing certificate
+  differs from the test Debug APK. It never clears application data or requests
+  an uninstall to overcome a signing mismatch. Reports are written under
+  `build/compose-tests/reports/androidTests/connected/debug/`.
+
+Compose instrumentation uses synthetic input; it does not prove live ChatGPT
+authorization, actual private GitHub writes, long-term memory quality, physical
+Japanese IME behavior, TalkBack operation or battery performance. Older physical
+phone checks above remain evidence for the older UI only.
+
+### Final 0.4.0 verification
+
+- The final full Release build passed all 28 Odin tests, Gradle compilation,
+  v3 signature, package/version, non-debuggable manifest, ZIP alignment and all
+  packaged ELF 16KiB LOAD-alignment checks. APK size: 22,643,604 bytes. SHA256:
+  `f17069ceec6d93f1c02f3d924da039d4917001be1b554b1c54b8facfa2725cf7`.
+  Only Compose baseline profiles remain in assets; no bundled fonts are present.
+- Separate desktop runs passed 28 core tests and two C ABI durable roundtrips,
+  the bounded native bridge suite, 58 connection checks plus the chat/session,
+  person, archive and GitHub JVM suites, and signing-key stability/cleanup.
+  One symlink-creation check was skipped with FileSystemException on this host.
+- `scripts/test-compose.ps1 -Serial emulator-5554` passed 8 tests, zero failures,
+  errors or skips. Coverage includes busy draft editing, disabled unselected
+  composer, menu/actions, password masking/recreation, Japanese/emoji/streaming,
+  both 80-message paging boundaries and actual MainActivity synthetic-person
+  creation, draft/settings recreation and deletion. An earlier emulator system
+  crash interrupted a run; a cold boot without data wipe then passed all tests.
+- The signed Release installed and started on the emulator, reporting code7,
+  version0.4.0 and no DEBUGGABLE flag. Installing local0.3.3 followed by an in-place
+  update to0.4.0 also succeeded. The emulator originally had no Conversation
+  installation; these checks used only synthetic data, not real user records.
+- The Release person probe passed Keystore encryption/isolation/AAD rejection,
+  normal JNI import, two-person switching, failed-switch rollback, archive and
+  Unicode ZIP checks. The combined exact-limit import (2MiB source,128KiB
+  profile,2048 seeds,16KiB seed) FAILED with the generic database-operation error;
+  the full probe therefore did not pass. Synthetic fixture cleanup succeeded.
+  Local0.3.3 with its original probe failed identically on the same emulator.
+  The exact parsed 2,796,298-byte payload imported all2048 memories through the
+  unchanged Windows C ABI. The Android-side cause remains undetermined; this is
+  a pre-existing limitation, not evidence of a Compose regression. Neither the
+  limits nor storage implementation were changed to mask the failed check.
+- Physical-device IME/TalkBack/power, live ChatGPT authorization/inference and
+  actual private GitHub writes were not tested in this migration.

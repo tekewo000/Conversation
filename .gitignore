@@ -8,6 +8,7 @@ dist/
 local.properties
 .idea/
 .gradle/
+.kotlin/
 *.exe
 *.obj
 *.o

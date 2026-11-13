@@ -1,43 +1,12 @@
 package jp.tekewo.conversation;
 
-import android.app.Activity;
-import android.app.AlertDialog;
-import android.app.Dialog;
+import androidx.activity.ComponentActivity;
 import android.content.Intent;
 import android.net.Uri;
-import android.graphics.Color;
-import android.graphics.Insets;
-import android.graphics.Canvas;
-import android.graphics.Paint;
-import android.graphics.Path;
-import android.graphics.drawable.Drawable;
-import android.graphics.drawable.GradientDrawable;
-import android.graphics.drawable.ColorDrawable;
-import android.graphics.ColorFilter;
-import android.graphics.PixelFormat;
-import android.graphics.Typeface;
-import android.opengl.GLSurfaceView;
 import android.os.Build;
 import android.os.Bundle;
-import android.text.InputType;
-import android.view.Gravity;
-import android.view.MotionEvent;
 import android.view.View;
-import android.view.WindowInsets;
 import android.view.WindowManager;
-import android.view.Window;
-import android.view.inputmethod.BaseInputConnection;
-import android.view.inputmethod.EditorInfo;
-import android.view.inputmethod.InputMethodManager;
-import android.widget.ImageButton;
-import android.widget.ImageView;
-import android.widget.SeekBar;
-import android.widget.EditText;
-import android.widget.LinearLayout;
-import android.widget.FrameLayout;
-import android.widget.ScrollView;
-import android.widget.TextView;
-
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.File;
@@ -52,18 +21,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.Set;
 import java.util.HashSet;
 import org.json.JSONObject;
-import org.json.JSONArray;
 
-import javax.microedition.khronos.egl.EGLConfig;
-import javax.microedition.khronos.opengles.GL10;
-
-public final class MainActivity extends Activity {
+public final class MainActivity extends ComponentActivity {
     private static native String nativeInit(byte[] storageDir, byte[] font, byte[] emojiFont);
-    private static native void nativeSurfaceCreated();
-    private static native void nativeResize(int width, int height, float density);
-    private static native void nativeRender();
-    private static native void nativeSetTypography(float pixels, float gapDp);
-    private static native void nativeTouch(int action, float x, float y);
     private static native long nativeAddMessage(byte[] role, byte[] text);
     private static native String nativeLastError();
     private static native String nativeContext(byte[] query);
@@ -73,16 +33,14 @@ public final class MainActivity extends Activity {
     private static native String nativeApplyPersona(long throughId, byte[] payload);
     private static native String nativeMemories(byte[] query);
     private static native String nativeExport();
-    private static native void nativeJumpToMessage(long id);
-    private static native void nativeSetStreaming(byte[] text);
     private static native String nativeRecentTranscript();
-    private static native void nativePause();
     private static native String nativeSwitchPerson(byte[] directory, byte[] payload);
     private static native String nativeArchiveDelta(long cursor);
 
-    private ChatSurface surface;
-    private EditText input;
-    private ImageButton send;
+    private static native String nativeMessages(int first);
+    private ComposeUi compose;
+    private int pageFirst = -1;
+    private boolean scrollOnRefresh;
     private ChatGptConnection connection;
     private ChatSession session;
     private PersonRegistry people;
@@ -95,6 +53,7 @@ public final class MainActivity extends Activity {
     private static final Set<String> syncingPeople = new HashSet<>();
     private static final Object storeGate = new Object();
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final ExecutorService reader = Executors.newSingleThreadExecutor();
     private volatile boolean closed;
     private boolean busy;
     private volatile boolean changingPerson;
@@ -108,111 +67,42 @@ public final class MainActivity extends Activity {
     private static final int DEFAULT_TEXT_SIZE = 16;
     private int textSize = DEFAULT_TEXT_SIZE;
     private int messageGap = 12;
-    private static final int BACKGROUND = Color.rgb(19, 23, 28);
+    private static final int BACKGROUND = 0xff13171c;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         textSize = Math.max(16, Math.min(28, getPreferences(MODE_PRIVATE).getInt("text_size", DEFAULT_TEXT_SIZE)));
         messageGap = Math.max(8, Math.min(24, getPreferences(MODE_PRIVATE).getInt("message_gap", 12)));
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
-        if (Build.VERSION.SDK_INT >= 30) {
-            getWindow().setDecorFitsSystemWindows(false);
-        } else {
-            getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
-        }
+        if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
+        else getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
         getWindow().setStatusBarColor(BACKGROUND);
         getWindow().setNavigationBarColor(BACKGROUND);
         getWindow().setNavigationBarContrastEnforced(false);
-        getWindow().setBackgroundDrawable(new ColorDrawable(BACKGROUND));
         getWindow().getDecorView().setSystemUiVisibility(getWindow().getDecorView().getSystemUiVisibility()
                 & ~(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR));
-
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(BACKGROUND);
-        root.setOnApplyWindowInsetsListener((view, windowInsets) -> {
-            int left, top, right, bottom;
-            if (Build.VERSION.SDK_INT >= 30) {
-                Insets bars = windowInsets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
-                Insets keyboard = windowInsets.getInsets(WindowInsets.Type.ime());
-                left = bars.left; top = bars.top; right = bars.right;
-                bottom = Math.max(bars.bottom, keyboard.bottom);
-            } else {
-                left = windowInsets.getSystemWindowInsetLeft();
-                top = windowInsets.getSystemWindowInsetTop();
-                right = windowInsets.getSystemWindowInsetRight();
-                bottom = windowInsets.getSystemWindowInsetBottom();
-            }
-            view.setPadding(left, top, right, bottom);
-            return windowInsets;
+        compose = new ComposeUi(this, this::showHistoryMenu, this::sendMessage, first -> {
+            pageFirst = first; refreshMessages();
         });
-        setContentView(root);
-
+        applyTypography();
         try {
             System.loadLibrary("conversation");
-            String error;
             synchronized (storeGate) {
                 requireSuccess(nativeSwitchPerson(bytes(""), bytes("")));
                 people = new PersonRegistry(getFilesDir());
                 activePerson = people.active();
                 if (!getPreferences(MODE_PRIVATE).edit().remove("draft").commit())
                     throw new java.io.IOException("以前の下書きを削除できませんでした。");
-                error = nativeInit(bytes(activePerson == null ? "" : activePerson.directory.getAbsolutePath()),
-                        asset("NotoSansJP-Regular.ttf"), asset("NotoEmoji-Regular.ttf"));
-                ready = error.isEmpty();
+                requireSuccess(nativeInit(bytes(activePerson == null ? "" : activePerson.directory.getAbsolutePath()),
+                        new byte[0], new byte[0]));
+                ready = true;
             }
-            if (!ready) showError(error);
         } catch (Exception | UnsatisfiedLinkError error) {
-            TextView failure = new TextView(this);
-            failure.setText("起動できませんでした。\n" + error.getMessage());
-            failure.setTextColor(Color.rgb(255, 140, 125));
-            failure.setPadding(dp(16), dp(16), dp(16), dp(16));
-            root.addView(failure);
+            compose.setFailure("起動できませんでした。\n" + error.getMessage());
             return;
         }
-
-        surface = new ChatSurface();
-        surface.setVisibility(activePerson == null ? View.INVISIBLE : View.VISIBLE);
-        root.addView(surface, new LinearLayout.LayoutParams(-1, 0, 1));
-
-        LinearLayout composer = new LinearLayout(this);
-        composer.setGravity(Gravity.CENTER_VERTICAL);
-        composer.setPadding(dp(8), dp(6), dp(12), dp(10));
-        ImageButton menu = iconButton(false, "メニュー");
-        menu.setOnClickListener(view -> showHistoryMenu());
-        composer.addView(menu, new LinearLayout.LayoutParams(dp(48), dp(48)));
-        input = new EditText(this);
-        input.setId(0x434f4e);
-        // Drafts live in app storage, outside Android's size-limited activity-state transaction.
-        input.setSaveEnabled(false);
-        input.setTextColor(Color.rgb(230, 238, 242));
-        input.setHintTextColor(Color.rgb(156, 171, 181));
-        input.setContentDescription("メッセージ入力");
-        input.setBackground(roundBackground(Color.rgb(28, 34, 41), 24));
-        input.setPadding(dp(16), dp(10), dp(16), dp(10));
-        input.setMinHeight(dp(48));
-        input.setTextSize(DEFAULT_TEXT_SIZE);
-        input.setMinLines(1);
-        input.setMaxLines(5);
-        input.setVerticalScrollBarEnabled(false);
-        input.setHorizontalScrollBarEnabled(false);
-        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
-        input.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI);
-        input.setEnabled(ready && activePerson != null);
-        composer.addView(input, new LinearLayout.LayoutParams(0, -2, 1));
-
-        send = iconButton(true, "送信");
-        send.setEnabled(ready && activePerson != null);
-        send.setOnClickListener(view -> sendMessage());
-        LinearLayout.LayoutParams sendLayout = new LinearLayout.LayoutParams(dp(48), dp(48));
-        sendLayout.leftMargin = dp(8);
-        composer.addView(send, sendLayout);
-        root.addView(composer);
-
-        if (activePerson != null) input.setText(getPreferences(MODE_PRIVATE).getString(draftKey(), ""));
-        applyTypography();
+        if (activePerson != null) compose.setDraft(getPreferences(MODE_PRIVATE).getString(draftKey(), ""));
         connection = new ChatGptConnection(this);
         session = new ChatSession(new ChatSession.Store() {
             public long add(String role, String text) throws Exception {
@@ -247,7 +137,34 @@ public final class MainActivity extends Activity {
                 }
             }
         });
+        setBusy(false);
+        refreshMessages();
         scheduleGitSync();
+    }
+
+    private void refreshMessages() {
+        if (!ready || closed || changingPerson) return;
+        final int requested = pageFirst;
+        reader.execute(() -> {
+            try {
+                String snapshot;
+                synchronized (storeGate) {
+                    requireOpen();
+                    if (changingPerson) return;
+                    snapshot = nativeMessages(requested);
+                    if (snapshot.isEmpty()) throw new java.io.IOException(nativeLastError());
+                }
+                ui(() -> {
+                    if (pageFirst != requested || changingPerson) return;
+                    try {
+                        JSONObject page = new JSONObject(snapshot);
+                        if (page.getInt("first") + page.getJSONArray("messages").length() >= page.getInt("total")) pageFirst = -1;
+                        compose.setMessages(snapshot);
+                        if (scrollOnRefresh) { compose.scrollToLatest(); scrollOnRefresh = false; }
+                    } catch (org.json.JSONException error) { showError("会話の表示データを読み出せませんでした。"); }
+                });
+            } catch (Exception error) { ui(() -> showError(safeError(error))); }
+        });
     }
 
     private void requireOpen() throws java.io.IOException {
@@ -260,33 +177,19 @@ public final class MainActivity extends Activity {
         if (activePerson == null) throw new java.io.IOException("人物を選んでください。");
     }
     private void setStreaming(String text) {
-        synchronized (storeGate) {
-            if (!closed && !changingPerson && !isFinishing() && !Thread.currentThread().isInterrupted())
-                nativeSetStreaming(bytes(text));
-        }
+        ui(() -> { if (!changingPerson) compose.setStreaming(text); });
     }
 
     private String draftKey() { return "draft_" + activePerson.id; }
     private void saveDraft() {
-        if (!changingPerson && input != null && activePerson != null) getPreferences(MODE_PRIVATE).edit()
-                .putString(draftKey(), input.getText().toString()).commit();
-    }
-
-    private byte[] asset(String name) throws Exception {
-        try (InputStream stream = getAssets().open(name);
-             ByteArrayOutputStream data = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[8192];
-            int count;
-            while ((count = stream.read(buffer)) != -1) data.write(buffer, 0, count);
-            return data.toByteArray();
-        }
+        if (!changingPerson && compose != null && activePerson != null) getPreferences(MODE_PRIVATE).edit()
+                .putString(draftKey(), compose.getDraft()).commit();
     }
 
     private void setBusy(boolean value) {
         busy = value;
-        input.setEnabled(ready && activePerson != null && !changingPerson);
-        send.setEnabled(ready && activePerson != null && !changingPerson && !value);
-        send.setAlpha(value ? 0.45f : 1.0f);
+        compose.setEnabled(ready && activePerson != null && !changingPerson);
+        compose.setSending(value);
     }
 
     private ChatRequest selectedRequest() throws Exception {
@@ -313,7 +216,7 @@ public final class MainActivity extends Activity {
     private void sendMessage() {
         if (busy || activePerson == null) return;
         if (!connection.hasSession()) { showConnection(); return; }
-        String text = input.getText().toString();
+        String text = compose.getDraft();
         if (text.trim().isEmpty()) return;
         runReply(text, true);
     }
@@ -334,22 +237,21 @@ public final class MainActivity extends Activity {
                     public void userSaved() {
                         saved.set(true);
                         ui(() -> {
-                            if (input.getText().toString().equals(text)) {
-                                BaseInputConnection.removeComposingSpans(input.getText());
-                                input.setText("");
+                            pageFirst = -1; scrollOnRefresh = true;
+                            if (compose.getDraft().equals(text)) {
+                                compose.setDraft("");
                                 getPreferences(MODE_PRIVATE).edit().remove(draftKey()).apply();
                             }
-                            surface.renderBurst();
+                            refreshMessages();
                         });
                     }
                     public void streaming(String full) {
-                        setStreaming(full);
                         long now = android.os.SystemClock.uptimeMillis();
-                        if (now - lastRender > 45) { lastRender = now; ui(() -> surface.requestRender()); }
+                        if (now - lastRender > 45) { lastRender = now; ui(() -> compose.setStreaming(full)); }
                     }
                     public void replySaved() {
                         setStreaming("");
-                        ui(() -> { surface.renderBurst(); connectionStatus = "記憶を整理しています"; });
+                        ui(() -> { refreshMessages(); connectionStatus = "記憶を整理しています"; });
                     }
                     public void memoryStatus(String error) {
                         ui(() -> connectionStatus = error == null ? "ChatGPTに接続しています" : error);
@@ -358,20 +260,21 @@ public final class MainActivity extends Activity {
             } catch (Exception error) {
                 setStreaming("");
                 if (session.isCancelled()) {
-                    ui(() -> { connectionStatus = "応答を停止しました"; surface.renderBurst(); });
+                    ui(() -> { connectionStatus = "応答を停止しました"; refreshMessages(); });
                     return;
                 }
                 final String detail = error instanceof org.json.JSONException
                         ? "応答の形式を処理できませんでした。" : safeError(error);
                 ui(() -> {
                     connectionStatus = detail;
-                    surface.renderBurst();
-                    AlertDialog.Builder dialog = new AlertDialog.Builder(this).setTitle("応答できませんでした")
-                            .setMessage(detail + (saved.get() ? "\n送信済みの会話原文は保存されています。" : ""));
-                    if (detail.contains("利用上限")) dialog.setPositiveButton("利用状況を確認", (view, which) ->
-                            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://chatgpt.com/settings/usage"))));
-                    else dialog.setPositiveButton("再試行", (view, which) -> runReply(text, !saved.get()));
-                    dialog.setNegativeButton("閉じる", null).show();
+                    refreshMessages();
+                    ComposeUi.Panel dialog = new ComposeUi.Panel("応答できませんでした");
+                    dialog.message = detail + (saved.get() ? "\n送信済みの会話原文は保存されています。" : "");
+                    dialog.rows.add(new ComposeUi.Row(detail.contains("利用上限") ? "利用状況を確認" : "再試行", () -> {
+                        if (detail.contains("利用上限")) openUsage(); else if (!busy) runReply(text, !saved.get());
+                    }));
+                    compose.show(dialog);
+
                 });
             } finally { ui(() -> { setBusy(false); scheduleGitSync(); }); }
         });
@@ -383,67 +286,50 @@ public final class MainActivity extends Activity {
     }
 
     private void showError(String error) {
-        new AlertDialog.Builder(this).setTitle("処理を確認してください")
-                .setMessage(error).setPositiveButton("閉じる", null).show();
+        ComposeUi.Panel dialog = new ComposeUi.Panel("処理を確認してください");
+        dialog.message = error; compose.show(dialog);
+    }
+
+    private void openUsage() {
+        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://chatgpt.com/settings/usage")));
     }
 
     private void showHistoryMenu() {
         if (!ready) return;
-        ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE))
-                .hideSoftInputFromWindow(input.getWindowToken(), 0);
-        input.clearFocus();
-        Dialog sheet = newSheet();
-        LinearLayout body = sheetBody(sheet, "メニュー");
-        String[] labels = busy ? new String[]{"会話", "人物", "表示設定", "ChatGPT", "Gitバックアップ", "応答を停止"}
-                : new String[]{"会話", "人物", "表示設定", "ChatGPT", "Gitバックアップ"};
-        int[] icons = {0, 2, 4, 5, 1, 6};
-        for (int i = 0; i < labels.length; ++i) {
-            if (i == 4 && activePerson == null) continue;
-            final int action = i;
-            menuRow(body, labels[i], icons[i], () -> {
-                sheet.dismiss();
-                if (action == 0) surface.renderBurst();
-                else if (action == 1) showPeople();
-                else if (action == 2) showDisplaySettings();
-                else if (action == 3) showConnection();
-                else if (action == 4) showGitBackup();
-                else {
-                    session.cancel(); connection.cancel();
-                    setStreaming(""); surface.renderBurst();
-                }
-            });
-        }
-        showSheet(sheet);
+        ComposeUi.Panel menu = new ComposeUi.Panel("メニュー");
+        menu.rows.add(new ComposeUi.Row("会話", () -> { pageFirst = -1; scrollOnRefresh = true; refreshMessages(); }));
+        menu.rows.add(new ComposeUi.Row("人物", this::showPeople));
+        menu.rows.add(new ComposeUi.Row("表示設定", this::showDisplaySettings));
+        menu.rows.add(new ComposeUi.Row("ChatGPT", this::showConnection));
+        if (activePerson != null) menu.rows.add(new ComposeUi.Row("Gitバックアップ", this::showGitBackup));
+        if (busy) menu.rows.add(new ComposeUi.Row("応答を停止", () -> {
+            session.cancel(); connection.cancel(); setStreaming(""); refreshMessages();
+        }));
+        compose.show(menu);
     }
 
     private void showConnection() {
-        Dialog dialog = newSheet();
-        LinearLayout body = sheetBody(dialog, "ChatGPT");
-        TextView status = sheetText(connection.hasSession()
+        ComposeUi.Panel panel = new ComposeUi.Panel("ChatGPT");
+        panel.message = connection.hasSession()
                 ? connection.accountLabel() + "\nChatGPTの利用枠を使用します。\n" + connectionStatus
-                : "ChatGPTにログインして、このアプリでサブスクの利用枠を使います。\n" + connectionStatus, 17);
-        status.setPadding(dp(12), dp(12), dp(12), dp(20));
-        body.addView(status);
+                : "ChatGPTにログインして、このアプリでサブスクの利用枠を使います。\n" + connectionStatus;
         if (!connection.hasSession()) {
-            menuRow(body, "Continue with ChatGPT", 5, () -> {
+            panel.rows.add(new ComposeUi.Row("Continue with ChatGPT", () -> {
                 if (busy) return;
-                dialog.dismiss();
                 connectionStatus = "ブラウザでの認証を待っています";
                 connection.signIn(error -> ui(() -> {
                     availableModels = null;
                     connectionStatus = error == null ? "ChatGPTに接続しました" : error;
-                    if (error != null) new AlertDialog.Builder(this).setTitle("ChatGPTに接続できませんでした")
-                            .setMessage(error).setPositiveButton("閉じる", null).show();
-                    else {
-                        if (!getPreferences(MODE_PRIVATE).getBoolean("plan_welcome", false)) {
-                            getPreferences(MODE_PRIVATE).edit().putBoolean("plan_welcome", true).apply();
-                            new AlertDialog.Builder(this).setTitle("ChatGPTに接続しました")
-                                    .setMessage("会話と記憶の整理にChatGPTの利用枠を使います。利用状況はメニューのChatGPTから確認できます。")
-                                    .setPositiveButton("会話を始める", (view, which) -> retryMemories()).show();
-                        } else retryMemories();
-                    }
+                    if (error != null) showError(error);
+                    else if (!getPreferences(MODE_PRIVATE).getBoolean("plan_welcome", false)) {
+                        getPreferences(MODE_PRIVATE).edit().putBoolean("plan_welcome", true).apply();
+                        ComposeUi.Panel welcome = new ComposeUi.Panel("ChatGPTに接続しました");
+                        welcome.message = "会話と記憶の整理にChatGPTの利用枠を使います。利用状況はメニューのChatGPTから確認できます。";
+                        welcome.rows.add(new ComposeUi.Row("会話を始める", this::retryMemories));
+                        compose.show(welcome);
+                    } else retryMemories();
                 }));
-            });
+            }));
         } else {
             String slug = getPreferences(MODE_PRIVATE).getString("model_slug", "");
             String name = slug.isEmpty() ? "既定" : slug;
@@ -452,35 +338,22 @@ public final class MainActivity extends Activity {
             List<ChatRequest.Model> models = availableModels;
             if (models != null) for (ChatRequest.Model model : models) if (model.slug.equals(slug)) {
                 ChatRequest request = savedRequest(model);
-                name = model.displayName; effort = request.effort; fast = request.fast;
-                break;
+                name = model.displayName; effort = request.effort; fast = request.fast; break;
             }
-            menuRow(body, "モデル · " + name, 4, () -> { if (!busy) { dialog.dismiss(); showModels(); } });
-            menuRow(body, "Effort · " + (effort.isEmpty() ? "既定" : effort), 4,
-                    () -> { if (!busy) { dialog.dismiss(); showRequestOption(false); } });
-            menuRow(body, "Fast · " + (fast ? "On" : "Off"), 4,
-                    () -> { if (!busy) { dialog.dismiss(); showRequestOption(true); } });
-            menuRow(body, "記憶の整理を再試行", 2, () -> { dialog.dismiss(); retryMemories(); });
-            menuRow(body, "ログアウト", 6, () -> {
-                if (busy) return;
-                dialog.dismiss();
-                worker.execute(() -> {
-                    connection.signOut(); availableModels = null;
-                    ui(() -> { connectionStatus = connection.signOutStatus(); showConnection(); });
-                });
-            });
+            panel.rows.add(new ComposeUi.Row("モデル · " + name, this::showModels));
+            panel.rows.add(new ComposeUi.Row("Effort · " + (effort.isEmpty() ? "既定" : effort), () -> showRequestOption(false)));
+            panel.rows.add(new ComposeUi.Row("Fast · " + (fast ? "On" : "Off"), () -> showRequestOption(true)));
+            panel.rows.add(new ComposeUi.Row("記憶の整理を再試行", this::retryMemories));
         }
-        if (!connection.hasSession()) menuRow(body, "保存した接続情報をリセット", 6, () -> {
+        panel.rows.add(new ComposeUi.Row(connection.hasSession() ? "ログアウト" : "保存した接続情報をリセット", () -> {
             if (busy) return;
-            dialog.dismiss();
             worker.execute(() -> {
                 connection.signOut(); availableModels = null;
                 ui(() -> { connectionStatus = connection.signOutStatus(); showConnection(); });
             });
-        });
-        menuRow(body, "利用状況を確認", 1, () -> startActivity(new Intent(Intent.ACTION_VIEW,
-                Uri.parse("https://chatgpt.com/settings/usage"))));
-        showSheet(dialog);
+        }));
+        panel.rows.add(new ComposeUi.Row("利用状況を確認", this::openUsage));
+        compose.show(panel);
     }
 
     private void showModels() {
@@ -497,13 +370,20 @@ public final class MainActivity extends Activity {
                 final int selectedIndex = checked;
                 ui(() -> {
                     if (busy || !connection.hasSession()) return;
-                    new AlertDialog.Builder(this).setTitle("モデル · ChatGPTの利用枠")
-                            .setSingleChoiceItems(names, selectedIndex, (dialog, index) -> {
-                                if (busy) return;
-                                getPreferences(MODE_PRIVATE).edit().putString("model_slug", models.get(index).slug).apply();
-                                dialog.dismiss(); showConnection();
-                            }).setNegativeButton("戻る", (dialog, which) -> showConnection()).show();
+                    ComposeUi.Panel panel = new ComposeUi.Panel("モデル · ChatGPTの利用枠");
+                    panel.onDismiss = this::showConnection;
+                    for (int i = 0; i < models.size(); i++) {
+                        final int index = i;
+                        ComposeUi.Row row = new ComposeUi.Row(names[i], () -> {
+                            if (busy) return;
+                            getPreferences(MODE_PRIVATE).edit().putString("model_slug", models.get(index).slug).apply();
+                            showConnection();
+                        });
+                        row.checked = i == selectedIndex; panel.rows.add(row);
+                    }
+                    compose.show(panel);
                 });
+
             } catch (Exception error) { ui(() -> showError(safeError(error))); }
         });
     }
@@ -516,24 +396,28 @@ public final class MainActivity extends Activity {
                 ChatRequest.Model model = request.model;
                 ui(() -> {
                     if (busy || !connection.hasSession()) return;
+                    ComposeUi.Panel panel = new ComposeUi.Panel((fast ? "Fast" : "Effort") + " · " + model.displayName);
+                    panel.onDismiss = this::showConnection;
                     if (fast ? !model.supportsFast : model.efforts.isEmpty()) {
-                        new AlertDialog.Builder(this).setTitle(fast ? "Fast" : "Effort")
-                                .setMessage(model.displayName + (fast ? "ではFastを利用できません。" : "ではEffortを変更できません。"))
-                                .setPositiveButton("戻る", (dialog, which) -> showConnection()).show();
-                        return;
-                    }
-                    List<String> values = new ArrayList<>();
-                    values.add(""); values.addAll(model.efforts);
-                    String[] labels = fast ? new String[]{"Off", "On"} : values.toArray(new String[0]);
-                    if (!fast) labels[0] = "既定（モデルに任せる）";
-                    int checked = fast ? (request.fast ? 1 : 0) : values.indexOf(request.effort);
-                    new AlertDialog.Builder(this).setTitle((fast ? "Fast" : "Effort") + " · " + model.displayName)
-                            .setSingleChoiceItems(labels, checked, (dialog, index) -> {
+                        panel.message = model.displayName + (fast ? "ではFastを利用できません。" : "ではEffortを変更できません。");
+                    } else {
+                        List<String> values = new ArrayList<>();
+                        if (fast) { values.add("Off"); values.add("On"); }
+                        else { values.add(""); values.addAll(model.efforts); }
+                        for (int i = 0; i < values.size(); i++) {
+                            final int index = i;
+                            String label = values.get(i).isEmpty() ? "既定（モデルに任せる）" : values.get(i);
+                            ComposeUi.Row row = new ComposeUi.Row(label, () -> {
                                 if (busy) return;
                                 if (fast) getPreferences(MODE_PRIVATE).edit().putBoolean("fast_mode:" + model.slug, index == 1).apply();
                                 else getPreferences(MODE_PRIVATE).edit().putString("reasoning_effort:" + model.slug, values.get(index)).apply();
-                                dialog.dismiss(); showConnection();
-                            }).setNegativeButton("戻る", (dialog, which) -> showConnection()).show();
+                                showConnection();
+                            });
+                            row.checked = fast ? (request.fast ? i == 1 : i == 0) : values.get(i).equals(request.effort);
+                            panel.rows.add(row);
+                        }
+                    }
+                    compose.show(panel);
                 });
             } catch (Exception error) { ui(() -> showError(safeError(error))); }
         });
@@ -553,62 +437,54 @@ public final class MainActivity extends Activity {
     }
 
     private void showPeople() {
-        Dialog dialog = newSheet();
-        LinearLayout body = sheetBody(dialog, "人物");
-        menuRow(body, "人物を追加", 2, () -> {
+        ComposeUi.Panel panel = new ComposeUi.Panel("人物");
+        panel.rows.add(new ComposeUi.Row("人物を追加", () -> {
             if (busy) { showError("応答と記憶の整理が終わってから追加してください。"); return; }
-            dialog.dismiss(); showNewPerson();
-        });
+            showNewPerson();
+        }));
         for (PersonRegistry.Person person : people.list()) {
-            menuRow(body, person.name + (activePerson != null && person.id.equals(activePerson.id) ? "  ✓" : ""), 5, () -> {
+            ComposeUi.Row row = new ComposeUi.Row(person.name, () -> {
                 if (busy) { showError("応答と記憶の整理が終わってから人物を切り替えてください。"); return; }
-                dialog.dismiss(); switchPerson(person);
+                switchPerson(person);
             });
+            row.checked = activePerson != null && person.id.equals(activePerson.id); panel.rows.add(row);
         }
-        menuRow(body, "人物ファイルを読み込む", 1, () -> {
+        panel.rows.add(new ComposeUi.Row("人物ファイルを読み込む", () -> {
             if (busy) { showError("応答と記憶の整理が終わってから読み込んでください。"); return; }
-            dialog.dismiss();
-            startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*")
-                    .addCategory(Intent.CATEGORY_OPENABLE), 82);
-        });
-        if (!people.list().isEmpty()) menuRow(body, "人物を削除", 6, () -> {
+            startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE), 82);
+        }));
+        if (!people.list().isEmpty()) panel.rows.add(new ComposeUi.Row("人物を削除", () -> {
             if (busy) { showError("応答と記憶の整理が終わってから削除してください。"); return; }
-            dialog.dismiss(); showDeletePeople();
-        });
-        showSheet(dialog);
+            showDeletePeople();
+        }));
+        compose.show(panel);
     }
 
     private void showNewPerson() {
-        EditText name = sheetInput("名前", false);
-        name.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("人物を追加")
-                .setMessage("名前だけで始められます。人物のことは会話しながら決めていけます。")
-                .setPositiveButton("作成", null).setNegativeButton("キャンセル", null).create();
-        dialog.setView(name, dp(24), dp(16), dp(24), dp(8));
-        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+        ComposeUi.Panel panel = new ComposeUi.Panel("人物を追加");
+        panel.message = "名前だけで始められます。人物のことは会話しながら決めていけます。";
+        ComposeUi.Field name = new ComposeUi.Field("名前", false); panel.fields.add(name);
+        panel.confirmLabel = "作成";
+        panel.confirm = () -> {
             try {
-                PersonDocument document = PersonDocument.named(name.getText().toString());
-                dialog.dismiss(); createPerson(document, null, "");
+                PersonDocument document = PersonDocument.named(name.getValue());
+                compose.hide(); createPerson(document, null, "");
             } catch (IllegalArgumentException error) { name.setError(error.getMessage()); }
-        }));
-        dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
-        name.requestFocus(); dialog.show();
+        };
+        compose.show(panel);
     }
 
     private void showDeletePeople() {
-        List<PersonRegistry.Person> removable = people.list();
-        String[] names = new String[removable.size()];
-        for (int i = 0; i < names.length; i++) names[i] = removable.get(i).name;
-        new AlertDialog.Builder(this).setTitle("削除する人物")
-                .setItems(names, (view, index) -> {
-                    PersonRegistry.Person person = removable.get(index);
-                    AlertDialog confirm = new AlertDialog.Builder(this).setTitle(person.name + "を削除しますか？")
-                            .setMessage("この端末の人物・会話・記憶・下書きを削除します。元には戻せません。\nGitHub上のバックアップと、書き出したZIPは残ります。")
-                            .setPositiveButton("人物を削除", (dialog, which) -> deletePerson(person))
-                            .setNegativeButton("キャンセル", null).create();
-                    confirm.setCanceledOnTouchOutside(false);
-                    confirm.show(); confirm.getButton(AlertDialog.BUTTON_NEGATIVE).requestFocus();
-                }).setNegativeButton("キャンセル", null).show();
+        ComposeUi.Panel panel = new ComposeUi.Panel("削除する人物");
+        for (PersonRegistry.Person person : people.list()) panel.rows.add(new ComposeUi.Row(person.name, () -> {
+            ComposeUi.Panel confirm = new ComposeUi.Panel(person.name + "を削除しますか？");
+            confirm.message = "この端末の人物・会話・記憶・下書きを削除します。元には戻せません。\nGitHub上のバックアップと、書き出したZIPは残ります。";
+            confirm.dismissOnClickOutside = false;
+            confirm.confirmLabel = "人物を削除";
+            confirm.confirm = () -> { compose.hide(); deletePerson(person); };
+            compose.show(confirm);
+        }));
+        compose.show(panel);
     }
 
     private void deletePerson(PersonRegistry.Person person) {
@@ -649,9 +525,9 @@ public final class MainActivity extends Activity {
                 if (removed) {
                     if (detail == null) recreate();
                     else {
-                        AlertDialog warning = new AlertDialog.Builder(this).setTitle("削除後の処理を確認してください")
-                                .setMessage(detail).setPositiveButton("閉じる", null).create();
-                        warning.setOnDismissListener(dialog -> recreate()); warning.show();
+                        ComposeUi.Panel warning = new ComposeUi.Panel("削除後の処理を確認してください");
+                        warning.message = detail; warning.onDismiss = this::recreate; compose.show(warning);
+
                     }
                 } else {
                     changingPerson = false; setBusy(false); showError(detail); scheduleGitSync();
@@ -687,48 +563,25 @@ public final class MainActivity extends Activity {
         if (!error.isEmpty()) throw new java.io.IOException(error);
     }
 
-    private EditText sheetInput(String hint, boolean secret) {
-        EditText edit = new EditText(this);
-        edit.setVerticalScrollBarEnabled(false);
-        edit.setHorizontalScrollBarEnabled(false);
-        edit.setHint(hint); edit.setContentDescription(hint); edit.setTextColor(Color.rgb(230, 238, 242));
-        edit.setHintTextColor(Color.rgb(156, 171, 181)); edit.setTextSize(DEFAULT_TEXT_SIZE);
-        edit.setSingleLine(true); edit.setSaveEnabled(false);
-        edit.setInputType(InputType.TYPE_CLASS_TEXT | (secret ? InputType.TYPE_TEXT_VARIATION_PASSWORD
-                : InputType.TYPE_TEXT_VARIATION_URI));
-        return edit;
-    }
-
     private void previewPerson(PersonDocument document) {
         if (busy) return;
-        LinearLayout body = new LinearLayout(this); body.setOrientation(LinearLayout.VERTICAL);
-        body.setPadding(dp(24), dp(8), dp(24), dp(8));
-        TextView preview = sheetText(document.profile.length() > 1600
-                ? document.profile.substring(0, 1600) + "…" : document.profile, 17);
-        body.addView(preview);
-        body.addView(sheetText("この人物専用の、空の非公開GitHubリポジトリを指定してください。", 16));
-        EditText repository = sheetInput("https://github.com/所有者/リポジトリ", false);
-        EditText token = sheetInput("この人物用のGitHubトークン", true);
-        LinearLayout.LayoutParams fieldLayout = new LinearLayout.LayoutParams(-1, -2);
-        fieldLayout.setMargins(0, dp(12), 0, 0);
-        body.addView(repository, fieldLayout);
-        body.addView(token, new LinearLayout.LayoutParams(fieldLayout));
-        body.addView(sheetText("Fine-grained token: このリポジトリの Contents を Read and write に設定。", 15));
-        ScrollView scroll = new ScrollView(this);
-        scroll.setVerticalScrollBarEnabled(false);
-        scroll.setHorizontalScrollBarEnabled(false);
-        scroll.addView(body);
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle(document.name).setView(scroll)
-                .setPositiveButton("読み込んで作成", null).setNegativeButton("キャンセル", null).create();
-        dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
-        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+        ComposeUi.Panel panel = new ComposeUi.Panel(document.name);
+        panel.secure = true;
+        panel.message = (document.profile.length() > 1600 ? document.profile.substring(0, 1600) + "…" : document.profile)
+                + "\nこの人物専用の、空の非公開GitHubリポジトリを指定してください。"
+                + "\nFine-grained token: このリポジトリの Contents を Read and write に設定。";
+        ComposeUi.Field repository = new ComposeUi.Field("https://github.com/所有者/リポジトリ", false);
+        ComposeUi.Field token = new ComposeUi.Field("この人物用のGitHubトークン", true);
+        panel.fields.add(repository); panel.fields.add(token);
+        panel.confirmLabel = "読み込んで作成";
+        panel.confirm = () -> {
             String repo;
-            try { repo = PersonRegistry.normalizeRepository(repository.getText().toString()); }
+            try { repo = PersonRegistry.normalizeRepository(repository.getValue()); }
             catch (IllegalArgumentException error) { repository.setError(error.getMessage()); return; }
-            String suppliedToken = token.getText().toString().trim(); token.setText("");
-            dialog.dismiss(); createPerson(document, repo, suppliedToken);
-        }));
-        dialog.show();
+            String suppliedToken = token.getValue().trim(); token.setValue("");
+            compose.hide(); createPerson(document, repo, suppliedToken);
+        };
+        compose.show(panel);
     }
 
     private void createPerson(PersonDocument document, String repository, String suppliedToken) {
@@ -777,38 +630,39 @@ public final class MainActivity extends Activity {
     }
 
     private void showGitBackup() {
-        Dialog dialog = newSheet();
-        LinearLayout body = sheetBody(dialog, "Gitバックアップ");
-        TextView status = sheetText(activePerson.repository == null
+        if (activePerson == null) return;
+        ComposeUi.Panel panel = new ComposeUi.Panel("Gitバックアップ");
+        panel.message = activePerson.repository == null
                 ? activePerson.name + "\n会話と記憶はこの端末に保存しています。ZIPに書き出して保管できます。"
                 : activePerson.name + "\n" + activePerson.repository + "\n" + gitStatus
-                  + "\n会話の原文・人物ファイル・出来事と記憶の更新履歴を非公開リポジトリへ保存します。", 17);
-        status.setPadding(dp(12), dp(12), dp(12), dp(20)); body.addView(status);
+                  + "\n会話の原文・人物ファイル・出来事と記憶の更新履歴を非公開リポジトリへ保存します。";
         if (activePerson.repository != null) {
-            menuRow(body, "今すぐ保存", 1, () -> { dialog.dismiss(); queueGitSync(true); });
-            menuRow(body, "GitHubトークンを設定", 4, () -> { dialog.dismiss(); editGitToken(); });
+            panel.rows.add(new ComposeUi.Row("今すぐ保存", () -> queueGitSync(true)));
+            panel.rows.add(new ComposeUi.Row("GitHubトークンを設定", this::editGitToken));
         }
-        menuRow(body, "端末からZIPを書き出す", 1, () -> { dialog.dismiss(); exportArchive(); });
-        showSheet(dialog);
+        panel.rows.add(new ComposeUi.Row("端末からZIPを書き出す", this::exportArchive));
+        compose.show(panel);
     }
 
     private void editGitToken() {
         final GitHubTokenStore tokens = new GitHubTokenStore(this, activePerson.id);
-        EditText token = sheetInput("GitHubトークン", true);
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("GitHubトークン")
-                .setMessage("Contents: Read and write を許可したトークンを端末内に暗号化して保存します。")
-                .setPositiveButton("保存", (view, which) -> {
-                    String value = token.getText().toString().trim(); token.setText("");
-                    worker.execute(() -> {
-                        try { tokens.set(value); ui(() -> { gitStatus = "接続情報を保存しました"; queueGitSync(true); }); }
-                        catch (Exception error) { ui(() -> showError(safeError(error))); }
-                    });
-                }).setNeutralButton("接続情報を削除", (view, which) -> worker.execute(() -> {
-                    try { tokens.clear(); ui(() -> gitStatus = "自動保存は接続情報の設定待ちです"); }
-                    catch (Exception error) { ui(() -> showError(safeError(error))); }
-                })).setNegativeButton("キャンセル", null).create();
-        dialog.setView(token, dp(24), dp(16), dp(24), dp(8));
-        dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE); dialog.show();
+        ComposeUi.Panel panel = new ComposeUi.Panel("GitHubトークン");
+        panel.secure = true;
+        panel.message = "Contents: Read and write を許可したトークンを端末内に暗号化して保存します。";
+        ComposeUi.Field token = new ComposeUi.Field("GitHubトークン", true); panel.fields.add(token);
+        panel.confirmLabel = "保存";
+        panel.confirm = () -> {
+            String value = token.getValue().trim(); token.setValue(""); compose.hide();
+            worker.execute(() -> {
+                try { tokens.set(value); ui(() -> { gitStatus = "接続情報を保存しました"; queueGitSync(true); }); }
+                catch (Exception error) { ui(() -> showError(safeError(error))); }
+            });
+        };
+        panel.rows.add(new ComposeUi.Row("接続情報を削除", () -> worker.execute(() -> {
+            try { tokens.clear(); ui(() -> gitStatus = "自動保存は接続情報の設定待ちです"); }
+            catch (Exception error) { ui(() -> showError(safeError(error))); }
+        })));
+        compose.show(panel);
     }
 
     private void scheduleGitSync() {
@@ -928,116 +782,12 @@ public final class MainActivity extends Activity {
         if (session != null) session.cancel();
         if (connection != null) connection.cancel();
         worker.shutdownNow();
+        reader.shutdownNow();
         super.onDestroy();
     }
 
-    private Dialog newSheet() {
-        Dialog dialog = new Dialog(this, android.R.style.Theme_Material_NoActionBar);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        dialog.setCanceledOnTouchOutside(true);
-        return dialog;
-    }
-
-    private LinearLayout sheetBody(Dialog dialog, String title) {
-        LinearLayout body = new LinearLayout(this);
-        body.setOrientation(LinearLayout.VERTICAL);
-        body.setPadding(dp(16), dp(12), dp(16), dp(20));
-        GradientDrawable background = roundBackground(Color.rgb(28, 34, 41), 0);
-        float radius = dp(28);
-        background.setCornerRadii(new float[]{radius, radius, radius, radius, 0, 0, 0, 0});
-        body.setBackground(background);
-        body.setOnApplyWindowInsetsListener((view, insets) -> {
-            int bottom = Build.VERSION.SDK_INT >= 30
-                    ? insets.getInsets(WindowInsets.Type.navigationBars()).bottom
-                    : insets.getSystemWindowInsetBottom();
-            view.setPadding(dp(16), dp(12), dp(16), dp(20) + bottom);
-            return insets;
-        });
-        LinearLayout header = new LinearLayout(this);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        TextView heading = sheetText(title, 21);
-        heading.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        heading.setPadding(dp(12), dp(8), dp(8), dp(8));
-        header.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
-        ImageButton close = new ImageButton(this);
-        close.setImageDrawable(new MenuIcon(6));
-        close.setContentDescription("閉じる");
-        close.setBackgroundColor(Color.TRANSPARENT);
-        close.setPadding(dp(14), dp(14), dp(14), dp(14));
-        close.setOnClickListener(view -> dialog.dismiss());
-        header.addView(close, new LinearLayout.LayoutParams(dp(48), dp(48)));
-        body.addView(header);
-        ScrollView scroll = new ScrollView(this) {
-            @Override protected void onMeasure(int width, int height) {
-                int limit = Math.round(getResources().getDisplayMetrics().heightPixels * 0.85f);
-                super.onMeasure(width, View.MeasureSpec.makeMeasureSpec(limit, View.MeasureSpec.AT_MOST));
-            }
-        };
-        scroll.setFillViewport(false);
-        scroll.setVerticalScrollBarEnabled(false);
-        scroll.setHorizontalScrollBarEnabled(false);
-        scroll.addView(body);
-        FrameLayout backdrop = new FrameLayout(this);
-        backdrop.setOnClickListener(view -> dialog.dismiss());
-        scroll.setClickable(true);
-        backdrop.addView(scroll, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
-        dialog.setContentView(backdrop);
-        return body;
-    }
-
-    private void showSheet(Dialog dialog) {
-        Window window = dialog.getWindow();
-        window.setBackgroundDrawableResource(android.R.color.transparent);
-        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-        window.setDimAmount(0.55f);
-        window.setGravity(Gravity.BOTTOM);
-        window.setWindowAnimations(android.R.style.Animation_InputMethod);
-        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
-        if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false);
-        else window.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
-        window.setNavigationBarColor(Color.TRANSPARENT);
-        window.setNavigationBarContrastEnforced(false);
-        dialog.show();
-        window.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
-        window.getDecorView().requestApplyInsets();
-    }
-
-    private TextView sheetText(String value, float size) {
-        TextView text = new TextView(this);
-        text.setText(value);
-        text.setTextSize(size);
-        text.setTextColor(Color.rgb(230, 238, 242));
-        return text;
-    }
-
-    private void menuRow(LinearLayout body, String title, int icon, Runnable action) {
-        LinearLayout row = new LinearLayout(this);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(12), dp(6), dp(12), dp(6));
-        row.setMinimumHeight(dp(56));
-        android.util.TypedValue ripple = new android.util.TypedValue();
-        getTheme().resolveAttribute(android.R.attr.selectableItemBackground, ripple, true);
-        row.setBackgroundResource(ripple.resourceId);
-        row.setFocusable(true);
-        row.setOnClickListener(view -> action.run());
-        row.setContentDescription(title);
-        ImageView image = new ImageView(this);
-        image.setImageDrawable(new MenuIcon(icon));
-        image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        row.addView(image, new LinearLayout.LayoutParams(dp(24), dp(24)));
-        TextView label = sheetText(title, Math.max(18, textSize - 2));
-        label.setPadding(dp(20), dp(8), 0, dp(8));
-        label.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        row.addView(label, new LinearLayout.LayoutParams(0, -2, 1));
-        body.addView(row, new LinearLayout.LayoutParams(-1, -2));
-    }
-
     private void applyTypography() {
-        float pixels = android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP,
-                textSize, getResources().getDisplayMetrics());
-        nativeSetTypography(pixels, messageGap);
-        if (surface != null) surface.renderBurst();
+        compose.setTextSize(textSize); compose.setMessageGap(messageGap);
     }
 
     private void saveDisplaySettings() {
@@ -1045,237 +795,32 @@ public final class MainActivity extends Activity {
     }
 
     private void showDisplaySettings() {
-        Dialog dialog = newSheet();
-        LinearLayout body = sheetBody(dialog, "表示設定");
-        TextView preview = sheetText("こんにちは。\n今日の続きから話そう。", textSize);
-        preview.setPadding(dp(16), dp(16), dp(16), dp(16));
-        preview.setBackground(roundBackground(Color.rgb(39, 49, 57), 16));
-        LinearLayout.LayoutParams previewLayout = new LinearLayout.LayoutParams(-1, -2);
-        previewLayout.setMargins(dp(12), dp(12), dp(12), dp(20));
-        body.addView(preview, previewLayout);
-        SeekBar font = settingSlider(body, "文字サイズ", 16, 28, textSize, value -> {
-            textSize = value;
-            preview.setTextSize(value);
-            applyTypography();
+        ComposeUi.Panel panel = new ComposeUi.Panel("表示設定");
+        panel.preview = true;
+        ComposeUi.Setting font = new ComposeUi.Setting("文字サイズ", 16, 28, textSize, value -> {
+            textSize = value; applyTypography(); saveDisplaySettings();
         });
-        SeekBar gap = settingSlider(body, "メッセージの間隔", 8, 24, messageGap, value -> {
-            messageGap = value;
-            applyTypography();
+        ComposeUi.Setting gap = new ComposeUi.Setting("メッセージの間隔", 8, 24, messageGap, value -> {
+            messageGap = value; applyTypography(); saveDisplaySettings();
         });
-        menuRow(body, "標準に戻す", 4, () -> { font.setProgress(DEFAULT_TEXT_SIZE - 16); gap.setProgress(4); });
-        dialog.setOnDismissListener(ignored -> saveDisplaySettings());
-        showSheet(dialog);
-    }
-
-    private SeekBar settingSlider(LinearLayout body, String title, int min, int max, int value,
-                                  java.util.function.IntConsumer onChange) {
-        TextView label = sheetText(title + "  " + value, 17);
-        label.setPadding(dp(12), dp(10), dp(12), dp(4));
-        body.addView(label);
-        SeekBar slider = new SeekBar(this);
-        slider.setMax(max - min);
-        slider.setProgress(value - min);
-        slider.setContentDescription(title);
-        slider.setPadding(dp(12), dp(12), dp(12), dp(12));
-        slider.setMinimumHeight(dp(48));
-        slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override public void onProgressChanged(SeekBar bar, int progress, boolean user) {
-                label.setText(title + "  " + (min + progress));
-                onChange.accept(min + progress);
-            }
-            @Override public void onStartTrackingTouch(SeekBar bar) {}
-            @Override public void onStopTrackingTouch(SeekBar bar) { saveDisplaySettings(); }
+        panel.sliders.add(font); panel.sliders.add(gap);
+        ComposeUi.Row reset = new ComposeUi.Row("標準に戻す", () -> {
+            textSize = DEFAULT_TEXT_SIZE; messageGap = 12;
+            font.setValue(textSize); gap.setValue(messageGap); applyTypography(); saveDisplaySettings();
         });
-        body.addView(slider, new LinearLayout.LayoutParams(-1, dp(48)));
-        return slider;
-    }
-
-    private void showRecentConversation() {
-        if (activePerson == null) return;
-        TextView text = sheetText(nativeRecentTranscript(), textSize);
-        text.setTextIsSelectable(true);
-        text.setPadding(dp(20), dp(16), dp(20), dp(16));
-        ScrollView scroll = new ScrollView(this);
-        scroll.setVerticalScrollBarEnabled(false);
-        scroll.setHorizontalScrollBarEnabled(false);
-        scroll.addView(text);
-        new AlertDialog.Builder(this).setTitle("最近の会話")
-                .setView(scroll).setPositiveButton("閉じる", null).show();
-    }
-
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
-    }
-
-    private GradientDrawable roundBackground(int color, int radius) {
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(color);
-        background.setCornerRadius(dp(radius));
-        return background;
-    }
-
-    private ImageButton iconButton(boolean send, String label) {
-        ImageButton button = new ImageButton(this);
-        button.setContentDescription(label);
-        button.setImageDrawable(new ControlIcon(send));
-        button.setPadding(dp(12), dp(12), dp(12), dp(12));
-        android.util.TypedValue ripple = new android.util.TypedValue();
-        getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, ripple, true);
-        button.setBackgroundResource(ripple.resourceId);
-        if (send) button.setBackground(roundBackground(Color.rgb(54, 89, 75), 24));
-        return button;
-    }
-
-    private static final class ControlIcon extends Drawable {
-        private final boolean send;
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        ControlIcon(boolean send) { this.send = send; }
-        @Override public void draw(Canvas canvas) {
-            canvas.save();
-            canvas.translate(getBounds().left, getBounds().top);
-            canvas.scale(getBounds().width() / 24f, getBounds().height() / 24f);
-            paint.setColor(Color.rgb(222, 232, 239));
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(1.8f);
-            paint.setStrokeCap(Paint.Cap.ROUND);
-            paint.setStrokeJoin(Paint.Join.ROUND);
-            if (send) {
-                Path arrow = new Path();
-                arrow.moveTo(6, 11); arrow.lineTo(12, 5); arrow.lineTo(18, 11);
-                canvas.drawPath(arrow, paint);
-                canvas.drawLine(12, 5, 12, 20, paint);
-            } else {
-                canvas.drawLine(4, 6, 20, 6, paint);
-                canvas.drawLine(4, 12, 20, 12, paint);
-                canvas.drawLine(4, 18, 20, 18, paint);
-            }
-            canvas.restore();
-        }
-        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
-        @Override public void setColorFilter(ColorFilter filter) { paint.setColorFilter(filter); }
-        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
-    }
-
-    private static final class MenuIcon extends Drawable {
-        private final int kind;
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        MenuIcon(int kind) { this.kind = kind; }
-        @Override public void draw(Canvas canvas) {
-            canvas.save();
-            canvas.translate(getBounds().left, getBounds().top);
-            canvas.scale(getBounds().width() / 24f, getBounds().height() / 24f);
-            paint.setColor(Color.rgb(166, 196, 188));
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(1.65f);
-            paint.setStrokeCap(Paint.Cap.ROUND);
-            paint.setStrokeJoin(Paint.Join.ROUND);
-            if (kind == 0) {
-                Path p = new Path(); p.moveTo(5, 4); p.lineTo(19, 4); p.lineTo(21, 6);
-                p.lineTo(21, 15); p.lineTo(19, 17); p.lineTo(9, 17); p.lineTo(4, 21);
-                p.lineTo(4, 6); p.close(); canvas.drawPath(p, paint);
-            } else if (kind == 1) {
-                canvas.drawRoundRect(5, 3, 19, 21, 2, 2, paint);
-                for (int y = 8; y <= 16; y += 4) canvas.drawLine(9, y, 15, y, paint);
-            } else if (kind == 2 || kind == 3) {
-                Path p = new Path(); p.moveTo(6, 3); p.lineTo(18, 3); p.lineTo(18, 21);
-                p.lineTo(12, 17); p.lineTo(6, 21); p.close(); canvas.drawPath(p, paint);
-                if (kind == 3) { canvas.drawLine(9, 9, 15, 9, paint); canvas.drawLine(12, 6, 12, 12, paint); }
-            } else if (kind == 4) {
-                for (int i = 0; i < 3; ++i) {
-                    int y = 6 + i * 6, x = i == 1 ? 15 : 9;
-                    canvas.drawLine(4, y, x - 2, y, paint); canvas.drawLine(x + 2, y, 20, y, paint);
-                    canvas.drawCircle(x, y, 2, paint);
-                }
-            } else if (kind == 5) {
-                canvas.drawCircle(12, 12, 8, paint);
-                canvas.drawLine(12, 11, 12, 16, paint); canvas.drawPoint(12, 7.5f, paint);
-            } else {
-                canvas.drawLine(6, 6, 18, 18, paint); canvas.drawLine(18, 6, 6, 18, paint);
-            }
-            canvas.restore();
-        }
-        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
-        @Override public void setColorFilter(ColorFilter filter) { paint.setColorFilter(filter); }
-        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+        reset.dismiss = false; panel.rows.add(reset); compose.show(panel);
     }
 
     @Override public void onPause() {
         if (connection != null) connection.setForeground(false);
-        if (input != null) saveDisplaySettings();
+        if (compose != null) saveDisplaySettings();
         saveDraft();
         if (!busy && !changingPerson) queueGitSync(false);
-        if (surface != null) {
-            nativePause();
-            surface.onPause();
-        }
         super.onPause();
-    }
-
-    @Override public void onResume() {
-        super.onResume();
-        if (surface != null) {
-            surface.onResume();
-            surface.renderBurst();
-        }
     }
 
     @Override public void onWindowFocusChanged(boolean focused) {
         super.onWindowFocusChanged(focused);
         if (focused && connection != null) connection.setForeground(true);
-        if (focused && surface != null) surface.renderBurst();
-    }
-
-    private final class ChatSurface extends GLSurfaceView implements GLSurfaceView.Renderer {
-        ChatSurface() {
-            super(MainActivity.this);
-            setContentDescription("会話。ダブルタップで最近の会話をテキスト表示");
-            setAccessibilityDelegate(new View.AccessibilityDelegate() {
-                @Override public boolean performAccessibilityAction(View host, int action, Bundle arguments) {
-                    if (action == android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK) {
-                        showRecentConversation();
-                        return true;
-                    }
-                    return super.performAccessibilityAction(host, action, arguments);
-                }
-            });
-            setEGLContextClientVersion(3);
-            setPreserveEGLContextOnPause(false);
-            setRenderer(this);
-            setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
-        }
-
-        @Override public void onSurfaceCreated(GL10 ignored, EGLConfig config) {
-            nativeSurfaceCreated();
-        }
-
-        @Override public void onSurfaceChanged(GL10 ignored, int width, int height) {
-            nativeResize(width, height, getResources().getDisplayMetrics().density);
-            renderBurst();
-        }
-
-        @Override public void onDrawFrame(GL10 ignored) { nativeRender(); }
-
-        @Override public boolean onTouchEvent(MotionEvent event) {
-            int action = event.getActionMasked();
-            if (action != MotionEvent.ACTION_DOWN && action != MotionEvent.ACTION_UP
-                    && action != MotionEvent.ACTION_MOVE && action != MotionEvent.ACTION_CANCEL) return true;
-            if (action == MotionEvent.ACTION_DOWN) {
-                clearFocus();
-                ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE))
-                        .hideSoftInputFromWindow(getWindowToken(), 0);
-            }
-            float x = event.getX(), y = event.getY();
-            queueEvent(() -> nativeTouch(action, x, y));
-            renderBurst();
-            if (action == MotionEvent.ACTION_UP) performClick();
-            return true;
-        }
-
-        @Override public boolean performClick() { super.performClick(); return true; }
-
-        void renderBurst() {
-            requestRender();
-            for (int delay : new int[]{16, 32, 48, 80}) postDelayed(this::requestRender, delay);
-        }
     }
 }

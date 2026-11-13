@@ -1,10 +1,14 @@
 # Conversation
 
 AndroidでAIの友達と会話し、出来事・好み・約束を自動で記憶するためのアプリです。
-Odinが会話・記憶・SQLiteを管理し、Dear ImGuiでチャットを描画します。
-Android標準の入力欄、ChatGPTのサブスク認証を組み合わせています。
+Odinが会話・記憶・SQLiteを管理し、Jetpack ComposeとMaterial 3で画面を描画します。
+ChatGPTのサブスク認証を組み合わせています。
 
-## 0.3.3 人物・Gitプレビュー
+## 0.4.0 Jetpack Compose
+
+- チャット、入力欄、メニュー、設定、人物操作、接続・確認ダイアログをJetpack Composeへ移行。
+- 日本語・絵文字はAndroidのシステムフォントを使い、テキスト選択とアクセシビリティのセマンティクスに対応。
+- 人物ごとの会話・記憶・下書き・設定・暗号化された接続情報と、既存の署名を引き継ぎます。
 
 - 暗いチャット画面に本文と入力欄、メニュー・送信アイコンだけを表示。
 - メニューから人物切り替え、ChatGPTログイン、モデル選択、表示設定、Gitバックアップ。
@@ -85,12 +89,12 @@ Gitからの取り込み・復元画面と、複数端末で同時に編集す�
 - 再処理による同一ジョブの二重反映は防止。異なる会話間の意味的な重複判断はモデルにも依存します。
 - 古い文脈や抽出バッチ内の長文は、一部の抜粋になる場合があります。原文はDBに残ります。
   今回ユーザーが送った発言は、切り詰めずモデルへ渡します（1発言UTF-8で64KiBまで）。
-- 単色のNoto Emojiを使い、複雑な絵文字の結合表示には制限があります。
+- 文字や絵文字の表示は端末のシステムフォントに依存します。
 - サブスク認証・AI品質の検証状況は`docs/validation.md`を参照してください。
 
 ## ビルドとスマホへのインストール
 
-Windows PowerShellで実行します。初回はSDK／NDK／Odin等の準備に通信と数GBの空きが必要です。
+Windows PowerShellで実行します。初回はSDK／NDK／Odin／Gradle等の準備に通信と数GBの空きが必要です。
 既存SDK/JDKは再利用し、追加ツールは`.tools/`に保管します。
 新規SDKでライセンス確認が必要な場合はセットアップが確認を表示します。
 
@@ -99,13 +103,15 @@ Windows PowerShellで実行します。初回はSDK／NDK／Odin等の準備に�
 .\scripts\install-android.ps1 -Configuration Release
 ```
 
-出力は`dist/Conversation-0.3.3-arm64-release.apk`。既定の構成はReleaseです。
-Android10/API29以降・ARM64・OpenGL ES3向けです。
+出力は`dist/Conversation-0.4.0-arm64-release.apk`。既定の構成はReleaseです。
+Android10/API29以降・ARM64向けです。
 USBデバッグを有効にし、このPCをスマホで許可してからインストールしてください。
 複数端末の場合は`install-android.ps1 -Serial <シリアル>`を指定します。
 
-Releaseはデバッグを無効にし、Odinを`-o:speed`、C/C++をCMake Release、DEXをreleaseモードでビルドします。
-署名・パッケージ・バージョン・デバッグ無効・16KiBページ対応を検証してからAPKを出力します。
+UIのビルドはGradle 8.13、Android Gradle Plugin 8.13.2、Kotlin 2.2.21、Compose BOM 2025.10.01を固定して使います。
+Android API 36／Build Tools 36.0.0、NDK r30、JDK 17または21を使い、Gradleはチェックサムを検証して準備します。
+Releaseはデバッグを無効にし、Odinを`-o:speed`、C/C++をCMake Release、GradleのRelease構成でJava・Kotlin・DEXをビルドします。
+署名・パッケージ・バージョン・デバッグ無効・全同梱ネイティブライブラリの16KiBページ対応を検証してからAPKを出力します。
 署名鍵とDPAPI保護されたパスワードは`%LOCALAPPDATA%/Conversation/signing/`に保管し、GitやAPKへ含めません。
 このフォルダは今後の更新に必要です。パスワードは作成したWindowsユーザーで復号するため、
 別PCへの移行には事前の鍵移行が必要です。ビルド用の`build/`や`.tools/`とは分けています。
@@ -124,17 +130,26 @@ Releaseはデバッグを無効にし、Odinを`-o:speed`、C/C++をCMake Releas
 .\scripts\test-device.ps1 -Serial <シリアル>
 .\scripts\test-person-device.ps1 -Serial <シリアル>
 .\scripts\test-signing.ps1
+.\scripts\test-compose.ps1 -CompileOnly
+.\scripts\test-compose.ps1 -Serial emulator-5554
 ```
 
 - Core: 移行・破損データ保全・2万件の会話／記憶・人物資料の出典・差分の再生・ロールバック。
-- Native: 人物切替の失敗復帰、最大80件の表示、ページ位置、途中の返答、文字サイズと画面再生成。
+- Native: 人物切替の失敗復帰、最大80件のページ取得、JSONのUnicode・制御文字処理、取得失敗時の復帰。
 - Connection: OAuth/SSE、人物ファイル・一覧、プロフィール注入、Gitの競合・中断復帰・公開先拒否。
 - Device: 起動と初期化エラーの確認。実機の実通信や長期的な会話品質を代替するテストではありません。
 - Person device: 署名済みテストAPKから合成人物だけを使い、Keystore・JNI取り込み・切替・書き出しを実機確認。実行時はアプリを閉じます。
+- Compose: 未選択時の入力禁止、応答中の下書き、送信条件、メニュー操作、秘密入力、日本語・絵文字、途中の返答と履歴ページ。
 - 署名移行時: 更新前に`test-person-device.ps1 -Configuration Debug -Mode Baseline`、更新後に`-Configuration Release -Mode Verify`で既存データと認証の引き継ぎを確認します。通常の合成人物試験は`-Mode Full`です。
+
+Compose試験は先に通常のビルドを実行してから使います。`-CompileOnly`は端末なしでアプリと計装テストAPKをコンパイルします。
+実行先は合成データ専用の使い捨てエミュレーターに限定します。シリアルは`adb devices`で確認してください。
+テスト用Debug署名と異なるアプリ（Release等）が入っている場合は、置換・アンインストールせず停止します。
+レポートは`build/compose-tests/reports/androidTests/connected/debug/`へ出力します。
 
 ## ソース構成
 
-`core/`がOdinの保存・記憶、`native/`がC++の描画とJNI接続、`android/`がOS入力・認証・通信、
+`core/`がOdinの保存・記憶、`native/`がC++のJNI接続、`android/`がCompose UI・認証・通信、
 `vendor/`がライセンス付きの固定依存、`scripts/`がビルドと検証です。
-画面ウィジェットは現在C++接続層から呼び出し、Odin製ImGuiバインディングは導入していません。
+`ComposeUi.kt`が画面と入力を描画し、`MainActivity.java`が既存の保存・認証・通信処理を呼び出します。
+Dear ImGuiとOpenGLの描画コードはビルドに含めません。
