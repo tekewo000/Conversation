@@ -194,6 +194,10 @@ std::string archive_delta(int64_t after_cursor) {
 
 void history_changed() {
     const int total = core_ready ? conversation_message_count() : 0;
+    if (total > page_total) {
+        following_bottom = true;
+        anchor_index = -1;
+    }
     if (page_first < 0 || following_bottom) {
         if (load_page(std::max(0, total - kPageSize))) scroll_to_bottom = true;
     } else load_page(page_first);
@@ -355,10 +359,10 @@ void draw_ui() {
         }
         ImDrawList* draw = ImGui::GetWindowDrawList();
         draw->AddRectFilled(origin, ImVec2(origin.x + bubble_width, origin.y + bubble_height),
-                            user ? IM_COL32(222, 240, 223, 255) : IM_COL32(246, 222, 231, 255), 16 * d);
+                            user ? IM_COL32(73, 110, 84, 255) : IM_COL32(139, 90, 111, 255), 16 * d);
         draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
                       ImVec2(origin.x + padding, origin.y + 10 * d),
-                      IM_COL32(32, 38, 42, 255), text, nullptr, wrap);
+                      IM_COL32(255, 255, 255, 255), text, nullptr, wrap);
         ImGui::Dummy(ImVec2(available, bubble_height + message_gap_dp * d));
     }
     if (scroll_to_bottom) {

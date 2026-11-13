@@ -73,8 +73,8 @@ void check_pages_and_streaming() {
     // Both roles are real messages with distinct left/right bubble placement.
     float assistant_left = width, user_left = width;
     for (const ImDrawVert& vertex : child->DrawList->VtxBuffer) {
-        if (vertex.col == IM_COL32(246, 222, 231, 255)) assistant_left = std::min(assistant_left, vertex.pos.x);
-        if (vertex.col == IM_COL32(222, 240, 223, 255)) user_left = std::min(user_left, vertex.pos.x);
+        if (vertex.col == IM_COL32(139, 90, 111, 255)) assistant_left = std::min(assistant_left, vertex.pos.x);
+        if (vertex.col == IM_COL32(73, 110, 84, 255)) user_left = std::min(user_left, vertex.pos.x);
     }
     assert(assistant_left < width / 3 && user_left > assistant_left + 20);
     set_streaming("応答を表示中 😀");
@@ -107,7 +107,6 @@ void check_pages_and_streaming() {
     assert(cache_first == older_page && cache_count == page_count);
     frame();
     assert(page_first == older_page && std::abs(child->Scroll.y - older_scroll) < 2);
-    messages.push_back("new reply");
     history_changed();
     set_streaming("next reply");
     frame(); frame();
@@ -140,6 +139,20 @@ void check_pages_and_streaming() {
     const int jumped_page = page_first;
     jump_to_message(0); jump_to_message(999999);
     assert(page_first == jumped_page);
+    // A new message returns from older history to the latest page and resumes follow.
+    jump_to_message(501);
+    messages.push_back("new reply");
+    history_changed();
+    assert(following_bottom && scroll_to_bottom && anchor_index == -1);
+    set_streaming("latest reply");
+    frame(); frame();
+    assert(page_first == static_cast<int>(messages.size()) - kPageSize);
+    assert(message_positions.size() == 81);
+    assert(child->Scroll.y >= child->ScrollMax.y - 1);
+    set_streaming("latest reply\nmore text\nlast line");
+    frame(); frame();
+    assert(child->Scroll.y >= child->ScrollMax.y - 1);
+    set_streaming("");
     messages = short_history;
     following_bottom = true;
     history_changed();
