@@ -3,6 +3,7 @@ package jp.tekewo.conversation
 import android.content.Context
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
@@ -98,6 +99,45 @@ class MainActivityComposeTest {
             assertTrue(AttachmentFiles.resolve(person.directory, saved.fileName).isFile)
             assertTrue(ui.generateImages)
         }
+    }
+
+    @Test fun savedReplyKeepsItsBubbleWhileSnapshotAndPageChangeArePending() {
+        val people = PersonRegistry(context.filesDir)
+        previousPerson = people.active()?.id
+        val preferences = context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE)
+        previousTextSize = preferences.getInt("text_size", 16)
+        previousGap = preferences.getInt("message_gap", 12)
+        val person = people.stage(PersonDocument.named(name), null); people.commit(person)
+        compose.activityRule.scenario.recreate()
+        val activity = compose.activity
+        val ui = MainActivity::class.java.getDeclaredField("compose").apply { isAccessible = true }.get(activity) as ComposeUi
+        val add = MainActivity::class.java.getDeclaredMethod("nativeAddMessage", ByteArray::class.java, ByteArray::class.java).apply { isAccessible = true }
+        val page = MainActivity::class.java.getDeclaredField("pageFirst").apply { isAccessible = true }
+        val busy = MainActivity::class.java.getDeclaredMethod("setBusy", Boolean::class.javaPrimitiveType).apply { isAccessible = true }
+        val refresh = MainActivity::class.java.getDeclaredMethod("refreshMessages", Boolean::class.javaPrimitiveType).apply { isAccessible = true }
+        val reader = MainActivity::class.java.getDeclaredField("reader").apply { isAccessible = true }.get(activity) as java.util.concurrent.ExecutorService
+        val release = java.util.concurrent.CountDownLatch(1)
+        val blocked = java.util.concurrent.CountDownLatch(1)
+        try {
+            compose.runOnUiThread {
+                add.invoke(null, "user".toByteArray(), "こんにちは".toByteArray())
+                ui.setMessages("""{"first":0,"total":1,"messages":[{"id":1,"role":"user","text":"こんにちは"}]}""")
+                busy.invoke(activity, true); ui.beginReply(); ui.streaming = "返答です"
+            }
+            compose.waitUntil(5_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("返答です")).fetchSemanticsNodes().isNotEmpty() }
+            val body = compose.onNodeWithText("返答です").fetchSemanticsNode().id
+            reader.execute { blocked.countDown(); check(release.await(10, java.util.concurrent.TimeUnit.SECONDS)) }
+            assertTrue(blocked.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            compose.runOnUiThread {
+                add.invoke(null, "assistant".toByteArray(), "返答です".toByteArray())
+                page.setInt(activity, 0); refresh.invoke(activity, true); page.setInt(activity, -1)
+            }
+            compose.onNodeWithText("返答です").assertIsDisplayed()
+            compose.runOnIdle { assertTrue(ui.sending); assertEquals("返答です", ui.streaming) }
+            release.countDown()
+            compose.waitUntil(10_000) { !ui.sending && ui.streaming.isEmpty() }
+            assertEquals(body, compose.onNodeWithText("返答です").fetchSemanticsNode().id)
+        } finally { release.countDown() }
     }
 
     @Test fun replyImmediatelyUpdatesIconDetailsBeforeMemoryExtractionAndSurvivesRecreation() {

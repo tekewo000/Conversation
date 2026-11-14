@@ -11,6 +11,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
@@ -100,6 +105,8 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     var mediaDirectory by mutableStateOf<File?>(null)
     var onAttach by mutableStateOf<Runnable?>(null)
     var streaming by mutableStateOf("")
+    private var replying by mutableStateOf(false)
+    private var replyKey = 0L
     var textSize by mutableIntStateOf(16)
     var messageGap by mutableIntStateOf(12)
     var failure by mutableStateOf("")
@@ -146,7 +153,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                   value: Int, @JvmField val change: IntConsumer) {
         var value by mutableIntStateOf(value)
     }
-    private data class Message(val id: Long, val role: String, val text: String)
+    private data class Message(val id: Long, val role: String, val text: String, val key: Long = id)
 
     init {
         activity.setContent {
@@ -163,17 +170,26 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     fun scrollToLatest() { pageDirection = 0; scrollTarget = 0; scrollRequest++ }
     private fun dismiss() { val old = panel; panel = null; old?.onDismiss?.run() }
 
-    fun setMessages(json: String) {
+    fun beginReply() { replyKey--; streaming = ""; replying = true; scrollToLatest() }
+    fun cancelReply() { replying = false; streaming = "" }
+
+    @JvmOverloads fun setMessages(json: String, replySaved: Boolean = false) {
         val page = JSONObject(json)
         val array = page.getJSONArray("messages")
+        val keys = messages.associate { it.id to it.key }
+        val latest = page.getInt("first") + array.length() >= page.getInt("total")
         val next = List(array.length()) { index ->
             val item = array.getJSONObject(index)
-            Message(item.getLong("id"), item.getString("role"), item.getString("text"))
+            val id = item.getLong("id")
+            val role = item.getString("role")
+            val key = if (replySaved && replying && latest && index == array.length() - 1 && role == "assistant") replyKey else keys[id] ?: id
+            Message(id, role, item.getString("text"), key)
         }
         first = page.getInt("first")
         total = page.getInt("total")
         feeling = page.optString("assistant_emotion", "")
         messages = next
+        if (replySaved) cancelReply()
         if (pageDirection != 0) {
             scrollTarget = if (pageDirection < 0) 0 else
                 (next.size - 1 + if (first + next.size < total) 1 else 0).coerceAtLeast(0)
@@ -203,7 +219,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         val list = rememberLazyListState()
         LaunchedEffect(scrollRequest) { if (scrollRequest > 0) list.scrollToItem(scrollTarget) }
         // A reply follows the bottom only while the reader is already there.
-        LaunchedEffect(messages.lastOrNull()?.id, streaming) {
+        LaunchedEffect(messages.lastOrNull()?.id, replying) {
             if (list.firstVisibleItemIndex <= 1) list.scrollToItem(0)
         }
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -219,6 +235,9 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 val bubbleWidth = minOf((maxWidth - 32.dp).coerceAtLeast(0.dp) * 0.86f, 600.dp)
                 val latest = first + messages.size >= total
                 val latestAssistant = messages.lastOrNull { it.role == "assistant" }?.id
+                val pending = latest && (replying || streaming.isNotEmpty())
+                val visible = if (pending) listOf(Message(-1, "assistant", streaming, if (replying) replyKey else Long.MIN_VALUE)) + messages.asReversed()
+                    else messages.asReversed()
                 LazyColumn(Modifier.fillMaxSize(), state = list, reverseLayout = true,
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(messageGap.dp)) {
@@ -230,11 +249,10 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                             Text("新しい会話へ")
                         }
                     }
-                    if (streaming.isNotEmpty() && first + messages.size >= total)
-                        item("streaming") { MessageText(streaming, false, bubbleWidth, feeling) }
-                    items(messages.asReversed(), key = { it.id }) { message ->
+                    items(visible, key = { it.key }) { message ->
                         MessageText(message.text, message.role == "user", bubbleWidth,
-                            if (latest && streaming.isEmpty() && message.id == latestAssistant) feeling else "")
+                            if (latest && (message.id == -1L || !pending && message.id == latestAssistant)) feeling else "",
+                            typing = message.id == -1L && message.text.isEmpty())
                     }
                     if (first > 0) item("older") {
                         TextButton(onClick = {
@@ -308,13 +326,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         }
     }
 
-    @Composable private fun MessageText(text: String, user: Boolean, bubbleWidth: Dp, emotion: String = "") {
-        val directory = mediaDirectory
-        val rendered by produceState(text, text, directory) {
-            value = if (directory != null && text.contains("![") && text.contains("(https://"))
-                withContext(Dispatchers.IO) { try { AttachmentMedia.response(directory, text) } catch (_: Exception) { text } }
-            else text
-        }
+    @Composable private fun MessageText(text: String, user: Boolean, bubbleWidth: Dp, emotion: String = "", typing: Boolean = false) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start,
             verticalAlignment = Alignment.Top) {
             if (!user) {
@@ -341,36 +353,59 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 .background(if (user) Color(0xFF2D4434) else Color(0xFF533643), RoundedCornerShape(16.dp))
                 .padding(horizontal = 12.dp, vertical = 10.dp)) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                val body = remember(rendered) { AttachmentFiles.withoutReferences(rendered) }
-                // ImGui sizes Noto's 1448-unit ascent/descent; Compose sizes its 1000-unit em.
-                val style = TextStyle(color = Color.White, fontSize = (textSize * (1000f / 1448f)).sp,
-                    fontFamily = chatFont,
-                    lineHeight = textSize.sp, letterSpacing = 0.sp)
-                if (body.isNotEmpty()) Markdown(
-                    markdownState = rememberMarkdownState(body, retainState = true),
-                    modifier = Modifier,
-                    colors = markdownColor(text = Color.White),
-                    annotator = markdownAnnotator(markdownAnnotatorConfig(eolAsNewLine = true)),
-                    typography = markdownTypography(
-                        h1 = style.copy(fontSize = style.fontSize * 1.6f, lineHeight = style.lineHeight * 1.6f, fontWeight = FontWeight.Bold),
-                        h2 = style.copy(fontSize = style.fontSize * 1.4f, lineHeight = style.lineHeight * 1.4f, fontWeight = FontWeight.Bold),
-                        h3 = style.copy(fontSize = style.fontSize * 1.2f, lineHeight = style.lineHeight * 1.2f, fontWeight = FontWeight.Bold),
-                        h4 = style.copy(fontWeight = FontWeight.Bold),
-                        h5 = style.copy(fontWeight = FontWeight.Bold),
-                        h6 = style.copy(fontWeight = FontWeight.Bold),
-                        text = style, paragraph = style, quote = style,
-                        ordered = style, bullet = style, list = style, table = style,
-                        textLink = TextLinkStyles(style.copy(color = MaterialTheme.colorScheme.primary,
-                            textDecoration = TextDecoration.Underline).toSpanStyle()),
-                        code = style.copy(fontFamily = FontFamily.Monospace),
-                        inlineCode = style.copy(fontFamily = FontFamily.Monospace)),
-                    loading = { Text(body, style = style) },
-                    error = { Text(body, style = style) })
-                remember(rendered) { AttachmentFiles.references(rendered) }.forEach { ref ->
-                    AttachmentPreview(mediaDirectory, ref)
-                }
+                if (typing) TypingIndicator()
+                MessageBody(text)
                 }
             }
+        }
+    }
+
+    @Composable private fun TypingIndicator() {
+        val transition = rememberInfiniteTransition(label = "typing")
+        val pulse = List(3) { index ->
+            transition.animateFloat(0.3f, 1f, infiniteRepeatable(tween(450, delayMillis = index * 150), RepeatMode.Reverse), label = "dot-$index")
+        }
+        Canvas(Modifier.size(36.dp, 20.dp).semantics { contentDescription = "返答を入力中" }) {
+            pulse.forEachIndexed { index, alpha ->
+                drawCircle(Color.White.copy(alpha = alpha.value), 2.5.dp.toPx(), Offset((6 + index * 12).dp.toPx(), size.height / 2))
+            }
+        }
+    }
+
+    @Composable private fun MessageBody(text: String) {
+        val directory = mediaDirectory
+        val rendered by produceState(text, text, directory) {
+            value = if (directory != null && text.contains("![") && text.contains("(https://"))
+                withContext(Dispatchers.IO) { try { AttachmentMedia.response(directory, text) } catch (_: Exception) { text } }
+            else text
+        }
+        val body = remember(rendered) { AttachmentFiles.withoutReferences(rendered) }
+        // ImGui sizes Noto's 1448-unit ascent/descent; Compose sizes its 1000-unit em.
+        val style = TextStyle(color = Color.White, fontSize = (textSize * (1000f / 1448f)).sp,
+            fontFamily = chatFont,
+            lineHeight = textSize.sp, letterSpacing = 0.sp)
+        if (body.isNotEmpty()) Markdown(
+            markdownState = rememberMarkdownState(body, retainState = true),
+            modifier = Modifier,
+            colors = markdownColor(text = Color.White),
+            annotator = markdownAnnotator(markdownAnnotatorConfig(eolAsNewLine = true)),
+            typography = markdownTypography(
+                h1 = style.copy(fontSize = style.fontSize * 1.6f, lineHeight = style.lineHeight * 1.6f, fontWeight = FontWeight.Bold),
+                h2 = style.copy(fontSize = style.fontSize * 1.4f, lineHeight = style.lineHeight * 1.4f, fontWeight = FontWeight.Bold),
+                h3 = style.copy(fontSize = style.fontSize * 1.2f, lineHeight = style.lineHeight * 1.2f, fontWeight = FontWeight.Bold),
+                h4 = style.copy(fontWeight = FontWeight.Bold),
+                h5 = style.copy(fontWeight = FontWeight.Bold),
+                h6 = style.copy(fontWeight = FontWeight.Bold),
+                text = style, paragraph = style, quote = style,
+                ordered = style, bullet = style, list = style, table = style,
+                textLink = TextLinkStyles(style.copy(color = MaterialTheme.colorScheme.primary,
+                    textDecoration = TextDecoration.Underline).toSpanStyle()),
+                code = style.copy(fontFamily = FontFamily.Monospace),
+                inlineCode = style.copy(fontFamily = FontFamily.Monospace)),
+            loading = { Text(body, style = style) },
+            error = { Text(body, style = style) })
+        remember(rendered) { AttachmentFiles.references(rendered) }.forEach { ref ->
+            AttachmentPreview(mediaDirectory, ref)
         }
     }
 

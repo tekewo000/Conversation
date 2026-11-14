@@ -200,6 +200,10 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void refreshMessages() {
+        refreshMessages(false);
+    }
+
+    private void refreshMessages(boolean replySaved) {
         if (!ready || closed || changingPerson) return;
         final int requested = pageFirst;
         reader.execute(() -> {
@@ -222,12 +226,20 @@ public final class MainActivity extends ComponentActivity {
                 final String visibleSnapshot = page.toString();
                 final boolean latest = page.getInt("first") + rows.length() >= page.getInt("total");
                 ui(() -> {
-                    if (pageFirst != requested || changingPerson) return;
+                    if (changingPerson) return;
+                    if (pageFirst != requested) {
+                        if (replySaved) refreshMessages(true);
+                        return;
+                    }
                     if (latest) pageFirst = -1;
-                    compose.setMessages(visibleSnapshot);
+                    compose.setMessages(visibleSnapshot, replySaved);
+                    if (replySaved) setBusy(false);
                     if (scrollOnRefresh) { compose.scrollToLatest(); scrollOnRefresh = false; }
                 });
-            } catch (Exception error) { ui(() -> showError(safeError(error))); }
+            } catch (Exception error) { ui(() -> {
+                if (replySaved) { compose.cancelReply(); setBusy(false); }
+                showError(safeError(error));
+            }); }
         });
     }
 
@@ -320,6 +332,7 @@ public final class MainActivity extends ComponentActivity {
         final PersonRegistry.Person person = activePerson;
         final int imageAttempt = images ? imageApi.generation() : 0;
         setBusy(true);
+        compose.beginReply();
         session.begin();
         connectionStatus = images ? "画像を生成しています（有料API）" : "応答を生成しています";
         AtomicBoolean saved = new AtomicBoolean(!persistUser);
@@ -356,12 +369,12 @@ public final class MainActivity extends ComponentActivity {
                         if (now - lastRender > 45) { lastRender = now; ui(() -> compose.setStreaming(full)); }
                     }
                     public void replySaved() {
-                        replied.set(true); setStreaming("");
-                        ui(() -> { refreshMessages(); connectionStatus = "ChatGPTに接続しています"; });
+                        replied.set(true);
+                        ui(() -> { refreshMessages(true); connectionStatus = "ChatGPTに接続しています"; });
                     }
                 });
             } catch (Exception error) {
-                setStreaming("");
+                ui(() -> compose.cancelReply());
                 if (session.isCancelled()) {
                     ui(() -> { connectionStatus = "応答を停止しました"; refreshMessages(); });
                     return;
@@ -380,7 +393,8 @@ public final class MainActivity extends ComponentActivity {
 
                 });
             } finally { ui(() -> {
-                setBusy(false); scheduleGitSync();
+                if (!replied.get()) setBusy(false);
+                scheduleGitSync();
                 if (replied.get()) queueMemories(request[0]);
             }); }
         });
@@ -411,7 +425,7 @@ public final class MainActivity extends ComponentActivity {
         menu.rows.add(new ComposeUi.Row("画像生成API", this::showImageApiSettings, 5));
         if (activePerson != null) menu.rows.add(new ComposeUi.Row("Gitバックアップ", this::showGitBackup, 1));
         if (busy) menu.rows.add(new ComposeUi.Row("応答を停止", () -> {
-            session.cancel(); connection.cancelReply(); imageApi.cancel(); setStreaming(""); refreshMessages();
+            session.cancel(); connection.cancelReply(); imageApi.cancel(); compose.cancelReply(); refreshMessages();
         }, 6));
         compose.show(menu);
     }

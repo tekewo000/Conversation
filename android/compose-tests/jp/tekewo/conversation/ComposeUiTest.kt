@@ -19,6 +19,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.pressKey
@@ -47,6 +48,58 @@ class ComposeUiTest {
 
     private fun install() {
         ui = ComposeUi(compose.activity, { menus++ }, { sends++ }, { pages.add(it) })
+    }
+
+    @Test fun typingShowsThePersonBeforeTextAndKeepsTheBubbleThroughSaveAndEmotionUpdate() {
+        fun page(emotion: String, reply: Boolean) = """{"first":0,"total":${if (reply) 2 else 1},"assistant_emotion":"$emotion","messages":[{"id":1,"role":"user","text":"こんにちは"}${if (reply) ",{\"id\":2,\"role\":\"assistant\",\"text\":\"返答です\"}" else ""}]}"""
+        compose.runOnUiThread {
+            install()
+            ui.personName = "小春"
+            ui.setMessages(page("穏やか", false))
+            ui.beginReply()
+        }
+        val icon = compose.onNodeWithContentDescription("小春の短期記憶を見る").fetchSemanticsNode().id
+        compose.onNodeWithContentDescription("返答を入力中").assertIsDisplayed()
+        compose.runOnUiThread { ui.streaming = "返答です" }
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("返答です")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithContentDescription("返答を入力中").assertDoesNotExist()
+        val body = compose.onNodeWithText("返答です").fetchSemanticsNode().id
+        compose.runOnUiThread { ui.setMessages(page("嬉しい", true), true) }
+        compose.onNodeWithText("返答です").assertIsDisplayed()
+        compose.runOnIdle { assertEquals("", ui.streaming) }
+        assertEquals(icon, compose.onNodeWithContentDescription("小春の短期記憶を見る").fetchSemanticsNode().id)
+        assertEquals(body, compose.onNodeWithText("返答です").fetchSemanticsNode().id)
+        compose.runOnUiThread { ui.setMessages(page("ほっとした", true)) }
+        compose.onNodeWithText("ほっとした").assertIsDisplayed()
+        assertEquals(body, compose.onNodeWithText("返答です").fetchSemanticsNode().id)
+    }
+
+    @Test fun cancellingAnEmptyReplyRemovesTypingAndLeavesTheConversation() {
+        compose.runOnUiThread {
+            install()
+            ui.setMessages("""{"first":0,"total":1,"messages":[{"id":1,"role":"user","text":"こんにちは"}]}""")
+            ui.beginReply()
+        }
+        compose.onNodeWithContentDescription("返答を入力中").assertIsDisplayed()
+        compose.runOnUiThread { ui.cancelReply() }
+        compose.onNodeWithContentDescription("返答を入力中").assertDoesNotExist()
+        compose.onNodeWithText("こんにちは").assertIsDisplayed()
+    }
+
+    @Test fun streamingDoesNotPullTheReaderBackToTheBottom() {
+        val messages = (1..20).joinToString(",") { """{"id":$it,"role":"user","text":"過去の会話 $it"}""" }
+        compose.runOnUiThread {
+            install()
+            ui.setMessages("""{"first":0,"total":20,"messages":[$messages]}""")
+            ui.beginReply()
+            ui.streaming = "受信中"
+        }
+        val list = compose.onNode(hasScrollToIndexAction())
+        list.performScrollToIndex(1)
+        val before = list.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
+        assertTrue(before >= 1f)
+        compose.runOnUiThread { ui.streaming = "受信中の続き" }
+        assertEquals(before, list.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value(), 0.01f)
     }
 
     @Test fun menuIsAtTopRightAndAttachmentButtonIsAtBottomLeft() {
