@@ -4,6 +4,43 @@ import "core:strings"
 import "core:testing"
 import "core:fmt"
 import "core:time"
+import "core:encoding/json"
+
+@(test)
+short_term_context_keeps_thirty_exchanges_plus_current_input_with_escaped_long_text :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-thirty-exchanges-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ body,e2:=strings.repeat("\x01",3000)
+ assert(e2==nil)
+ defer delete(body)
+ assert(execute("BEGIN IMMEDIATE"))
+ for _ in 0..<35 {
+  assert(insert_message("user",body)>0)
+  assert(insert_message("assistant",body)>0)
+ }
+ assert(enqueue_uncovered())
+ assert(execute("COMMIT"))
+ assert(conversation_add_message("user","今回の入力は全文")>0)
+ conversation_close()
+ assert(conversation_init(c))
+ output:=string(conversation_context("unmatched"))
+ root,ok:=parse_json(transmute([]byte)output,8)
+ assert(ok)
+ defer json.destroy_value(root)
+ rows:=root.(json.Object)["messages"].(json.Array)
+ testing.expect_value(t,len(rows),61)
+ testing.expect_value(t,i64(rows[0].(json.Object)["id"].(json.Integer)),11)
+ testing.expect_value(t,i64(rows[len(rows)-1].(json.Object)["id"].(json.Integer)),71)
+ testing.expect(t,bool(rows[0].(json.Object)["truncated"].(json.Boolean)))
+ testing.expect_value(t,string(rows[len(rows)-1].(json.Object)["content"].(json.String)),"今回の入力は全文")
+ testing.expect(t,len(output)<800000,"Escaped long history must remain bounded while retaining every selected turn.")
+}
 
 @(test)
 sqlite_durable_jobs_validation_and_paging :: proc(t: ^testing.T) {
@@ -145,7 +182,7 @@ escaped_source_snippets_keep_job_and_context_byte_budgets :: proc(t: ^testing.T)
   assert(strings.contains(output,`"truncated":true`))
   assert(conversation_apply_job(job,`{"memories":[]}`))
  }
- testing.expect(t,len(string(conversation_context("a")))<=65536)
+ testing.expect(t,len(string(conversation_context("a")))<=800000)
 }
 
 @(test)

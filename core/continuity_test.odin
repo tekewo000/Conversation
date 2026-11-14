@@ -8,6 +8,135 @@ import "core:testing"
 
 CONTINUITY_FIXTURE :: `{"memories":[],"continuity":{"threads":[{"key":"trip","status":"active","text":"旅行候補は順に京都、金沢、松本。未決定。","source_ids":[1,2]}],"episodes":[{"key":"rain","text":"ユーザーが大会で友人と待機したと話した。","emotion":"ユーザーは緊張したと述べた。","scene":"雨の日の大会。日時と場所の詳細は不明。","scope":"real","source_ids":[1]}]}}`
 
+ASSISTANT_STATE_FIXTURE :: `{"memories":[],"continuity":{"threads":[],"episodes":[],"assistant_state":{"emotion":"ほっとして嬉しい","reason":"ユーザーから試合が無事に終わったと聞いたため","event":"試合終了の報告を受けて一緒に喜んだ会話","scope":"shared","source_ids":[1,2]}}}`
+
+@(test)
+assistant_state_preserves_feeling_cause_and_originals_across_restart_and_archive :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-feeling-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ assert(conversation_add_message("user","試合は無事に終わったよ。")>0)
+ assert(conversation_add_message("assistant","ほっとした。一緒に喜べて嬉しい。")>0)
+ assert(conversation_apply_job(1,ASSISTANT_STATE_FIXTURE),string(conversation_error()))
+ testing.expect_value(t,string(conversation_assistant_emotion()),"ほっとして嬉しい")
+ for _ in 0..<35 {
+  assert(conversation_add_message("user","別の話")>0)
+  assert(conversation_add_message("assistant","雑談を続ける")>0)
+  assert(conversation_apply_job(scalar("SELECT max(id) FROM jobs"),`{"memories":[],"continuity":{"threads":[],"episodes":[]}}`))
+ }
+ conversation_close()
+ assert(conversation_init(c))
+ output:=string(conversation_context("無関係"))
+ testing.expect(t,strings.contains(output,"ほっとして嬉しい"))
+ testing.expect(t,strings.contains(output,"ユーザーから試合が無事に終わったと聞いたため"))
+ testing.expect(t,strings.contains(output,"試合は無事に終わったよ。"),"Current feelings must retain their old original evidence even without a topic or episode.")
+ delta:=strings.clone_to_cstring(string(conversation_archive_delta(0)))
+ defer delete(delta)
+ assert(conversation_export(c))
+ conversation_close()
+ destination,e2:=os.make_directory_temp("","conversation-feeling-replay-*",context.allocator)
+ assert(e2==nil)
+ defer delete(destination)
+ defer os.remove_all(destination)
+ target:=strings.clone_to_cstring(destination)
+ defer delete(target)
+ assert(conversation_init(target))
+ poisoned,replaced:=strings.replace_all(string(delta),`\"source_ids\":[1,2]`,`\"source_ids\":[999,2]`)
+ assert(replaced)
+ defer delete(poisoned)
+ poisoned_c:=strings.clone_to_cstring(poisoned)
+ defer delete(poisoned_c)
+ testing.expect(t,!conversation_apply_archive(poisoned_c))
+ testing.expect_value(t,conversation_message_count(),0)
+ assert(conversation_apply_archive(delta),string(conversation_error()))
+ testing.expect(t,strings.contains(string(conversation_context("無関係")),"ほっとして嬉しい"))
+ assert(conversation_add_message("user","気持ちが落ち着いたね")>0)
+ assert(conversation_add_message("assistant","うん、落ち着いたよ")>0)
+ assert(conversation_apply_job(scalar("SELECT max(id) FROM jobs"),`{"memories":[],"continuity":{"threads":[],"episodes":[],"assistant_state":null}}`))
+ testing.expect(t,!strings.contains(string(conversation_context("無関係")),"ほっとして嬉しい"))
+ testing.expect_value(t,string(conversation_assistant_emotion()),"")
+}
+
+@(test)
+assistant_state_rejects_invalid_sources_and_fields_without_committing :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-feeling-invalid-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ assert(conversation_add_message("user","試合終了")>0)
+ assert(conversation_add_message("assistant","嬉しい")>0)
+ for invalid in ([5]string{`"source_ids":[]`,`"source_ids":[999]`,`"source_ids":[1,1]`,`"source_ids":[0]`,`"source_ids":[1.5]`}) {
+  bad,replaced:=strings.replace_all(string(ASSISTANT_STATE_FIXTURE),`"source_ids":[1,2]`,invalid)
+  assert(replaced)
+  payload:=strings.clone_to_cstring(bad)
+  testing.expect(t,!conversation_apply_job(1,payload))
+  delete(payload)
+  delete(bad)
+ }
+ for invalid in ([3]string{`"emotion":""`,`"emotion":123`,`"emotion":"嬉しい","extra":true`}) {
+  bad,replaced:=strings.replace_all(string(ASSISTANT_STATE_FIXTURE),`"emotion":"ほっとして嬉しい"`,invalid)
+  assert(replaced)
+  payload:=strings.clone_to_cstring(bad)
+  testing.expect(t,!conversation_apply_job(1,payload))
+  delete(payload)
+  delete(bad)
+ }
+ testing.expect_value(t,scalar("SELECT count(*) FROM continuity_revisions"),0)
+ testing.expect(t,strings.contains(string(conversation_pending_job()),`"id":1`))
+ assert(conversation_apply_job(1,ASSISTANT_STATE_FIXTURE),string(conversation_error()))
+}
+
+@(test)
+assistant_state_carry_forward_obeys_combined_byte_budget :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-feeling-budget-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ assert(conversation_add_message("user","話をする")>0)
+ assert(conversation_add_message("assistant","嬉しい")>0)
+ feeling,e2:=strings.repeat("a",768)
+ assert(e2==nil)
+ defer delete(feeling)
+ initial:=fmt.aprintf(`{{"memories":[],"continuity":{{"threads":[],"episodes":[],"assistant_state":{{"emotion":"%s","reason":"%s","event":"%s","scope":"shared","source_ids":[1,2]}}}}}}`,feeling,feeling,feeling)
+ defer delete(initial)
+ initial_c:=strings.clone_to_cstring(initial)
+ defer delete(initial_c)
+ assert(conversation_apply_job(1,initial_c),string(conversation_error()))
+ assert(conversation_add_message("user","次の話")>0)
+ assert(conversation_add_message("assistant","続ける")>0)
+ topic,e3:=strings.repeat("b",1536)
+ assert(e3==nil)
+ defer delete(topic)
+ threads:[6]struct {key,status,text:string,source_ids:[]i64}
+ for key,i in ([6]string{"a","b","c","d","e","f"}) { threads[i]={key,"active",topic,[]i64{3}} }
+ bytes,e4:=json.marshal(struct {
+  memories:[0]i64,
+  continuity:struct {threads: type_of(threads),episodes:[]struct {key,text,emotion,scene,scope:string,source_ids:[]i64}},
+ }{{},{threads,{{"event",topic,"","","shared",[]i64{3}}}}})
+ assert(e4==nil)
+ defer delete(bytes)
+ testing.expect(t,len(bytes)<CONTINUITY_MAX_BYTES,"The new state fits alone but must fail after retaining the current feeling.")
+ next:=strings.clone_to_cstring(string(bytes))
+ defer delete(next)
+ testing.expect(t,!conversation_apply_job(2,next))
+ testing.expect(t,strings.contains(string(conversation_error()),"12 KiB"))
+ testing.expect_value(t,scalar("SELECT count(*) FROM continuity_revisions"),1)
+ testing.expect(t,strings.contains(string(conversation_pending_job()),`"id":2`))
+}
+
 @(test)
 continuity_keeps_context_and_originals_after_unrelated_turns :: proc(t: ^testing.T) {
  dir,e:=os.make_directory_temp("","conversation-continuity-*",context.allocator)
@@ -21,7 +150,7 @@ continuity_keeps_context_and_originals_after_unrelated_turns :: proc(t: ^testing
  assert(conversation_add_message("user","雨の大会で友人と待った。緊張した。旅行候補は京都、金沢、松本。")>0)
  assert(conversation_add_message("assistant","旅行はこの順で三つの候補があるね。まだ決めていないね。")>0)
  assert(conversation_apply_job(1,CONTINUITY_FIXTURE),string(conversation_error()))
- for _ in 0..<10 {
+ for _ in 0..<35 {
   assert(conversation_add_message("user","別の話題で雑談する。")>0)
   assert(conversation_add_message("assistant","別の話を続ける。")>0)
   assert(conversation_apply_job(scalar("SELECT max(id) FROM jobs"),`{"memories":[]}`))
@@ -174,7 +303,7 @@ continuity_active_original_precedes_newer_episode_context :: proc(t: ^testing.T)
  defer delete(text)
  padding_c:=strings.clone_to_cstring(padding)
  defer delete(padding_c)
- for i in 0..<20 {
+ for i in 0..<40 {
   assert(conversation_add_message("user",text if i==0 else padding_c)>0)
   assert(conversation_add_message("assistant",padding_c)>0)
   if i==0 do assert(conversation_apply_job(1,`{"memories":[],"continuity":{"threads":[{"key":"trip","status":"active","text":"候補の条件を相談中","source_ids":[1]}],"episodes":[]}}`))

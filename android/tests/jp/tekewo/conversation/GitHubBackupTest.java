@@ -119,6 +119,16 @@ public final class GitHubBackupTest {
     }
 
     public static void main(String[] args) throws Exception {
+        Fake iconBackup = new Fake();
+        GitHubBackup.SyncResult withoutIcon = sync(iconBackup, delta(0, 1), GitHubBackup.SyncState.empty());
+        JSONObject iconOnly = delta(1, 1).put("icon_png_base64", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=");
+        GitHubBackup.SyncResult withIcon = sync(iconBackup, iconOnly, withoutIcon);
+        assert withIcon.status.equals("synced") && withIcon.cursor == 1;
+        assert new JSONObject(new String(iconBackup.files.get("persona.json"), StandardCharsets.UTF_8)).has("icon_png_base64");
+        assert sync(iconBackup, iconOnly, withIcon).status.equals("unchanged");
+        GitHubBackup.SyncResult iconRemoved = sync(iconBackup, delta(1, 1), withIcon);
+        assert iconRemoved.status.equals("synced") && iconRemoved.cursor == 1;
+        assert !new JSONObject(new String(iconBackup.files.get("persona.json"), StandardCharsets.UTF_8)).has("icon_png_base64");
         assert GitHubBackup.normalizeRepository("https://github.com/Owner/Person.git/").equals(REPO);
         assert GitHubBackup.normalizeRepository("GITHUB.COM/Owner/Person.GIT/").equals(REPO);
         for (String bad : Arrays.asList("http://github.com/owner/person", "https://user:pass@github.com/owner/person", "https://evil.com/owner/person",

@@ -46,6 +46,7 @@ public final class ChatSessionTest {
         public void memoryStatus(String error) { warning = error; }
     }
     public static void main(String[] arguments) throws Exception {
+        assistantFeelingAndOldEvidenceReachReplyAndExtraction();
         replyDoesNotWaitForMemory();
         internalLabelsNeverReachReplyText();
         Store continuing = new Store() {
@@ -219,6 +220,39 @@ public final class ChatSessionTest {
         }, listener);
         assert listener.replies == 1 && store.texts.get(1).equals("続けて話せるよ");
         assert store.pending && store.applied == 0;
+    }
+
+    private static void assistantFeelingAndOldEvidenceReachReplyAndExtraction() throws Exception {
+        Store store = new Store() {
+            @Override public JSONObject pending() throws Exception {
+                if (!pending) return new JSONObject();
+                JSONArray pair = new JSONArray();
+                for (int i = roles.size() - 2; i < roles.size(); i++) pair.put(new JSONObject()
+                        .put("id", i + 1).put("role", roles.get(i)).put("content", texts.get(i)));
+                return new JSONObject().put("id", 1).put("messages", pair);
+            }
+        };
+        store.continuity = new JSONObject("{\"through_id\":2,\"threads\":[],\"episodes\":[],\"assistant_state\":{\"emotion\":\"ほっとして嬉しい\",\"reason\":\"試合終了を聞いた\",\"event\":\"一緒に喜んだ会話\",\"scope\":\"shared\",\"source_ids\":[1,2]}}");
+        store.add("user", "試合が終わったよ"); store.add("assistant", "ほっとした。嬉しいね");
+        for (int i = 0; i < 10; i++) { store.add("user", "別の話"); store.add("assistant", "雑談"); }
+        ChatSession session = new ChatSession(store);
+        session.reply("まだ嬉しい？", true, (instructions, input, delta) -> {
+            JSONObject reference = new JSONObject(input.getJSONObject(0).getString("content").split("\\n", 2)[1]);
+            assert reference.getJSONObject("continuity").getJSONObject("assistant_state").getString("emotion").equals("ほっとして嬉しい");
+            assert instructions.contains("assistant_state") && instructions.contains("恒久的");
+            return "うん、一緒に喜べたことが嬉しいよ";
+        }, new Listener());
+        final boolean[] extracted = {false};
+        session.processMemories((instructions, input, delta) -> {
+            JSONObject data = new JSONObject(input.getJSONObject(0).getString("content"));
+            assert data.getJSONObject("continuity").getJSONObject("assistant_state").getString("reason").equals("試合終了を聞いた");
+            JSONArray evidence = data.getJSONArray("evidence");
+            assert evidence.getJSONObject(0).getLong("id") == 1 : "Old feeling sources must reach extraction even without threads or episodes";
+            assert evidence.getJSONObject(1).getLong("id") == 2;
+            extracted[0] = true;
+            return "{\"memories\":[]}";
+        });
+        assert extracted[0];
     }
 
     private static void internalLabelsNeverReachReplyText() throws Exception {

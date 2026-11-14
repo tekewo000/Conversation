@@ -11,6 +11,21 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 final class BackupArchive {
+    static void addIcon(File directory, byte[] png) throws Exception {
+        if (png.length == 0) return;
+        PersonRegistry.validateIcon(png);
+        File root = directory.getCanonicalFile();
+        File metadata = new File(root, "metadata.json");
+        validate(root, metadata);
+        if (metadata.length() == 0 || metadata.length() > 1024 * 1024) throw new IOException("Invalid backup metadata");
+        JSONObject manifest = new JSONObject(new String(Files.readAllBytes(metadata.toPath()), StandardCharsets.UTF_8));
+        File snapshot = new File(root, manifest.getString("snapshot"));
+        validate(root, snapshot);
+        if (!snapshot.isDirectory()) throw new IOException("Backup snapshot missing");
+        File icon = new File(snapshot, "icon.png");
+        validate(root, icon);
+        Files.write(icon.toPath(), png);
+    }
     static void write(File directory, OutputStream destination) throws Exception {
         File root = directory.getCanonicalFile();
         File metadata = new File(root, "metadata.json");

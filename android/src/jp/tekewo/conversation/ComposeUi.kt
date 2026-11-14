@@ -1,5 +1,6 @@
 package jp.tekewo.conversation
 
+import android.graphics.Bitmap
 import android.view.Gravity
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
@@ -9,6 +10,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
@@ -30,6 +32,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.geometry.Offset
@@ -57,6 +61,8 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
@@ -81,6 +87,10 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     var textSize by mutableIntStateOf(16)
     var messageGap by mutableIntStateOf(12)
     var failure by mutableStateOf("")
+    var personName by mutableStateOf("")
+    var personIcon by mutableStateOf<Bitmap?>(null)
+    var onIcon by mutableStateOf<Runnable?>(null)
+    private var feeling by mutableStateOf("")
     private var messages by mutableStateOf(emptyList<Message>())
     private var first by mutableIntStateOf(0)
     private var total by mutableIntStateOf(0)
@@ -144,6 +154,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         }
         first = page.getInt("first")
         total = page.getInt("total")
+        feeling = page.optString("assistant_emotion", "")
         messages = next
         if (pageDirection != 0) {
             scrollTarget = if (pageDirection < 0) 0 else
@@ -182,6 +193,8 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 if (failure.isNotEmpty()) Text(failure, Modifier.padding(20.dp), color = MaterialTheme.colorScheme.error)
                 BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                 val bubbleWidth = minOf((maxWidth - 32.dp).coerceAtLeast(0.dp) * 0.86f, 600.dp)
+                val latest = first + messages.size >= total
+                val latestAssistant = messages.lastOrNull { it.role == "assistant" }?.id
                 LazyColumn(Modifier.fillMaxSize(), state = list, reverseLayout = true,
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(messageGap.dp)) {
@@ -194,9 +207,10 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                         }
                     }
                     if (streaming.isNotEmpty() && first + messages.size >= total)
-                        item("streaming") { MessageText(streaming, false, bubbleWidth) }
+                        item("streaming") { MessageText(streaming, false, bubbleWidth, feeling) }
                     items(messages.asReversed(), key = { it.id }) { message ->
-                        MessageText(message.text, message.role == "user", bubbleWidth)
+                        MessageText(message.text, message.role == "user", bubbleWidth,
+                            if (latest && streaming.isEmpty() && message.id == latestAssistant) feeling else "")
                     }
                     if (first > 0) item("older") {
                         TextButton(onClick = {
@@ -258,10 +272,30 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         }
     }
 
-    @Composable private fun MessageText(text: String, user: Boolean, bubbleWidth: Dp) {
-        Box(Modifier.fillMaxWidth()) {
-            SelectionContainer(Modifier.align(if (user) Alignment.CenterEnd else Alignment.CenterStart)
-                .widthIn(max = bubbleWidth)
+    @Composable private fun MessageText(text: String, user: Boolean, bubbleWidth: Dp, emotion: String = "") {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start,
+            verticalAlignment = Alignment.Top) {
+            if (!user) {
+                Column(Modifier.width(56.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(Modifier.size(48.dp).clip(CircleShape)
+                        .clickable(enabled = onIcon != null, role = Role.Button) { onIcon?.run() }
+                        .semantics { contentDescription = "${personName.ifEmpty { "人物" }}のアイコンを設定" }
+                        .padding(4.dp).background(MaterialTheme.colorScheme.surfaceVariant, CircleShape),
+                        contentAlignment = Alignment.Center) {
+                        val bitmap = personIcon
+                        if (bitmap != null) Image(remember(bitmap) { bitmap.asImageBitmap() }, contentDescription = null,
+                            modifier = Modifier.fillMaxSize().clip(CircleShape))
+                        else Text(if (personName.isEmpty()) "?" else personName.substring(0, personName.offsetByCodePoints(0, 1)),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 18.sp)
+                    }
+                    if (emotion.isNotEmpty()) Text(emotion, fontSize = 11.sp, lineHeight = 15.sp,
+                        color = MaterialTheme.colorScheme.primary, textAlign = TextAlign.Center,
+                        maxLines = 3, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth().padding(top = 2.dp))
+                }
+                Spacer(Modifier.width(8.dp))
+            }
+            SelectionContainer(Modifier.widthIn(max = if (user) bubbleWidth else (bubbleWidth - 64.dp).coerceAtLeast(48.dp))
                 .background(if (user) Color(0xFF2D4434) else Color(0xFF533643), RoundedCornerShape(16.dp))
                 .padding(horizontal = 12.dp, vertical = 10.dp)) {
                 // ImGui sizes Noto's 1448-unit ascent/descent; Compose sizes its 1000-unit em.

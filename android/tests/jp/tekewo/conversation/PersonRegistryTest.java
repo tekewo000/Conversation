@@ -54,7 +54,33 @@ public final class PersonRegistryTest {
             checkLegacyCleanup();
             checkCleanupFailure();
             checkCleanupSymlink();
+            checkPersonIcons();
             System.out.println("PASS: person registry no selection, exact legacy cleanup, isolation, canonical repo and remote ID uniqueness");
+        } finally { remove(root); }
+    }
+    private static void checkPersonIcons() throws Exception {
+        File root = Files.createTempDirectory("conversation-icons-").toFile();
+        try {
+            PersonRegistry people = new PersonRegistry(root);
+            PersonRegistry.Person first = people.stage(PersonDocument.named("小春"), null); people.commit(first);
+            PersonRegistry.Person second = people.stage(PersonDocument.named("夏"), null); people.commit(second);
+            byte[] png = java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=");
+            assert people.icon(first.id).length == 0;
+            people.setIcon(first.id, png);
+            assert java.util.Arrays.equals(new PersonRegistry(root).icon(first.id), png);
+            assert people.icon(second.id).length == 0;
+            expectFailure(() -> people.setIcon(first.id, new byte[] {1, 2, 3}));
+            expectFailure(() -> people.setIcon(first.id, new byte[1024 * 1024 + 1]));
+            expectFailure(() -> people.setIcon("../outside", png));
+            File blocked = new File(first.directory, "icon.png.tmp"); assert blocked.mkdir();
+            Files.write(new File(blocked, "keep").toPath(), new byte[] {1});
+            expectFailure(() -> people.setIcon(first.id, png));
+            assert java.util.Arrays.equals(people.icon(first.id), png);
+            remove(blocked);
+            people.setIcon(first.id, null);
+            assert new PersonRegistry(root).icon(first.id).length == 0;
+            people.setIcon(second.id, png); people.delete(second.id);
+            assert !second.directory.exists();
         } finally { remove(root); }
     }
     private static void checkLocalPeopleAndDeletion() throws Exception {

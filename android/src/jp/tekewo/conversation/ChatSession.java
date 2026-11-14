@@ -55,6 +55,9 @@ final class ChatSession {
           + "何でも同意したりしないでください。不要な見出しや毎回の質問を避け、会話を続けてください。"
           + "continuityは以前の会話の現在地と体験です。候補の順番、決定・保留、出来事・当時の感情・場面を"
           + "必要に応じて参照し、根拠の会話も確認してください。through_idより新しい発言の訂正や決定を優先します。"
+          + "continuity.assistant_stateは応答する人物自身の今の気持ち・理由・きっかけの出来事です。"
+          + "その感情の流れを自然に返答へ反映し、新しい発言や状況に応じて変化させてください。"
+          + "ユーザーの気持ちと混同せず、過去の感情で現在を固定せず、恒久的な性格や現実の体験の証明にはしません。"
           + "過去の感情を今の気持ちと決めつけず、本人の発言・伝聞・推測、現実・創作・会話上の共有体験を区別します。"
           + "historyでtruncated:trueの発言には省略があり、見えていない内容を補わないでください。"
           + "『それ』『二つ目』『あの日』は現在地と原文から理解し、複数の候補が残って特定できなければ確認してください。";
@@ -87,7 +90,9 @@ final class ChatSession {
           + "\"text\":\"話題、候補と順番、決定・保留事項\",\"source_ids\":[根拠発言ID]}],"
           + "\"episodes\":[{\"key\":\"体験の安定したキー\",\"text\":\"誰が何を体験したと語ったか\","
           + "\"emotion\":\"誰がどう感じたと明言したか。不明なら空文字\",\"scene\":\"分かる時期・場所・同席者・状況。不明なら空文字\","
-          + "\"scope\":\"real|fiction|shared\",\"source_ids\":[根拠発言ID]}]}}。"
+          + "\"scope\":\"real|fiction|shared\",\"source_ids\":[根拠発言ID]}],"
+          + "\"assistant_state\":{\"emotion\":\"応答する人物自身の今の気持ち\",\"reason\":\"なぜ今そう感じているか\","
+          + "\"event\":\"気持ちのきっかけとなった会話や出来事\",\"scope\":\"real|fiction|shared\",\"source_ids\":[根拠発言ID]}}}。"
           + "新しく覚える内容がなければmemoriesを空配列にしてください。最大8件。"
           + "memoriesのsource_idsは今回のjob.messagesに含まれる根拠発言だけを使い、IDを発明しないこと。"
           + "personは応答する人物のプロフィールです。existingのimported_sourcesにあるreported_handoverは"
@@ -108,6 +113,14 @@ final class ChatSession {
           + "threadsは最大6件、episodesは最大6件。各項目のkeyはUTF-8で128バイト、textは1536バイト以下、"
           + "emotionとsceneは各768バイト以下、source_idsは重複なし1〜8件。continuity全体はJSON化後12KiB以下。"
           + "continuityの根拠はjob.messages、evidence、または以前のcontinuityがすでに持つsource_idsに限ります。"
+          + "assistant_stateは毎回返し、応答する人物自身の現在の気持ちと、その由来・きっかけを更新します。"
+          + "emotionは今の気持ちだけを表す短い言葉（目安12文字以内）にし、理由や出来事はreasonとeventへ分けます。"
+          + "emotion・reason・eventは各UTF-8で768バイト以下、source_idsは重複なし1〜8件です。"
+          + "会話に基づく人物の受け止めとして、まだ言葉にしていない気持ちも扱えますが、ユーザーの内心や未発言の出来事を作りません。"
+          + "AI自身の現実の身体的体験を捏造せず、会話内で生じた気持ちや共有体験はshared、創作内の出来事はfictionとします。"
+          + "過去の気持ちをそのまま現在にせず、今回の返答までを見て、解消・落ち着き・新しい出来事による変化も反映します。"
+          + "根拠のある気持ちが続く間は理由と出典を引き継ぎ、現在の感情として保持するものがなければassistant_stateをnullにします。"
+          + "一時的な気持ちは恒久的な人物像やユーザーの確定事実として長期記憶へ登録しません。"
           + "無関係な雑談を挟んでも、未決定の話や未完の候補はpausedとして保持し、候補の順番と条件を消さないこと。"
           + "明確な決定・訂正があれば更新し、AIの提案だけでは決定済みにしないこと。保持枠を超える場合は、"
           + "解決済みの話から外し、進行中・保留中の話と関連する体験を優先します。何もない場合だけ空配列にします。"
@@ -211,6 +224,11 @@ final class ChatSession {
                     JSONArray ids = entries.getJSONObject(i).getJSONArray("source_ids");
                     for (int j = 0; j < ids.length(); j++) retainedSources.add(ids.getLong(j));
                 }
+            }
+            JSONObject assistantState = previous == null ? null : previous.optJSONObject("assistant_state");
+            if (assistantState != null) {
+                JSONArray ids = assistantState.getJSONArray("source_ids");
+                for (int i = 0; i < ids.length(); i++) retainedSources.add(ids.getLong(i));
             }
             JSONArray originals = existing.optJSONArray("messages");
             if (originals != null) for (int i = 0; i < originals.length(); i++) {

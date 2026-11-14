@@ -181,6 +181,17 @@ Java_jp_tekewo_conversation_MainActivity_nativeMessages(JNIEnv* env, jclass, jin
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeEmotion(JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        if (!core_ready) return java_string(env, "");
+        const char* emotion = conversation_assistant_emotion();
+        if (!emotion) { core_error(); return java_string(env, ""); }
+        return java_string(env, emotion);
+    } catch (const std::exception&) { error = "気持ちを読み込めませんでした。"; return java_string(env, ""); }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_jp_tekewo_conversation_MainActivity_nativeSwitchPerson(JNIEnv* env, jclass, jbyteArray path, jbyteArray payload) {
     std::lock_guard<std::mutex> lock(mutex);
     try {

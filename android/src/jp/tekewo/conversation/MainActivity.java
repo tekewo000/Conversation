@@ -38,6 +38,7 @@ public final class MainActivity extends ComponentActivity {
     private static native String nativeArchiveDelta(long cursor);
 
     private static native String nativeMessages(int first);
+    private static native String nativeEmotion();
     private ComposeUi compose;
     private int pageFirst = -1;
     private boolean scrollOnRefresh;
@@ -48,6 +49,7 @@ public final class MainActivity extends ComponentActivity {
     private PersonRegistry people;
     private PersonRegistry.Person activePerson;
     private File pendingExportDirectory;
+    private String pendingIconPersonId = "";
     private String gitStatus = "";
     private final android.os.Handler syncTimer = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable autoSync = () -> queueGitSync(false);
@@ -73,6 +75,7 @@ public final class MainActivity extends ComponentActivity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        if (state != null) pendingIconPersonId = state.getString("icon_person", "");
         textSize = Math.max(16, Math.min(28, getPreferences(MODE_PRIVATE).getInt("text_size", DEFAULT_TEXT_SIZE)));
         messageGap = Math.max(8, Math.min(24, getPreferences(MODE_PRIVATE).getInt("message_gap", 12)));
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
@@ -105,6 +108,9 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         if (activePerson != null) compose.setDraft(getPreferences(MODE_PRIVATE).getString(draftKey(), ""));
+        compose.setPersonName(activePerson == null ? "" : activePerson.name);
+        compose.setOnIcon(this::showPersonIcon);
+        refreshPersonIcon();
         connection = new ChatGptConnection(this);
         ChatSession.Store store = new ChatSession.Store() {
             public long add(String role, String text) throws Exception {
@@ -151,14 +157,16 @@ public final class MainActivity extends ComponentActivity {
         final int requested = pageFirst;
         reader.execute(() -> {
             try {
-                String snapshot;
+                String snapshot, emotion;
                 synchronized (storeGate) {
                     requireOpen();
                     if (changingPerson) return;
                     snapshot = nativeMessages(requested);
                     if (snapshot.isEmpty()) throw new java.io.IOException(nativeLastError());
+                    emotion = nativeEmotion();
                 }
                 JSONObject page = new JSONObject(snapshot);
+                page.put("assistant_emotion", emotion);
                 org.json.JSONArray rows = page.getJSONArray("messages");
                 for (int i = 0; i < rows.length(); i++) {
                     JSONObject row = rows.getJSONObject(i);
@@ -448,9 +456,9 @@ public final class MainActivity extends ComponentActivity {
                 memorySession.begin();
                 final ChatRequest request = selected == null ? selectedRequest() : selected;
                 memorySession.processMemories((instructions, turns, delta) -> connection.request(request, instructions, turns, delta, true));
-                ui(() -> { memoryStatus = ""; scheduleGitSync(); });
+                ui(() -> { memoryStatus = ""; refreshMessages(); scheduleGitSync(); });
             } catch (Exception error) {
-                ui(() -> { memoryStatus = "記憶の整理は再試行待ちです。原文は保存されています。" + safeError(error); scheduleGitSync(); });
+                ui(() -> { memoryStatus = "記憶の整理は再試行待ちです。原文は保存されています。" + safeError(error); refreshMessages(); scheduleGitSync(); });
             }
         });
     }
@@ -458,6 +466,7 @@ public final class MainActivity extends ComponentActivity {
     private void showPeople() {
         ComposeUi.Panel panel = new ComposeUi.Panel("人物");
         panel.sheet = true;
+        if (activePerson != null) panel.rows.add(new ComposeUi.Row("人物アイコンを設定", this::showPersonIcon, 2));
         panel.rows.add(new ComposeUi.Row("人物を追加", () -> {
             if (busy || memoryWorker.isRunning()) { showError("応答と記憶の整理が終わってから追加してください。"); return; }
             showNewPerson();
@@ -476,6 +485,36 @@ public final class MainActivity extends ComponentActivity {
         if (!people.list().isEmpty()) panel.rows.add(new ComposeUi.Row("人物を削除", () -> {
             if (busy || memoryWorker.isRunning()) { showError("応答と記憶の整理が終わってから削除してください。"); return; }
             showDeletePeople();
+        }, 6));
+        compose.show(panel);
+    }
+
+    private void refreshPersonIcon() {
+        final PersonRegistry.Person person = activePerson;
+        if (person == null) { compose.setPersonIcon(null); return; }
+        reader.execute(() -> {
+            try {
+                byte[] image = people.icon(person.id);
+                final android.graphics.Bitmap bitmap = image.length == 0 ? null : PersonIcon.decode(image);
+                ui(() -> { if (activePerson != null && person.id.equals(activePerson.id)) compose.setPersonIcon(bitmap); });
+            } catch (Exception error) { ui(() -> { compose.setPersonIcon(null); showError(safeError(error)); }); }
+        });
+    }
+
+    private void showPersonIcon() {
+        if (activePerson == null) return;
+        ComposeUi.Panel panel = new ComposeUi.Panel("人物アイコン"); panel.sheet = true;
+        panel.rows.add(new ComposeUi.Row("写真・画像から選ぶ", () -> {
+            pendingIconPersonId = activePerson.id;
+            startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*")
+                    .addCategory(Intent.CATEGORY_OPENABLE), 83);
+        }, 1));
+        panel.rows.add(new ComposeUi.Row("名前のアイコンに戻す", () -> {
+            final PersonRegistry.Person person = activePerson;
+            worker.execute(() -> {
+                try { people.setIcon(person.id, null); ui(() -> { refreshPersonIcon(); scheduleGitSync(); }); }
+                catch (Exception error) { ui(() -> showError(safeError(error))); }
+            });
         }, 6));
         compose.show(panel);
     }
@@ -714,6 +753,8 @@ public final class MainActivity extends ComponentActivity {
                 JSONObject delta;
                 synchronized (storeGate) { requireCurrentPerson(); delta = new JSONObject(nativeArchiveDelta(prior.cursor)); }
                 if (delta.has("error")) throw new java.io.IOException("保存する履歴を読み出せませんでした。");
+                byte[] icon = people.icon(person.id);
+                if (icon.length > 0) delta.put("icon_png_base64", java.util.Base64.getEncoder().encodeToString(icon));
                 gitWorker.execute(() -> {
                     boolean more = false;
                     try {
@@ -749,11 +790,17 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void exportArchive() {
+        final PersonRegistry.Person person = activePerson;
         final File exportDirectory = new File(activePerson.directory, "export");
         worker.execute(() -> {
             String error = nativeExport();
+            if (error.isEmpty()) {
+                try { BackupArchive.addIcon(exportDirectory, people.icon(person.id)); }
+                catch (Exception failure) { error = safeError(failure); }
+            }
+            final String exportError = error;
             ui(() -> {
-                if (!error.isEmpty()) { showError(error); return; }
+                if (!exportError.isEmpty()) { showError(exportError); return; }
                 pendingExportDirectory = exportDirectory;
                 Intent destination = new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/zip")
                         .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE, "Conversation-backup.zip");
@@ -764,6 +811,21 @@ public final class MainActivity extends ComponentActivity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == 83) {
+            final String personId = pendingIconPersonId; pendingIconPersonId = "";
+            if (result != RESULT_OK || data == null || data.getData() == null) return;
+            if (activePerson == null || !activePerson.id.equals(personId)) {
+                showError("画像を選ぶ人物が変わりました。人物アイコンからもう一度選んでください。"); return;
+            }
+            final Uri source = data.getData();
+            worker.execute(() -> {
+                try (InputStream stream = getContentResolver().openInputStream(source)) {
+                    people.setIcon(personId, PersonIcon.read(stream));
+                    ui(() -> { refreshPersonIcon(); scheduleGitSync(); });
+                } catch (Exception error) { ui(() -> showError(safeError(error))); }
+            });
+            return;
+        }
         if (request == 82 && result == RESULT_OK && data != null && data.getData() != null) {
             final Uri source = data.getData();
             worker.execute(() -> {
@@ -795,6 +857,11 @@ public final class MainActivity extends ComponentActivity {
                 BackupArchive.write(exportDirectory, destinationStream);
             } catch (Exception error) { ui(() -> showError("バックアップを書き出せませんでした。保存先を確認してください。")); }
         });
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        state.putString("icon_person", pendingIconPersonId);
+        super.onSaveInstanceState(state);
     }
 
     @Override protected void onDestroy() {

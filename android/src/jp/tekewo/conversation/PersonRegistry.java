@@ -81,6 +81,31 @@ final class PersonRegistry {
     synchronized List<Person> list() { return new ArrayList<>(people.values()); }
     synchronized Person active() { return people.get(activeId); }
 
+    synchronized byte[] icon(String id) throws IOException {
+        if (!people.containsKey(id)) throw new IOException("人物が見つかりません。");
+        File file = new File(personDirectory(id), "icon.png");
+        if (Files.isSymbolicLink(file.toPath())) throw new IOException("人物アイコンの保存先が不正です。");
+        if (!file.exists()) return new byte[0];
+        if (file.length() > 1024 * 1024) throw new IOException("人物アイコンが大きすぎます。");
+        byte[] data = Files.readAllBytes(file.toPath());
+        validateIcon(data);
+        return data;
+    }
+
+    synchronized void setIcon(String id, byte[] png) throws IOException {
+        if (!people.containsKey(id)) throw new IOException("人物が見つかりません。");
+        File file = new File(personDirectory(id), "icon.png");
+        if (png == null) { Files.deleteIfExists(file.toPath()); return; }
+        validateIcon(png);
+        writeAtomic(file, png);
+    }
+
+    static void validateIcon(byte[] png) throws IOException {
+        byte[] signature = {(byte)137, 80, 78, 71, 13, 10, 26, 10};
+        if (png.length < signature.length || png.length > 1024 * 1024) throw new IOException("人物アイコンは1MiB以内のPNGにしてください。");
+        for (int i = 0; i < signature.length; i++) if (png[i] != signature[i]) throw new IOException("人物アイコンの画像形式が不正です。");
+    }
+
     synchronized Person stage(PersonDocument doc, String repositoryInput) throws IOException {
         if (doc == null) throw new IllegalArgumentException("人物ファイルが必要です。");
         String repository = repositoryInput == null ? null : normalizeRepository(repositoryInput);
@@ -211,10 +236,14 @@ final class PersonRegistry {
     }
     private static String read(File file) throws IOException { return new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8); }
     private static void writeAtomic(File file, String text) throws IOException {
+        writeAtomic(file, text.getBytes(StandardCharsets.UTF_8));
+    }
+    private static void writeAtomic(File file, byte[] data) throws IOException {
         File temporary = new File(file.getParentFile(), file.getName() + ".tmp");
+        if (Files.isSymbolicLink(temporary.toPath())) throw new IOException("保存用ファイルの場所が不正です。");
         try {
             try (FileOutputStream stream = new FileOutputStream(temporary)) {
-                stream.write(text.getBytes(StandardCharsets.UTF_8)); stream.getFD().sync();
+                stream.write(data); stream.getFD().sync();
             }
             Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } finally { Files.deleteIfExists(temporary.toPath()); }

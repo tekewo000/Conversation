@@ -42,6 +42,13 @@ final class GitArchiveFiles {
         if (name.isEmpty() || utf8(name).length > 256) throw new IOException("Invalid person name.");
         JSONObject persona = new JSONObject().put("format", 1).put("id", personId)
                 .put("name", name).put("profile", profile).put("source_sha256", sha256(source));
+        if (delta.has("icon_png_base64")) {
+            String encoded = delta.getString("icon_png_base64");
+            if (encoded.length() > 1400000) throw new IOException("Person icon is too large.");
+            try { PersonRegistry.validateIcon(java.util.Base64.getDecoder().decode(encoded)); }
+            catch (IllegalArgumentException error) { throw new IOException("Invalid person icon encoding.", error); }
+            persona.put("icon_png_base64", encoded);
+        }
         byte[] settings = utf8(canonical(persona) + "\n");
         JSONArray records = delta.getJSONArray("records");
         ByteArrayOutputStream lines = new ByteArrayOutputStream();

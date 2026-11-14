@@ -1,6 +1,7 @@
 package conversation
 
 import "core:encoding/json"
+import "base:runtime"
 
 CONTINUITY_MAX_BYTES :: 12288
 CONTINUITY_SCHEMA :: `
@@ -12,8 +13,16 @@ CREATE TRIGGER IF NOT EXISTS continuity_no_delete BEFORE DELETE ON continuity_re
 CONTINUITY_JSON :: `coalesce((SELECT json_set(state,'$.through_id',through_id) FROM continuity_revisions ORDER BY id DESC LIMIT 1),'{}')`
 
 CONTINUITY_REFERENCES_SQL :: `SELECT CAST(s.value AS INTEGER) AS id,CASE WHEN CAST(s.key AS INTEGER)>0 THEN 4 WHEN json_extract(item.value,'$.status')='active' THEN 0 WHEN json_extract(item.value,'$.status')='paused' THEN 1 ELSE 3 END AS priority FROM continuity_revisions r,json_each(r.state,'$.threads') item,json_each(item.value,'$.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)
-UNION ALL SELECT CAST(s.value AS INTEGER),CASE WHEN CAST(s.key AS INTEGER)=0 THEN 2 ELSE 4 END FROM continuity_revisions r,json_each(r.state,'$.episodes') item,json_each(item.value,'$.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)`
+UNION ALL SELECT CAST(s.value AS INTEGER),CASE WHEN CAST(s.key AS INTEGER)=0 THEN 2 ELSE 4 END FROM continuity_revisions r,json_each(r.state,'$.episodes') item,json_each(item.value,'$.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)
+UNION ALL SELECT CAST(s.value AS INTEGER),2 FROM continuity_revisions r,json_each(r.state,'$.assistant_state.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)`
 CONTINUITY_SOURCES_SQL :: "SELECT id FROM ("+CONTINUITY_REFERENCES_SQL+")"
+
+@(export)
+conversation_assistant_emotion :: proc "c" () -> cstring {
+ context=runtime.default_context()
+ if !ready { fail("History is not open."); return nil }
+ return json_query(`SELECT coalesce((SELECT json_extract(state,'$.assistant_state.emotion') FROM continuity_revisions ORDER BY id DESC LIMIT 1),'') WHERE ?1=''`)
+}
 
 continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
  if len(state_text)>CONTINUITY_MAX_BYTES do return fail("Conversation state exceeds 12 KiB.")
@@ -21,7 +30,8 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
  if !parsed do return false
  defer json.destroy_value(root)
  obj,obj_ok:=root.(json.Object)
- if !obj_ok || len(obj)!=2 do return fail("Expected conversation threads and episodes only.")
+ if !obj_ok || (len(obj)!=2 && len(obj)!=3) do return fail("Expected conversation threads, episodes and optional assistant state.")
+ for key in obj { if key!="threads" && key!="episodes" && key!="assistant_state" do return fail("Unknown conversation state field.") }
  threads,threads_ok:=obj["threads"].(json.Array)
  episodes,episodes_ok:=obj["episodes"].(json.Array)
  if !threads_ok || !episodes_ok || len(threads)>6 || len(episodes)>6 do return fail("Expected at most six threads and six episodes.")
@@ -32,18 +42,27 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
  if valid do first=max(1,sqlite3_column_int64(boundary,0)-12)
  sqlite3_finalize(boundary)
  if !valid do return fail("Conversation state must advance to an existing extraction boundary.")
- for entries,group in ([2]json.Array{threads,episodes}) {
+ assistant_entries:json.Array
+ defer delete(assistant_entries)
+ if state,exists:=obj["assistant_state"]; exists {
+  if _,is_null:=state.(json.Null); !is_null { append(&assistant_entries,state) }
+ }
+ for entries,group in ([3]json.Array{threads,episodes,assistant_entries}) {
   for item,i in entries {
    entry,entry_ok:=item.(json.Object)
    expected:=4
    if group==1 do expected=6
+   if group==2 do expected=5
    if !entry_ok || len(entry)!=expected do return fail("Invalid conversation entry fields.")
-   key,key_ok:=string_field(entry,"key",128)
-   _,text_ok:=string_field(entry,"text",1536)
    sources,sources_ok:=entry["source_ids"].(json.Array)
-   if !key_ok || !text_ok || !sources_ok || len(sources)<1 || len(sources)>8 do return fail("Conversation entries need text and one to eight evidence IDs.")
-   for previous in entries[:i] {
-    if string(previous.(json.Object)["key"].(json.String))==key do return fail("Duplicate conversation entry key.")
+   if !sources_ok || len(sources)<1 || len(sources)>8 do return fail("Conversation entries need one to eight evidence IDs.")
+   if group<2 {
+    key,key_ok:=string_field(entry,"key",128)
+    _,text_ok:=string_field(entry,"text",1536)
+    if !key_ok || !text_ok do return fail("Conversation entries need key and text.")
+    for previous in entries[:i] {
+     if string(previous.(json.Object)["key"].(json.String))==key do return fail("Duplicate conversation entry key.")
+    }
    }
    if group==0 {
     status,status_ok:=string_field(entry,"status",16)
@@ -51,9 +70,15 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
    } else {
     scope,scope_ok:=string_field(entry,"scope",16)
     if !scope_ok || (scope!="real" && scope!="fiction" && scope!="shared") do return fail("Invalid episode scope.")
-    for field in ([2]string{"emotion","scene"}) {
-     value,value_ok:=entry[field].(json.String)
-     if !value_ok || (string(value)!="" && !valid_text(string(value),768)) do return fail("Invalid episode emotion or scene.")
+    if group==1 {
+     for field in ([2]string{"emotion","scene"}) {
+      value,value_ok:=entry[field].(json.String)
+      if !value_ok || (string(value)!="" && !valid_text(string(value),768)) do return fail("Invalid episode emotion or scene.")
+     }
+    } else {
+     for field in ([3]string{"emotion","reason","event"}) {
+      if _,ok:=string_field(entry,field,768); !ok do return fail("Assistant state needs a feeling, reason and event within 768 bytes each.")
+     }
     }
    }
    for source,j in sources {
@@ -74,10 +99,13 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
 continuity_save :: proc(through_id: i64, value: json.Value) -> bool {
  encoded,e:=json.marshal(value)
  defer delete(encoded)
- if e!=nil || !continuity_revision_valid(through_id,string(encoded)) do return false
+ if e!=nil do return false
+ // Older extraction results can update topics without erasing the current feeling; explicit null clears it.
+ merged:=json_query(`SELECT CASE WHEN json_type(?1,'$.assistant_state') IS NULL AND json_type(`+CONTINUITY_JSON+`,'$.assistant_state') IS NOT NULL THEN json_set(?1,'$.assistant_state',json_extract(`+CONTINUITY_JSON+`,'$.assistant_state')) ELSE ?1 END`,string(encoded))
+ if merged==nil || !continuity_revision_valid(through_id,string(merged)) do return false
  stmt:=prepare("INSERT INTO continuity_revisions(through_id,state) VALUES(?1,?2)")
  if stmt==nil do return false
- saved:=bind_int(stmt,1,through_id) && bind_text(stmt,2,string(encoded)) && sqlite3_step(stmt)==101
+ saved:=bind_int(stmt,1,through_id) && bind_text(stmt,2,string(merged)) && sqlite3_step(stmt)==101
  sqlite3_finalize(stmt)
  return saved && archive_capture("continuity_revisions",sqlite3_last_insert_rowid(db))
 }

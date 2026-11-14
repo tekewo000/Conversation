@@ -49,6 +49,30 @@ class ComposeUiTest {
         ui = ComposeUi(compose.activity, { menus++ }, { sends++ }, { pages.add(it) })
     }
 
+    @Test fun latestAssistantShowsOnlyCurrentFeelingBesideItsIcon() {
+        var opened = 0
+        compose.runOnUiThread {
+            install()
+            ui.personName = "小春"
+            ui.onIcon = Runnable { opened++ }
+            ui.setMessages("""{"first":0,"total":4,"assistant_emotion":"ほっとして嬉しい","messages":[{"id":1,"role":"user","text":"試合が終わったよ"},{"id":2,"role":"assistant","text":"お疲れさま"},{"id":3,"role":"user","text":"ありがとう"},{"id":4,"role":"assistant","text":"一緒に喜べて嬉しいよ"}]}""")
+        }
+        compose.onNodeWithText("ほっとして嬉しい").assertIsDisplayed()
+        compose.onAllNodes(hasText("ほっとして嬉しい")).fetchSemanticsNodes().let { assertEquals(1, it.size) }
+        compose.onNodeWithText("一緒に喜べて嬉しいよ").assertIsDisplayed()
+        compose.onAllNodes(hasContentDescription("小春のアイコンを設定")).fetchSemanticsNodes().let { assertEquals(2, it.size) }
+        InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(
+            "screencap -p /data/local/tmp/conversation-avatar-chat.png").use {
+            java.io.FileInputStream(it.fileDescriptor).readBytes()
+        }
+        compose.onAllNodes(hasContentDescription("小春のアイコンを設定"))[0].performClick()
+        compose.runOnIdle { assertEquals(1, opened) }
+        compose.runOnUiThread {
+            ui.setMessages("""{"first":0,"total":1,"assistant_emotion":"","messages":[{"id":1,"role":"assistant","text":"続けよう"}]}""")
+        }
+        compose.onNodeWithText("ほっとして嬉しい").assertDoesNotExist()
+    }
+
     @Test fun noPersonDisablesComposerButLeavesMenuAvailable() {
         compose.runOnUiThread { install() }
         compose.onNodeWithContentDescription("メッセージ入力").assertIsNotEnabled()

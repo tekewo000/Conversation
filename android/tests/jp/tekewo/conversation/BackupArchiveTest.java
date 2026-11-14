@@ -41,6 +41,9 @@ public final class BackupArchiveTest {
                     .put("person", new org.json.JSONObject().put("profile", new String(profile))).toString();
             assert metadata.getBytes(StandardCharsets.UTF_8).length > 65536;
             Files.write(new File(root, "metadata.json").toPath(), metadata.getBytes(StandardCharsets.UTF_8));
+            byte[] icon = java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=");
+            BackupArchive.addIcon(root, icon);
+            assert java.util.Arrays.equals(Files.readAllBytes(new File(root, "snapshot-current/icon.png").toPath()), icon);
             BackupArchive.write(root, new ByteArrayOutputStream());
             Files.write(new File(root, "metadata.json").toPath(), new byte[1024 * 1024 + 1]);
             try { BackupArchive.write(root, new ByteArrayOutputStream()); throw new AssertionError("Oversized metadata accepted"); }

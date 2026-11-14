@@ -48,6 +48,7 @@ public final class GitArchiveFilesTest {
         JSONObject fractional = delta(0, 1); fractional.put("through_cursor", 1.5);
         reject(() -> GitArchiveFiles.build(ID, 42, RAW, fractional));
         expandedPersonBounds();
+        personIconParticipatesInProfileFingerprint();
         sqliteUnicodeExpansionFitsEncodedBudget();
         personaRevisionSurvivesJsonl();
         expandedDeltaBound();
@@ -56,6 +57,20 @@ public final class GitArchiveFilesTest {
         oversized.getJSONArray("records").getJSONObject(0).put("extra", new String(chars));
         reject(() -> GitArchiveFiles.build(ID, 42, RAW, oversized));
         System.out.println("GitArchiveFilesTest passed");
+    }
+
+    private static void personIconParticipatesInProfileFingerprint() throws Exception {
+        JSONObject withIcon = delta(3, 3);
+        String png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+        withIcon.put("icon_png_base64", png);
+        GitArchiveFiles.Batch icon = GitArchiveFiles.build(ID, 42, RAW, withIcon);
+        JSONObject profile = new JSONObject(new String(icon.files.get("persona.json"), StandardCharsets.UTF_8));
+        assert profile.getString("icon_png_base64").equals(png);
+        GitArchiveFiles.Batch removed = GitArchiveFiles.build(ID, 42, RAW, delta(3, 3));
+        assert !icon.manifest.getString("persona_sha256").equals(removed.manifest.getString("persona_sha256"));
+        assert !new JSONObject(new String(removed.files.get("persona.json"), StandardCharsets.UTF_8)).has("icon_png_base64");
+        withIcon.put("icon_png_base64", "not a png");
+        reject(() -> GitArchiveFiles.build(ID, 42, RAW, withIcon));
     }
 
     private static void personaRevisionSurvivesJsonl() throws Exception {

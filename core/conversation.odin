@@ -571,7 +571,7 @@ CONTEXT_JSON :: `WITH RECURSIVE query_grams(i,token) AS (
 ), past_messages AS MATERIALIZED (
  SELECT rowid AS id,substr(snippet(messages_fts,0,'','',char(8230),64),1,512) AS excerpt FROM messages_fts WHERE messages_fts MATCH ?2 ORDER BY rank LIMIT 4
 ), recent_messages AS (
- SELECT id FROM messages ORDER BY id DESC LIMIT 12
+ SELECT id FROM messages ORDER BY id DESC LIMIT 61
 ), referenced_messages AS MATERIALIZED (
  SELECT message_id AS id,5 AS priority FROM memory_sources WHERE memory_id IN (SELECT id FROM selected)
  UNION ALL ` + CONTINUITY_REFERENCES_SQL + `
@@ -597,7 +597,7 @@ CONTEXT_JSON :: `WITH RECURSIVE query_grams(i,token) AS (
 ), message_budget AS (
  SELECT id,category,row,sum(length(CAST(row AS BLOB))+1) OVER(PARTITION BY category ORDER BY priority,id DESC ROWS UNBOUNDED PRECEDING) AS bytes FROM message_rows
 )
-SELECT json_object('person',json(` + PERSON_JSON + `),'persona',json(` + PERSONA_JSON + `),'continuity',json(` + CONTINUITY_JSON + `),'messages',json((SELECT json_group_array(json(row)) FROM (SELECT row FROM message_budget WHERE bytes<=CASE category WHEN 0 THEN 18000 ELSE 20000 END ORDER BY id))),'memories',json((SELECT json_group_array(json(row)) FROM memory_budget WHERE bytes<=10000)))`
+SELECT json_object('person',json(` + PERSON_JSON + `),'persona',json(` + PERSONA_JSON + `),'continuity',json(` + CONTINUITY_JSON + `),'messages',json((SELECT json_group_array(json(row)) FROM (SELECT row FROM message_budget WHERE bytes<=CASE category WHEN 0 THEN 786432 ELSE 20000 END ORDER BY id))),'memories',json((SELECT json_group_array(json(row)) FROM memory_budget WHERE bytes<=10000)))`
 
 @(export)
 conversation_context :: proc "c" (query: cstring) -> cstring {
