@@ -250,7 +250,7 @@ conversation_init :: proc "c" (storage_dir: cstring) -> bool {
  if path_e != nil || sqlite3_open_v2(cpath, &db, 6, nil) != 0 { release_state(); return fail("Could not open SQLite database.") }
  sqlite3_busy_timeout(db, 5000)
  version:=scalar("PRAGMA user_version")
- if version!=0 && version!=1 && version!=2 && version!=3 && version!=4 { release_state(); return fail("Unsupported database version; database was preserved.") }
+ if version<0 || version>5 { release_state(); return fail("Unsupported database version; database was preserved.") }
  tables:=scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
  if tables<0 { release_state(); return fail("Could not inspect database schema.") }
  if tables>0 {
@@ -263,11 +263,11 @@ conversation_init :: proc "c" (storage_dir: cstring) -> bool {
   }
  }
  if !execute(SCHEMA) || !execute("BEGIN IMMEDIATE") { release_state(); return false }
- if !execute(PERSON_SCHEMA) || !execute(PERSONA_SCHEMA) || !execute(CONTINUITY_SCHEMA) || !execute(ARCHIVE_SCHEMA) { execute("ROLLBACK"); release_state(); return false }
+ if !execute(PERSON_SCHEMA) || !execute(PERSONA_SCHEMA) || !execute(CONTINUITY_SCHEMA) || !execute(ASSISTANT_STATE_SCHEMA) || !execute(ARCHIVE_SCHEMA) { execute("ROLLBACK"); release_state(); return false }
  initialized := scalar("SELECT count(*) FROM meta WHERE key='initialized' AND value='1'")
  search_ready:=scalar("SELECT count(*) FROM meta WHERE key='search_version' AND value='1'")
  if initialized < 0 || search_ready<0 || (initialized == 0 && !migrate_legacy()) ||
-  (search_ready==0 && !execute(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild'); INSERT INTO memories_fts(memories_fts) VALUES('rebuild'); DELETE FROM memory_current; INSERT INTO memory_current SELECT id,kind,status FROM memories m WHERE NOT EXISTS(SELECT 1 FROM memories n WHERE n.supersedes_id=m.id); INSERT OR REPLACE INTO meta VALUES('search_version','1');`)) || !archive_backfill() || !execute("PRAGMA user_version=4") || !execute("COMMIT") {
+  (search_ready==0 && !execute(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild'); INSERT INTO memories_fts(memories_fts) VALUES('rebuild'); DELETE FROM memory_current; INSERT INTO memory_current SELECT id,kind,status FROM memories m WHERE NOT EXISTS(SELECT 1 FROM memories n WHERE n.supersedes_id=m.id); INSERT OR REPLACE INTO meta VALUES('search_version','1');`)) || !archive_backfill() || !execute("PRAGMA user_version=5") || !execute("COMMIT") {
   execute("ROLLBACK")
   release_state()
   return false
@@ -285,6 +285,17 @@ conversation_init :: proc "c" (storage_dir: cstring) -> bool {
 @(export)
 conversation_add_message :: proc "c" (role, text: cstring) -> i64 {
  context = runtime.default_context()
+ return add_message(role,text)
+}
+
+@(export)
+conversation_add_reply :: proc "c" (text, state: cstring) -> i64 {
+ context = runtime.default_context()
+ if state==nil { fail("Assistant state is required."); return 0 }
+ return add_message("assistant",text,state)
+}
+
+add_message :: proc(role, text: cstring, state: cstring = nil) -> i64 {
  if !ready { fail("History is not open."); return 0 }
  if role == nil || (string(role) != "user" && string(role) != "assistant") || text == nil || !valid_text(string(text)) { fail("A user/assistant role and nonempty UTF-8 text of at most 64KiB are required."); return 0 }
  if message_count == 0x7fffffff || !execute("BEGIN IMMEDIATE") do return 0
@@ -292,7 +303,7 @@ conversation_add_message :: proc "c" (role, text: cstring) -> i64 {
  defer { archive_group=0; if !committed do execute("ROLLBACK") }
  if !archive_begin() do return 0
  id := insert_message(string(role), string(text))
- if id == 0 || (string(role) == "assistant" && !enqueue_uncovered()) || !archive_finish() || !execute("COMMIT") do return 0
+ if id == 0 || (state!=nil && !assistant_state_save(id,string(state))) || (string(role) == "assistant" && !enqueue_uncovered()) || !archive_finish() || !execute("COMMIT") do return 0
  committed = true
  message_count += 1
  clear_cache()
@@ -657,9 +668,9 @@ conversation_export :: proc "c" (output_dir: cstring) -> bool {
  folder:=strings.concatenate({base,"/",name})
  defer delete(folder)
  if os.make_directory(folder)!=nil do return fail("Could not create export snapshot directory.")
- counts:[9]i64
- chunks:[9]int
- for table,i in ([]string{"messages","memories","memory_sources","jobs","person_profiles","source_documents","memory_document_sources","persona_revisions","continuity_revisions"}) {
+ counts:[10]i64
+ chunks:[10]int
+ for table,i in ([]string{"messages","memories","memory_sources","jobs","person_profiles","source_documents","memory_document_sources","persona_revisions","continuity_revisions","assistant_states"}) {
   row_sql:=archive_table(table).row_json
   sql:=fmt.aprintf("SELECT %s FROM %s ORDER BY rowid",row_sql,table)
   csql,e:=strings.clone_to_cstring(sql)
@@ -711,7 +722,7 @@ conversation_export :: proc "c" (output_dir: cstring) -> bool {
  person:=json_query(person_sql)
  delete(person_sql)
  if person==nil do return false
- metadata:=fmt.aprintf(`{{"format":2,"snapshot":"%s","person":%s,"messages":%d,"memories":%d,"sources":%d,"jobs":%d,"profiles":%d,"documents":%d,"document_sources":%d,"persona_revisions":%d,"continuity_revisions":%d,"chunks":{{"messages":%d,"memories":%d,"memory_sources":%d,"jobs":%d,"person_profiles":%d,"source_documents":%d,"memory_document_sources":%d,"persona_revisions":%d,"continuity_revisions":%d}},"chunk_bytes_target":1048576,"chunk_bytes_max":16777216}}`,name,string(person),counts[0],counts[1],counts[2],counts[3],counts[4],counts[5],counts[6],counts[7],counts[8],chunks[0],chunks[1],chunks[2],chunks[3],chunks[4],chunks[5],chunks[6],chunks[7],chunks[8])
+ metadata:=fmt.aprintf(`{{"format":2,"snapshot":"%s","person":%s,"messages":%d,"memories":%d,"sources":%d,"jobs":%d,"profiles":%d,"documents":%d,"document_sources":%d,"persona_revisions":%d,"continuity_revisions":%d,"assistant_states":%d,"chunks":{{"messages":%d,"memories":%d,"memory_sources":%d,"jobs":%d,"person_profiles":%d,"source_documents":%d,"memory_document_sources":%d,"persona_revisions":%d,"continuity_revisions":%d,"assistant_states":%d}},"chunk_bytes_target":1048576,"chunk_bytes_max":16777216}}`,name,string(person),counts[0],counts[1],counts[2],counts[3],counts[4],counts[5],counts[6],counts[7],counts[8],counts[9],chunks[0],chunks[1],chunks[2],chunks[3],chunks[4],chunks[5],chunks[6],chunks[7],chunks[8],chunks[9])
  defer delete(metadata)
  temporary:=strings.concatenate({base,"/metadata.json.tmp"})
  defer delete(temporary)

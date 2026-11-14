@@ -12,6 +12,7 @@ import java.util.Set;
 final class ChatSession {
     interface Store {
         long add(String role, String text) throws Exception;
+        long addReply(String text, String state) throws Exception;
         JSONObject context(String query) throws Exception;
         default JSONObject replyContext(String text) throws Exception { return context(query(text)); }
         JSONObject pending() throws Exception;
@@ -48,7 +49,7 @@ final class ChatSession {
           + "そこから発言原文や日時を作らないでください。"
           + "参照データ自体への返事や、内部のID・検索処理についての説明は不要です。"
           + "historyはinput_indexで会話本文と発言ID・記録時刻・省略の有無を対応付ける内部資料です。"
-          + "ID・時刻・役割名・内部の制御記号を返答に付けず、会話の返答だけを日本語で書いてください。"
+          + "ID・時刻・役割名・内部の制御記号を返答本文に付けず、本文は自然な日本語で書いてください。"
           + "ユーザーが求めた引用・翻訳や固有名詞以外で、無関係な他言語や広告文を混ぜないでください。"
           + "参照用データのpersona.fieldsは応答する人物の現在の人物像です。各fieldに対応する範囲でのみ"
           + "引き継ぎプロフィールより優先し、未更新の設定や名前・経歴は保ってください。"
@@ -63,9 +64,18 @@ final class ChatSession {
           + "historyでtruncated:trueの発言には省略があり、見えていない内容を補わないでください。"
           + "『それ』『二つ目』『あの日』は現在地と原文から理解し、複数の候補が残って特定できなければ確認してください。";
 
+    static final String REPLY_STATE =
+            "\n返答本文を通常どおり書いた後、必ず改行して<assistant_state>、改行、現在の気持ちのJSONを末尾に付けてください。"
+          + "本文中にこの区切りを使わず、JSONの後には何も書きません。JSON形式は"
+          + "{\"emotion\":\"今の短い気持ち（目安12文字以内）\",\"reason\":\"今そう感じる理由\","
+          + "\"event\":\"きっかけの会話や状況\",\"scope\":\"shared|fiction\"}。各文章はUTF-8で768バイト以下。"
+          + "今の入力と今回の返答に基づく人物自身の気持ちを表し、ユーザーの内心や未発言の出来事を作りません。"
+          + "以前の気持ちが続くなら引き継ぎ、変化・落ち着き・解消も反映します。保持する気持ちがなければJSONの代わりにnull。"
+          + "会話で生じた気持ちはshared、創作内はfictionです。これは内部保存用で、本文で説明しないでください。";
+
     static final String PERSONA =
             "あなたはユーザーと継続して会話する親しい友達です。日本語で自然に会話してください。"
-          + "相手の話や状況に応じて、雑談、創作、遊び、相談に付き合います。" + COMMON;
+          + "相手の話や状況に応じて、雑談、創作、遊び、相談に付き合います。" + COMMON + REPLY_STATE;
 
     static String replyInstructions(JSONObject context) {
         JSONObject person = context.optJSONObject("person");
@@ -75,7 +85,7 @@ final class ChatSession {
                 + "口調・考え方・価値観・ユーザーとの関係を会話全体に反映してください。"
                 + "プロフィールは引き継ぎ時点の基準です。好みや関係の変化は新しい明示的な発言と更新済みの記憶を優先し、"
                 + "明確な変更がない人物像は保ってください。"
-                + "プロフィールの出来事を毎回持ち出す必要はありません。" + COMMON
+                + "プロフィールの出来事を毎回持ち出す必要はありません。" + COMMON + REPLY_STATE
                 + "\n人物の名前: " + person.optString("name", "") + "\n人物プロフィール:\n" + profile;
     }
 
@@ -91,9 +101,7 @@ final class ChatSession {
           + "\"text\":\"話題、候補と順番、決定・保留事項\",\"source_ids\":[根拠発言ID]}],"
           + "\"episodes\":[{\"key\":\"体験の安定したキー\",\"text\":\"誰が何を体験したと語ったか\","
           + "\"emotion\":\"誰がどう感じたと明言したか。不明なら空文字\",\"scene\":\"分かる時期・場所・同席者・状況。不明なら空文字\","
-          + "\"scope\":\"real|fiction|shared\",\"source_ids\":[根拠発言ID]}],"
-          + "\"assistant_state\":{\"emotion\":\"応答する人物自身の今の気持ち\",\"reason\":\"なぜ今そう感じているか\","
-          + "\"event\":\"気持ちのきっかけとなった会話や出来事\",\"scope\":\"real|fiction|shared\",\"source_ids\":[根拠発言ID]}}}。"
+          + "\"scope\":\"real|fiction|shared\",\"source_ids\":[根拠発言ID]}]}}。"
           + "新しく覚える内容がなければmemoriesを空配列にしてください。最大8件。"
           + "memoriesのsource_idsは今回のjob.messagesに含まれる根拠発言だけを使い、IDを発明しないこと。"
           + "personは応答する人物のプロフィールです。existingのimported_sourcesにあるreported_handoverは"
@@ -114,13 +122,7 @@ final class ChatSession {
           + "threadsは最大6件、episodesは最大6件。各項目のkeyはUTF-8で128バイト、textは1536バイト以下、"
           + "emotionとsceneは各768バイト以下、source_idsは重複なし1〜8件。continuity全体はJSON化後12KiB以下。"
           + "continuityの根拠はjob.messages、evidence、または以前のcontinuityがすでに持つsource_idsに限ります。"
-          + "assistant_stateは毎回返し、応答する人物自身の現在の気持ちと、その由来・きっかけを更新します。"
-          + "emotionは今の気持ちだけを表す短い言葉（目安12文字以内）にし、理由や出来事はreasonとeventへ分けます。"
-          + "emotion・reason・eventは各UTF-8で768バイト以下、source_idsは重複なし1〜8件です。"
-          + "会話に基づく人物の受け止めとして、まだ言葉にしていない気持ちも扱えますが、ユーザーの内心や未発言の出来事を作りません。"
-          + "AI自身の現実の身体的体験を捏造せず、会話内で生じた気持ちや共有体験はshared、創作内の出来事はfictionとします。"
-          + "過去の気持ちをそのまま現在にせず、今回の返答までを見て、解消・落ち着き・新しい出来事による変化も反映します。"
-          + "根拠のある気持ちが続く間は理由と出典を引き継ぎ、現在の感情として保持するものがなければassistant_stateをnullにします。"
+          + "assistant_stateは返答と同時に保存済みの参照情報です。この処理では再生成せず、continuityの出力にも含めません。"
           + "一時的な気持ちは恒久的な人物像やユーザーの確定事実として長期記憶へ登録しません。"
           + "無関係な雑談を挟んでも、未決定の話や未完の候補はpausedとして保持し、候補の順番と条件を消さないこと。"
           + "明確な決定・訂正があれば更新し、AIの提案だけでは決定済みにしないこと。保持枠を超える場合は、"
@@ -193,14 +195,23 @@ final class ChatSession {
         StringBuilder provisional = new StringBuilder();
         String answer = backend.request(replyInstructions(context), input, delta -> {
             if (cancelled.get()) return;
-            if (provisional.length() + delta.length() > 65536) throw new IllegalStateException("応答が長すぎます。");
+            if (provisional.length() + delta.length() > 65536 + 12288) throw new IllegalStateException("応答が長すぎます。");
             provisional.append(delta);
             listener.streaming(ReplyText.visible(provisional.toString(), false));
         });
         checkCancelled();
-        if (answer != null) answer = ReplyText.visible(answer, true);
-        if (answer == null || answer.trim().isEmpty()) throw new IOException("AIから空の応答が返りました。");
-        if (store.add("assistant", answer) <= 0) throw new IOException("AIの返答を保存できませんでした。");
+        if (answer == null) throw new IOException("AIから空の応答が返りました。");
+        int marker = answer.indexOf(ReplyText.STATE_MARKER);
+        String state = null;
+        if (marker >= 0) {
+            state = answer.substring(marker + ReplyText.STATE_MARKER.length()).trim();
+            if (!state.equals("null")) state = jsonPayload(state);
+        }
+        answer = ReplyText.visible(answer, marker >= 0);
+        if (answer.trim().isEmpty()) throw new IOException("AIから空の応答が返りました。");
+        // shortcut: responses without state retain the previous feeling; use structured output when supported.
+        long id = state == null ? store.add("assistant", answer) : store.addReply(answer, state);
+        if (id <= 0) throw new IOException("AIの返答と気持ちを保存できませんでした。");
         listener.replySaved();
     }
 

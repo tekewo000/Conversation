@@ -21,6 +21,7 @@ ARCHIVE_TABLES := [?]Archive_Table{
  {"memory_document_sources","memory_id,document_id,section,occurred_at",`json_object('memory_id',memory_id,'document_id',document_id,'section',section,'occurred_at',occurred_at)`},
  {"persona_revisions","id,through_id,changes,created_at",`json_object('id',id,'through_id',through_id,'changes',changes,'created_at',created_at)`},
  {"continuity_revisions","id,through_id,state,created_at",`json_object('id',id,'through_id',through_id,'state',state,'created_at',created_at)`},
+ {"assistant_states","id,through_id,state,created_at",`json_object('id',id,'through_id',through_id,'state',state,'created_at',created_at)`},
 }
 archive_group:i64
 ARCHIVE_GROUP_MAX :: 16*1048576
@@ -214,6 +215,9 @@ archive_restore_event :: proc(event: json.Object, encoded: string) -> bool {
  }
  if table.name=="continuity_revisions" {
   if i64(row["id"].(json.Integer))!=scalar("SELECT coalesce(max(id),0)+1 FROM continuity_revisions") || !continuity_revision_valid(i64(row["through_id"].(json.Integer)),string(row["state"].(json.String))) do return fail("Invalid archived conversation state; nothing was restored.")
+ }
+ if table.name=="assistant_states" {
+  if i64(row["id"].(json.Integer))!=scalar("SELECT coalesce(max(id),0)+1 FROM assistant_states") || !assistant_state_valid(i64(row["through_id"].(json.Integer)),string(row["state"].(json.String))) do return fail("Invalid archived assistant state; nothing was restored.")
  }
  columns:=strings.split(table.columns,",")
  defer delete(columns)

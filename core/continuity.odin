@@ -10,18 +10,20 @@ CREATE TRIGGER IF NOT EXISTS continuity_no_update BEFORE UPDATE ON continuity_re
 CREATE TRIGGER IF NOT EXISTS continuity_no_delete BEFORE DELETE ON continuity_revisions BEGIN SELECT RAISE(ABORT,'immutable'); END;
 `
 
-CONTINUITY_JSON :: `coalesce((SELECT json_set(state,'$.through_id',through_id) FROM continuity_revisions ORDER BY id DESC LIMIT 1),'{}')`
+EXTRACTED_CONTINUITY_JSON :: `coalesce((SELECT json_set(state,'$.through_id',through_id) FROM continuity_revisions ORDER BY id DESC LIMIT 1),'{}')`
+CONTINUITY_JSON :: `(CASE WHEN EXISTS(SELECT 1 FROM assistant_states) THEN json_set(`+EXTRACTED_CONTINUITY_JSON+`,'$.assistant_state',json(`+CURRENT_ASSISTANT_STATE_JSON+`),'$.assistant_state_through_id',(SELECT through_id FROM assistant_states ORDER BY id DESC LIMIT 1)) ELSE `+EXTRACTED_CONTINUITY_JSON+` END)`
 
 CONTINUITY_REFERENCES_SQL :: `SELECT CAST(s.value AS INTEGER) AS id,CASE WHEN CAST(s.key AS INTEGER)>0 THEN 4 WHEN json_extract(item.value,'$.status')='active' THEN 0 WHEN json_extract(item.value,'$.status')='paused' THEN 1 ELSE 3 END AS priority FROM continuity_revisions r,json_each(r.state,'$.threads') item,json_each(item.value,'$.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)
 UNION ALL SELECT CAST(s.value AS INTEGER),CASE WHEN CAST(s.key AS INTEGER)=0 THEN 2 ELSE 4 END FROM continuity_revisions r,json_each(r.state,'$.episodes') item,json_each(item.value,'$.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)
-UNION ALL SELECT CAST(s.value AS INTEGER),2 FROM continuity_revisions r,json_each(r.state,'$.assistant_state.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)`
+UNION ALL SELECT CAST(s.value AS INTEGER),2 FROM continuity_revisions r,json_each(r.state,'$.assistant_state.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)
+UNION ALL SELECT CAST(s.value AS INTEGER),2 FROM json_each((SELECT state FROM assistant_states ORDER BY id DESC LIMIT 1),'$.source_ids') s`
 CONTINUITY_SOURCES_SQL :: "SELECT id FROM ("+CONTINUITY_REFERENCES_SQL+")"
 
 @(export)
 conversation_assistant_emotion :: proc "c" () -> cstring {
  context=runtime.default_context()
  if !ready { fail("History is not open."); return nil }
- return json_query(`SELECT coalesce((SELECT json_extract(state,'$.assistant_state.emotion') FROM continuity_revisions ORDER BY id DESC LIMIT 1),'') WHERE ?1=''`)
+ return json_query(`SELECT coalesce(json_extract(`+CURRENT_ASSISTANT_STATE_JSON+`,'$.emotion'),'') WHERE ?1=''`)
 }
 
 continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
@@ -101,7 +103,7 @@ continuity_save :: proc(through_id: i64, value: json.Value) -> bool {
  defer delete(encoded)
  if e!=nil do return false
  // Older extraction results can update topics without erasing the current feeling; explicit null clears it.
- merged:=json_query(`SELECT CASE WHEN json_type(?1,'$.assistant_state') IS NULL AND json_type(`+CONTINUITY_JSON+`,'$.assistant_state') IS NOT NULL THEN json_set(?1,'$.assistant_state',json_extract(`+CONTINUITY_JSON+`,'$.assistant_state')) ELSE ?1 END`,string(encoded))
+ merged:=json_query(`SELECT CASE WHEN json_type(?1,'$.assistant_state') IS NULL AND json_type(`+EXTRACTED_CONTINUITY_JSON+`,'$.assistant_state') IS NOT NULL THEN json_set(?1,'$.assistant_state',json_extract(`+EXTRACTED_CONTINUITY_JSON+`,'$.assistant_state')) ELSE ?1 END`,string(encoded))
  if merged==nil || !continuity_revision_valid(through_id,string(merged)) do return false
  stmt:=prepare("INSERT INTO continuity_revisions(through_id,state) VALUES(?1,?2)")
  if stmt==nil do return false

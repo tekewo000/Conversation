@@ -25,6 +25,7 @@ import org.json.JSONObject;
 public final class MainActivity extends ComponentActivity {
     private static native String nativeInit(byte[] storageDir, byte[] font, byte[] emojiFont);
     private static native long nativeAddMessage(byte[] role, byte[] text);
+    private static native long nativeAddReply(byte[] text, byte[] state);
     private static native String nativeLastError();
     private static native String nativeContext(byte[] query);
     private static native String nativeContextHybrid(byte[] query, long[] candidates);
@@ -121,6 +122,14 @@ public final class MainActivity extends ComponentActivity {
                 synchronized (storeGate) {
                     requireCurrentPerson();
                     long id = nativeAddMessage(bytes(role), bytes(text));
+                    if (id <= 0) throw new java.io.IOException(nativeLastError());
+                    return id;
+                }
+            }
+            public long addReply(String text, String state) throws Exception {
+                synchronized (storeGate) {
+                    requireCurrentPerson();
+                    long id = nativeAddReply(bytes(text), bytes(state));
                     if (id <= 0) throw new java.io.IOException(nativeLastError());
                     return id;
                 }

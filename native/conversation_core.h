@@ -9,6 +9,7 @@ extern "C" {
 bool conversation_init(const char* storage_dir);
 bool conversation_send(const char* utf8);
 int64_t conversation_add_message(const char* role, const char* utf8);
+int64_t conversation_add_reply(const char* utf8, const char* state_json);
 int32_t conversation_message_count(void);
 // Absolute zero-based indexes; load at most 80 rows before using getters.
 bool conversation_load_window(int32_t first, int32_t limit);

@@ -24,7 +24,7 @@ public final class MemoryWorkerTest {
 
         ChatSessionTest.Store store = new ChatSessionTest.Store();
         ChatSession replies = new ChatSession(store), memories = new ChatSession(store);
-        replies.reply("最初の会話", true, (instructions, input, delta) -> "最初の返答", new ChatSessionTest.Listener());
+        replies.reply("最初の会話", true, (instructions, input, delta) -> "最初の返答\n<assistant_state>\nnull", new ChatSessionTest.Listener());
         CountDownLatch extracting = new CountDownLatch(1), continueMemory = new CountDownLatch(1), saved = new CountDownLatch(1);
         try (MemoryWorker worker = new MemoryWorker()) {
             worker.execute(() -> {
@@ -38,7 +38,7 @@ public final class MemoryWorkerTest {
                 } catch (Exception error) { throw new AssertionError(error); }
             });
             assert extracting.await(5, TimeUnit.SECONDS);
-            replies.reply("記憶整理中の次の会話", true, (instructions, input, delta) -> "待たずに返答", new ChatSessionTest.Listener());
+            replies.reply("記憶整理中の次の会話", true, (instructions, input, delta) -> "待たずに返答\n<assistant_state>\nnull", new ChatSessionTest.Listener());
             assert store.texts.get(3).equals("待たずに返答") && store.applied == 0;
             replies.cancel();
             assert !memories.isCancelled() : "Stopping a reply must not share the memory session's cancellation flag";

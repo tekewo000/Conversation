@@ -239,6 +239,25 @@ Java_jp_tekewo_conversation_MainActivity_nativeLastError(JNIEnv* env, jclass) {
     return java_string(env, error);
 }
 
+extern "C" JNIEXPORT jlong JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeAddReply(JNIEnv* env, jclass, jbyteArray text, jbyteArray state) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        std::string message, feeling;
+        if (!core_ready) { error = "保存先を初期化できていません。"; return 0; }
+        if (!read_text(env, text, message) || !read_text(env, state, feeling)) {
+            error = "入力に無効な文字が含まれています。"; return 0;
+        }
+        const int64_t id = conversation_add_reply(message.c_str(), feeling.c_str());
+        if (!id) { core_error(); return 0; }
+        error.clear();
+        return id;
+    } catch (const std::exception&) {
+        error = "返答と気持ちを保存できませんでした。";
+        return 0;
+    }
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_jp_tekewo_conversation_MainActivity_nativeContext(JNIEnv* env, jclass, jbyteArray query) {
     std::lock_guard<std::mutex> lock(mutex);

@@ -16,7 +16,9 @@ public final class ChatSessionTest {
         int applied, personaApplied;
         long personaThrough;
         String personaPayload;
+        String replyState;
         public long add(String role, String text) { roles.add(role); texts.add(text); return roles.size(); }
+        public long addReply(String text, String state) { replyState = state; return add("assistant", text); }
         public JSONObject context(String query) throws Exception {
             JSONArray turns = new JSONArray();
             for (int i = 0; i < roles.size(); ++i) turns.put(new JSONObject().put("id", i + 1)
@@ -46,6 +48,9 @@ public final class ChatSessionTest {
         public void memoryStatus(String error) { warning = error; }
     }
     public static void main(String[] arguments) throws Exception {
+        replySavesFeelingWithoutAnotherRequestOrVisibleMetadata();
+        incompleteReplyStateCannotCommitAReply();
+        missingReplyStateKeepsTheAnswerAndPreviousFeeling();
         replyRetrievalReceivesFullTextWithoutChangingExtraction();
         assistantFeelingAndOldEvidenceReachReplyAndExtraction();
         replyDoesNotWaitForMemory();
@@ -205,6 +210,53 @@ public final class ChatSessionTest {
         System.out.println("PASS: chat completion, cancellation, raw evidence, memory retry, query bounds, persona context and reflection retry");
     }
 
+    private static void replySavesFeelingWithoutAnotherRequestOrVisibleMetadata() throws Exception {
+        Store store = new Store();
+        Listener listener = new Listener() {
+            public void streaming(String text) {
+                assert "お疲れさま！\n".startsWith(text) : "Feeling metadata leaked into the reply";
+                super.streaming(text);
+            }
+            public void replySaved() {
+                assert store.replyState != null : "The feeling must be stored before the reply is announced";
+                super.replySaved();
+            }
+        };
+        int[] requests = {0};
+        String state = "{\"emotion\":\"嬉しい\",\"reason\":\"試合終了を聞いた\",\"event\":\"一緒に喜んだ会話\",\"scope\":\"shared\"}";
+        String generated = "お疲れさま！\n<assistant_state>\n" + state;
+        new ChatSession(store).reply("試合が終わったよ", true, (instructions, input, delta) -> {
+            assert instructions.contains("<assistant_state>") && instructions.contains("\"scope\"");
+            requests[0]++;
+            for (int i = 0; i < generated.length(); i++) delta.accept(generated.substring(i, i + 1));
+            return generated;
+        }, listener);
+        assert requests[0] == 1 && store.applied == 0;
+        assert store.texts.get(1).equals("お疲れさま！") && listener.stream.equals("お疲れさま！");
+        assert new JSONObject(store.replyState).getString("reason").equals("試合終了を聞いた");
+    }
+
+    private static void incompleteReplyStateCannotCommitAReply() throws Exception {
+        for (String answer : new String[]{"返答\n<assistant_state>\n{", "\n<assistant_state>\nnull"}) {
+            Store store = new Store(); Listener listener = new Listener();
+            try {
+                new ChatSession(store).reply("質問", true, (instructions, input, delta) -> answer, listener);
+                throw new AssertionError("An incomplete reply or state was committed");
+            } catch (IOException expected) {}
+            assert store.roles.size() == 1 && store.replyState == null && listener.replies == 0;
+        }
+    }
+
+    private static void missingReplyStateKeepsTheAnswerAndPreviousFeeling() throws Exception {
+        for (String answer : new String[]{"返答", "返答\n<assistant_sta", "![AIの画像](data:image/png;base64,aGVsbG8=)"}) {
+            Store store = new Store(); Listener listener = new Listener();
+            store.replyState = "previous";
+            new ChatSession(store).reply("質問", true, (instructions, input, delta) -> answer, listener);
+            assert store.roles.size() == 2 && store.replyState.equals("previous") && listener.replies == 1;
+            assert store.texts.get(1).equals(answer.startsWith("返答") ? "返答" : answer);
+        }
+    }
+
     private static void replyRetrievalReceivesFullTextWithoutChangingExtraction() throws Exception {
         final boolean[] retrieved = {false};
         String text = "長い質問です。" + new String(new char[100]).replace('\0', 'あ') + "最後の意味も検索する";
@@ -215,13 +267,13 @@ public final class ChatSessionTest {
                 return context(ChatSession.query(fullText));
             }
         };
-        new ChatSession(store).reply(text, true, (instructions, input, delta) -> "返答", new Listener());
+        new ChatSession(store).reply(text, true, (instructions, input, delta) -> reply("返答"), new Listener());
         assert retrieved[0] : "Replies must use the semantic retrieval hook with full input";
     }
 
     private static void replyAndOrganize(ChatSession session, String text, boolean persistUser,
                                          ChatSession.Transport backend, Listener listener) throws Exception {
-        session.reply(text, persistUser, backend, listener);
+        session.reply(text, persistUser, (instructions, input, delta) -> reply(backend.request(instructions, input, delta)), listener);
         try { session.processMemories(backend); listener.memoryStatus(null); }
         catch (Exception error) { listener.memoryStatus("記憶の整理は再試行待ちです。"); }
     }
@@ -231,7 +283,7 @@ public final class ChatSessionTest {
         new ChatSession(store).reply("次をすぐ送りたい", true, (instructions, input, delta) -> {
             assert !instructions.equals(ChatSession.EXTRACT) && !instructions.equals(ChatSession.REFLECT)
                     : "Saving a reply must not run background memory work inline";
-            return "続けて話せるよ";
+            return reply("続けて話せるよ");
         }, listener);
         assert listener.replies == 1 && store.texts.get(1).equals("続けて話せるよ");
         assert store.pending && store.applied == 0;
@@ -255,7 +307,7 @@ public final class ChatSessionTest {
             JSONObject reference = new JSONObject(input.getJSONObject(0).getString("content").split("\\n", 2)[1]);
             assert reference.getJSONObject("continuity").getJSONObject("assistant_state").getString("emotion").equals("ほっとして嬉しい");
             assert instructions.contains("assistant_state") && instructions.contains("恒久的");
-            return "うん、一緒に喜べたことが嬉しいよ";
+            return reply("うん、一緒に喜べたことが嬉しいよ");
         }, new Listener());
         final boolean[] extracted = {false};
         session.processMemories((instructions, input, delta) -> {
@@ -289,11 +341,13 @@ public final class ChatSessionTest {
             assert metadata.getLong("id") == 2 && metadata.getInt("input_index") == 2;
             delta.accept("うん。\n[発言");
             delta.accept("ID: 1385]\nL'd: 2026-11-14T03:51:11.093Z]\n続けよう。");
-            return generated;
+            return reply(generated);
         }, listener);
         assert listener.stream.equals("うん。\n続けよう。");
         assert store.texts.get(store.texts.size() - 1).equals("うん。\n続けよう。");
     }
+
+    private static String reply(String text) { return text == null ? null : text + "\n<assistant_state>\nnull"; }
 
     private static void currentPersonaReachesReplyAndExtraction() throws Exception {
         Store selected = new Store();

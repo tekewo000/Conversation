@@ -22,7 +22,7 @@ persona_state_is_always_available_outside_memory_search :: proc(t: ^testing.T) {
  defer delete(c)
  defer conversation_close()
  assert(conversation_init(c))
- testing.expect_value(t,scalar("PRAGMA user_version"),4)
+ testing.expect_value(t,scalar("PRAGMA user_version"),5)
  output:=string(conversation_context("unrelated"))
  testing.expect(t,strings.contains(output,`"persona":{"revision":0,"through_id":0,"fields":[]}`),"Every reply needs explicit current persona, even without an imported profile or matching memory.")
 }
@@ -80,7 +80,7 @@ persona_upgrade_preserves_version_two_history :: proc(t: ^testing.T) {
  assert(conversation_init(c))
  testing.expect_value(t,conversation_message_count(),12)
  testing.expect_value(t,conversation_memory_count(),1)
- testing.expect_value(t,scalar("PRAGMA user_version"),4)
+ testing.expect_value(t,scalar("PRAGMA user_version"),5)
  assert(strings.contains(string(conversation_pending_persona()),`"through_id":12`))
  assert(strings.contains(string(conversation_context("")),"静かに短く話す"))
 }

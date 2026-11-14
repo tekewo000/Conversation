@@ -37,6 +37,46 @@ class MainActivityComposeTest {
         }
     }
 
+    @Test fun replyImmediatelyUpdatesIconDetailsBeforeMemoryExtractionAndSurvivesRecreation() {
+        val people = PersonRegistry(context.filesDir)
+        previousPerson = people.active()?.id
+        val preferences = context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE)
+        previousTextSize = preferences.getInt("text_size", 16)
+        previousGap = preferences.getInt("message_gap", 12)
+        val person = people.stage(PersonDocument.named(name), null)
+        people.commit(person)
+        compose.activityRule.scenario.recreate()
+        val session = MainActivity::class.java.getDeclaredField("session").apply { isAccessible = true }
+            .get(compose.activity) as ChatSession
+        val refresh = MainActivity::class.java.getDeclaredMethod("refreshMessages").apply { isAccessible = true }
+        var requests = 0
+        session.reply("試合に勝ったよ", true, { _, _, delta ->
+            requests++
+            delta.accept("やったね！")
+            "やったね！\n<assistant_state>\n" +
+                """{"emotion":"嬉しい","reason":"勝ったと聞いた","event":"試合結果を一緒に喜んだ","scope":"shared"}"""
+        }, object : ChatSession.Listener {
+            override fun userSaved() {}
+            override fun streaming(text: String) { assertTrue(!text.contains("assistant_state")) }
+            override fun replySaved() { compose.activity.runOnUiThread { refresh.invoke(compose.activity) } }
+        })
+        assertEquals(1, requests)
+        val pending = MainActivity::class.java.getDeclaredMethod("nativePendingJob").apply { isAccessible = true }
+        assertTrue(org.json.JSONObject(pending.invoke(null) as String).getLong("id") > 0)
+        compose.waitUntil(10_000) {
+            compose.onAllNodes(androidx.compose.ui.test.hasText("嬉しい")).fetchSemanticsNodes().isNotEmpty()
+        }
+        openShortTermMemory()
+        compose.onNodeWithText("勝ったと聞いた", substring = true)
+            .assertTextContains("感情\n嬉しい\n\n理由\n勝ったと聞いた\n\n状況\n試合結果を一緒に喜んだ")
+        compose.activityRule.scenario.recreate()
+        compose.waitUntil(10_000) {
+            compose.onAllNodes(androidx.compose.ui.test.hasText("嬉しい")).fetchSemanticsNodes().isNotEmpty()
+        }
+        openShortTermMemory()
+        compose.onNodeWithText("勝ったと聞いた", substring = true).assertExists()
+    }
+
     @Test fun semanticRecallFlowsThroughTheRealReplyStoreWithOriginalEvidence() {
         val people = PersonRegistry(context.filesDir)
         previousPerson = people.active()?.id
@@ -69,7 +109,7 @@ class MainActivityComposeTest {
             val rain = (0 until selected.length()).map { selected.getJSONObject(it) }.first { it.getLong("id") == 1L }
             assertEquals(1L, rain.getJSONArray("source_ids").getLong(0))
             sawSource = true
-            "雨が強い日は家で過ごすんだね"
+            "雨が強い日は家で過ごすんだね\n<assistant_state>\nnull"
         }, object : ChatSession.Listener {
             override fun userSaved() {}
             override fun streaming(text: String) {}

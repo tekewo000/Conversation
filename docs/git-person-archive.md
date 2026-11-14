@@ -45,6 +45,8 @@ AndroidのJSON出力ではスラッシュ等のエスケープで容量が増え
 
 schema 4の `continuity_revisions`（`id`, `through_id`, `state`, `created_at`）を、記憶抽出の確定と同じトランザクションの差分へ含める。stateはJSON文字列で、出典付きの話題と体験を保持する。ZIPスナップショットにも `continuity_revisions-*.jsonl` とマニフェストの件数を追加する。既存のformat 2マニフェストへ加える項目であり、認証情報は含めない。
 
+schema 5では返答と同時に確定する `assistant_states`（`id`, `through_id`, `state`, `created_at`）を追加する。stateは感情・理由・状況・scope・出典IDのJSON文字列、またはJSONの `null` を表す文字列である。返答のmessagesと同じトランザクションへ含め、再生時も返答ID・ユーザー入力ID・状態の形式を検証する。ZIPには `assistant_states-*.jsonl`、format 2マニフェストには件数とchunksを追加する。旧形式の差分は引き続き再生でき、新しい返答状態がなければ旧continuityの気持ちを保持する。
+
 コアの差分復元は、会話原文とジョブが存在すること、処理位置が前進すること、出典の範囲と状態の形式・サイズを検証する。不正な現在地を含む差分は原子的に拒否する。新しいテーブルを知らない旧版のコアは、新しい差分を復元できない。既存の旧形式の差分はschema 4のコアで引き続き受け入れる。
 
 ## 0.5.3：人物アイコン

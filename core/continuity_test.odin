@@ -268,7 +268,7 @@ continuity_v3_upgrade_and_failed_update_preserve_previous_state :: proc(t: ^test
  assert(execute("DROP TABLE continuity_revisions; PRAGMA user_version=3"))
  conversation_close()
  assert(conversation_init(c))
- testing.expect_value(t,scalar("PRAGMA user_version"),4)
+ testing.expect_value(t,scalar("PRAGMA user_version"),5)
  testing.expect_value(t,conversation_message_count(),2)
  assert(conversation_apply_job(1,CONTINUITY_FIXTURE))
  assert(conversation_add_message("user","後からの話")>0)
