@@ -22,6 +22,7 @@ New-Item -ItemType Directory -Force -Path "$build/classes", "$build/dex" | Out-N
     (Join-Path $repo 'android/src/jp/tekewo/conversation/ConnectionStore.java') `
     (Join-Path $repo 'android/src/jp/tekewo/conversation/BackupArchive.java') `
     (Join-Path $repo 'android/src/jp/tekewo/conversation/PersonDocument.java') `
+    (Join-Path $repo 'android/src/jp/tekewo/conversation/PersonRegistry.java') `
     (Join-Path $repo 'android/src/jp/tekewo/conversation/GitArchiveFiles.java') `
     (Join-Path $repo 'android/device-tests/jp/tekewo/conversation/PersonDeviceProbe.java')
 if ($LASTEXITCODE -ne 0) { throw 'Person device probe compilation failed.' }

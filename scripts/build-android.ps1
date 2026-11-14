@@ -84,6 +84,9 @@ Run $tools.Gradle @('-p', "$repo/android", '--console=plain', "assemble$Configur
     "-PconversationJniDir=$build/package/lib", "-PconversationVersionCode=$versionCode",
     "-PconversationVersionName=$expectedVersion")
 $gradleApkName = if ($Configuration -eq 'Release') { 'Conversation-release-unsigned.apk' } else { 'Conversation-debug.apk' }
+if ($Configuration -eq 'Release') {
+    & "$PSScriptRoot/test-release-bindings.ps1" -Mapping "$build/gradle/outputs/mapping/release/mapping.txt"
+}
 $gradleApk = Join-Path $build "gradle/outputs/apk/$flavor/$gradleApkName"
 if (-not (Test-Path -LiteralPath $gradleApk)) { throw "Gradle did not produce the APK: $gradleApk" }
 Run "$($tools.BuildTools)/zipalign.exe" @('-f', '-P', '16', '4', $gradleApk, "$build/aligned.apk")
