@@ -143,14 +143,23 @@ relationship_carry_forward_obeys_combined_state_budget :: proc(t: ^testing.T) {
  defer delete(topic)
  threads:[6]struct {key,status,text:string,source_ids:[]i64}
  for key,i in ([6]string{"a","b","c","d","e","f"}) { threads[i]={key,"active",topic,[]i64{3}} }
- bytes,e3:=json.marshal(struct {memories:[0]i64,continuity:struct {threads:type_of(threads),episodes:[0]i64}}{{},{threads,{}}})
+ scene,_:=strings.repeat("s",180)
+ defer delete(scene)
+ episodes:[30]struct {key,text,emotion,scene,scope:string,source_ids:[]i64}
+ keys:[30]string
+ defer { for key in keys do delete(key) }
+ for &episode,i in episodes {
+  keys[i]=fmt.aprintf("scene-%d",i)
+  episode={keys[i],topic,"",scene,"shared",[]i64{3}}
+ }
+ bytes,e3:=json.marshal(struct {memories:[0]i64,continuity:struct {threads:type_of(threads),episodes:type_of(episodes)}}{{},{threads,episodes}})
  assert(e3==nil)
  defer delete(bytes)
  testing.expect(t,len(bytes)<CONTINUITY_MAX_BYTES)
  payload:=strings.clone_to_cstring(string(bytes))
  defer delete(payload)
- testing.expect(t,!conversation_apply_job(2,payload),"Retaining relationship must not exceed the combined 12 KiB limit.")
- testing.expect(t,strings.contains(string(conversation_error()),"12 KiB"))
+ testing.expect(t,!conversation_apply_job(2,payload),"Retaining relationship must not exceed the combined 64 KiB limit.")
+ testing.expect(t,strings.contains(string(conversation_error()),"64 KiB"))
  testing.expect_value(t,scalar("SELECT count(*) FROM continuity_revisions"),1)
  testing.expect(t,strings.contains(string(conversation_pending_job()),`"id":2`))
 }

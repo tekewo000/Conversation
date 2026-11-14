@@ -11,6 +11,148 @@ CONTINUITY_FIXTURE :: `{"memories":[],"continuity":{"threads":[{"key":"trip","st
 ASSISTANT_STATE_FIXTURE :: `{"memories":[],"continuity":{"threads":[],"episodes":[],"assistant_state":{"emotion":"ほっとして嬉しい","reason":"ユーザーから試合が無事に終わったと聞いたため","event":"試合終了の報告を受けて一緒に喜んだ会話","scope":"shared","source_ids":[1,2]}}}`
 
 @(test)
+episodes_remain_searchable_after_scene_changes_restart_and_backup :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-scenes-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ save_scene :: proc(key,text,scene,scope:string) {
+  content:=strings.clone_to_cstring(text)
+  defer delete(content)
+  source:=conversation_add_message("user",content)
+  assert(source>0)
+  assert(conversation_add_message("assistant","その場面の話を続ける。")>0)
+  payload,e:=json.marshal(struct {
+   memories:[]json.Value,
+   continuity:struct {threads:[]json.Value,episodes:[]struct {key,text,emotion,scene,scope:string,source_ids:[]i64}},
+  }{{},{{},{{key,text,"ユーザーは安心したと話した。",scene,scope,[]i64{i64(source)}}}}})
+  assert(e==nil)
+  defer delete(payload)
+  encoded:=strings.clone_to_cstring(string(payload))
+  defer delete(encoded)
+  assert(conversation_apply_job(scalar("SELECT max(id) FROM jobs"),encoded),string(conversation_error()))
+ }
+ save_scene("home-day1-trip","家で旅行相談を始めた。","初日、家、旅行相談","real")
+ testing.expect_value(t,conversation_memory_count(),1)
+ save_scene("home-day1-trip","家で旅行相談を始めた。","初日、家、旅行相談","real")
+ testing.expect(t,conversation_memory_count()==1,"Unchanged scenes must not duplicate memories.")
+ save_scene("home-day1-trip","家で旅行相談をして予算を決めた。","初日、家、旅行相談","real")
+ testing.expect_value(t,conversation_memory_count(),2)
+ testing.expect(t,scalar("SELECT count(*) FROM memory_current")==1,"The continuation must revise the same scene.")
+ save_scene("cafe-day1","カフェでケーキを食べた。","初日、カフェ、お茶","real")
+ save_scene("home-day2-trip","翌日も家で旅行相談をした。","翌日、家、旅行相談","real")
+ save_scene("home-day2-clean","旅行相談を終えて家の掃除を始めた。","翌日、家、掃除","real")
+ save_scene("home-day1-trip","劇の中で城への旅を相談した。","初日、城、旅の相談","fiction")
+ testing.expect(t,scalar("SELECT count(*) FROM memory_current")==5,"Place, time, activity and scope must stay distinct.")
+ for i in 0..<8 {
+  key:=fmt.aprintf("later-%d",i)
+  defer delete(key)
+  save_scene(key,"別の場所で別の用事をした。","別の日、別の場所、別の用事","real")
+ }
+ for _ in 0..<35 {
+  assert(conversation_add_message("user","無関係な雑談")>0)
+  assert(conversation_add_message("assistant","話を続ける")>0)
+  assert(conversation_apply_job(scalar("SELECT max(id) FROM jobs"),`{"memories":[],"continuity":{"threads":[],"episodes":[]}}`))
+ }
+ conversation_close()
+ assert(conversation_init(c))
+ output:=string(conversation_context("旅行相談"))
+ testing.expect(t,strings.contains(output,"家で旅行相談をして予算を決めた。"),"An evicted scene must be searchable beyond recent messages.")
+ testing.expect(t,strings.contains(output,"初日、家、旅行相談"))
+ testing.expect(t,strings.contains(output,`"source_ids":[5]`),"Scene memories must retain their actual original evidence.")
+ testing.expect(t,strings.contains(string(conversation_embedding_batch(0)),"初日、家、旅行相談"),"Scenes must also reach semantic indexing.")
+ delta:=strings.clone_to_cstring(string(conversation_archive_delta(0)))
+ defer delete(delta)
+ conversation_close()
+ target,e2:=os.make_directory_temp("","conversation-scenes-replay-*",context.allocator)
+ assert(e2==nil)
+ defer delete(target)
+ defer os.remove_all(target)
+ destination:=strings.clone_to_cstring(target)
+ defer delete(destination)
+ assert(conversation_init(destination))
+ assert(conversation_apply_archive(delta),string(conversation_error()))
+ assert(conversation_apply_archive(delta),string(conversation_error()))
+ testing.expect_value(t,conversation_memory_count(),14)
+ testing.expect_value(t,scalar("SELECT count(*) FROM memory_current"),13)
+ testing.expect(t,strings.contains(string(conversation_context("旅行相談")),"家で旅行相談をして予算を決めた。"))
+}
+
+@(test)
+episodes_accept_thirty_with_content_and_reject_thirty_one_atomically :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-thirty-scenes-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ assert(conversation_add_message("user","三十の場面について話した")>0)
+ assert(conversation_add_message("assistant","それぞれ別の場面として覚える")>0)
+ text,_:=strings.repeat("a",1536)
+ detail,_:=strings.repeat("b",256)
+ fact,_:=strings.repeat("c",4096)
+ defer delete(text)
+ defer delete(detail)
+ defer delete(fact)
+ Episode :: struct {key,text,emotion,scene,scope:string,source_ids:[]i64}
+ episodes:[dynamic]Episode
+ defer delete(episodes)
+ keys:[30]string
+ defer { for key in keys do delete(key) }
+ for i in 0..<30 {
+  keys[i]=fmt.aprintf("scene-%d",i)
+  append(&episodes,Episode{keys[i],text,detail,detail,"shared",[]i64{1}})
+ }
+ for count in 30..=31 {
+  bytes,e:=json.marshal(struct {
+   memories:[]struct {kind,actor,subject,key,text,scope,certainty:string,source_ids:[]i64},
+   continuity:struct {threads:[]json.Value,episodes:[]Episode},
+  }{{{"fact","user","user","detail",fact,"real","explicit",[]i64{1}}},{{},episodes[:]}})
+  assert(e==nil)
+  defer delete(bytes)
+  testing.expect(t,len(bytes)>65536,"Thirty detailed scenes and extracted facts must pass the transport boundary together.")
+  payload:=strings.clone_to_cstring(string(bytes))
+  defer delete(payload)
+  if count==30 {
+   assert(conversation_apply_job(1,payload),string(conversation_error()))
+   testing.expect_value(t,conversation_memory_count(),31)
+   assert(conversation_add_message("user","さらに場面を追加")>0)
+   assert(conversation_add_message("assistant","確認する")>0)
+   append(&episodes,Episode{"scene-31","別の場面","","","shared",[]i64{3}})
+  } else {
+   testing.expect(t,!conversation_apply_job(2,payload))
+   testing.expect(t,strings.contains(string(conversation_error()),"thirty episodes"))
+   testing.expect_value(t,scalar("SELECT count(*) FROM continuity_revisions"),1)
+   testing.expect_value(t,conversation_memory_count(),31)
+   testing.expect(t,strings.contains(string(conversation_pending_job()),`"id":2`))
+  }
+ }
+ delta:=strings.clone_to_cstring(string(conversation_archive_delta(0)))
+ defer delete(delta)
+ conversation_close()
+ target,e2:=os.make_directory_temp("","conversation-thirty-scenes-replay-*",context.allocator)
+ assert(e2==nil)
+ defer delete(target)
+ defer os.remove_all(target)
+ destination:=strings.clone_to_cstring(target)
+ defer delete(destination)
+ assert(conversation_init(destination))
+ assert(conversation_apply_archive(delta),string(conversation_error()))
+ testing.expect_value(t,conversation_memory_count(),31)
+ root,ok:=parse_json(transmute([]byte)string(conversation_context("場面")))
+ assert(ok)
+ defer json.destroy_value(root)
+ state:=root.(json.Object)["continuity"].(json.Object)
+ testing.expect_value(t,len(state["episodes"].(json.Array)),30)
+}
+
+@(test)
 assistant_state_preserves_feeling_cause_and_originals_across_restart_and_archive :: proc(t: ^testing.T) {
  dir,e:=os.make_directory_temp("","conversation-feeling-*",context.allocator)
  assert(e==nil)
@@ -122,17 +264,26 @@ assistant_state_carry_forward_obeys_combined_byte_budget :: proc(t: ^testing.T) 
  defer delete(topic)
  threads:[6]struct {key,status,text:string,source_ids:[]i64}
  for key,i in ([6]string{"a","b","c","d","e","f"}) { threads[i]={key,"active",topic,[]i64{3}} }
+ scene,_:=strings.repeat("s",180)
+ defer delete(scene)
+ episodes:[30]struct {key,text,emotion,scene,scope:string,source_ids:[]i64}
+ keys:[30]string
+ defer { for key in keys do delete(key) }
+ for &episode,i in episodes {
+  keys[i]=fmt.aprintf("scene-%d",i)
+  episode={keys[i],topic,"",scene,"shared",[]i64{3}}
+ }
  bytes,e4:=json.marshal(struct {
   memories:[0]i64,
-  continuity:struct {threads: type_of(threads),episodes:[]struct {key,text,emotion,scene,scope:string,source_ids:[]i64}},
- }{{},{threads,{{"event",topic,"","","shared",[]i64{3}}}}})
+  continuity:struct {threads: type_of(threads),episodes:type_of(episodes)},
+ }{{},{threads,episodes}})
  assert(e4==nil)
  defer delete(bytes)
  testing.expect(t,len(bytes)<CONTINUITY_MAX_BYTES,"The new state fits alone but must fail after retaining the current feeling.")
  next:=strings.clone_to_cstring(string(bytes))
  defer delete(next)
  testing.expect(t,!conversation_apply_job(2,next))
- testing.expect(t,strings.contains(string(conversation_error()),"12 KiB"))
+ testing.expect(t,strings.contains(string(conversation_error()),"64 KiB"))
  testing.expect_value(t,scalar("SELECT count(*) FROM continuity_revisions"),1)
  testing.expect(t,strings.contains(string(conversation_pending_job()),`"id":2`))
 }

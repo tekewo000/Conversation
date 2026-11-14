@@ -33,9 +33,9 @@ class MainActivityComposeTest {
     private var previousGap = 12
 
     private fun openShortTermMemory() {
-        compose.onNodeWithContentDescription("${name}の短期記憶を見る").performClick()
+        compose.onAllNodes(androidx.compose.ui.test.hasContentDescription("${name}の記憶を見る"))[0].performClick()
         compose.waitUntil(10_000) {
-            compose.onAllNodes(androidx.compose.ui.test.hasText("短期記憶")).fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodes(androidx.compose.ui.test.hasText("記憶")).fetchSemanticsNodes().isNotEmpty()
         }
     }
 
@@ -243,7 +243,15 @@ class MainActivityComposeTest {
             add.invoke(null, "assistant".toByteArray(), "ほっとした。一緒に喜べて嬉しい".toByteArray())
             val apply = MainActivity::class.java.getDeclaredMethod("nativeApplyJob", java.lang.Long.TYPE, ByteArray::class.java)
             apply.isAccessible = true
-            assertEquals("", apply.invoke(null, 1L, """{"memories":[],"continuity":{"threads":[],"episodes":[],"assistant_state":{"emotion":"ほっとして嬉しい","reason":"試合終了の報告","event":"一緒に喜んだ会話","scope":"shared","source_ids":[1,2]}}}""".toByteArray()))
+            val episodes = org.json.JSONArray()
+            for (i in 1..30) episodes.put(org.json.JSONObject().put("key", "scene-$i")
+                .put("text", "場面${i}の出来事").put("scene", "${i}日目のカフェ")
+                .put("emotion", "そのときは安心した").put("scope", "shared")
+                .put("source_ids", org.json.JSONArray().put(1).put(2)))
+            val state = org.json.JSONObject("""{"threads":[],"episodes":[],"assistant_state":{"emotion":"ほっとして嬉しい","reason":"試合終了の報告","event":"一緒に喜んだ会話","scope":"shared","source_ids":[1,2]}}""")
+                .put("episodes", episodes)
+            val payload = org.json.JSONObject().put("memories", org.json.JSONArray()).put("continuity", state)
+            assertEquals("", apply.invoke(null, 1L, payload.toString().toByteArray()))
         }
         compose.activityRule.scenario.recreate()
         compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("ほっとして嬉しい")).fetchSemanticsNodes().isNotEmpty() }
@@ -251,11 +259,59 @@ class MainActivityComposeTest {
         compose.onNodeWithText("試合終了の報告").assertDoesNotExist()
         compose.onNodeWithText("一緒に喜んだ会話").assertDoesNotExist()
         openShortTermMemory()
-        compose.onNodeWithText("短期記憶").assertExists()
+        compose.onNodeWithText("記憶").assertExists()
         compose.onNodeWithText("試合終了の報告", substring = true)
             .assertTextContains("感情\nほっとして嬉しい\n\n理由\n試合終了の報告\n\n状況\n一緒に喜んだ会話")
+        InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot().let { image ->
+            java.io.File(context.cacheDir, "memory-overview.png").outputStream().use {
+                image.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+            }
+            image.recycle()
+        }
+        compose.onNodeWithText("短期記憶（直近30往復）").performClick()
+        compose.onNodeWithText("短期記憶").assertExists()
+        compose.onNodeWithText("試合が終わったよ", substring = true)
+            .assertTextContains("あなた\n試合が終わったよ", substring = true)
+            .assertTextContains("${name}\nほっとした。一緒に喜べて嬉しい", substring = true)
+        compose.onNodeWithContentDescription("閉じる").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("記憶")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("中期記憶（30件）").performClick()
+        compose.onNodeWithText("中期記憶").assertExists()
+        val scenes = compose.onNodeWithText("30日目のカフェ", substring = true)
+            .assertTextContains("場面30の出来事", substring = true).assertTextContains("そのときは安心した", substring = true)
+            .assertTextContains("1日目のカフェ", substring = true).assertTextContains("場面1の出来事", substring = true)
+            .assertTextContains("会話内の体験", substring = true)
+        assertTrue(scenes.fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text]
+            .joinToString().indexOf("30日目のカフェ") < scenes.fetchSemanticsNode()
+            .config[androidx.compose.ui.semantics.SemanticsProperties.Text].joinToString().indexOf("1日目のカフェ"))
+        InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot().let { image ->
+            java.io.File(context.cacheDir, "memory-scenes.png").outputStream().use {
+                image.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+            }
+            image.recycle()
+        }
+        compose.onNodeWithContentDescription("閉じる").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("記憶")).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithContentDescription("閉じる").performClick()
         compose.onNodeWithText("試合終了の報告", substring = true).assertDoesNotExist()
+        val add = MainActivity::class.java.getDeclaredMethod("nativeAddMessage", ByteArray::class.java, ByteArray::class.java)
+            .apply { isAccessible = true }
+        for (i in 0..31) {
+            add.invoke(null, "user".toByteArray(), "recent-user-$i".toByteArray())
+            add.invoke(null, "assistant".toByteArray(), "recent-reply-$i".toByteArray())
+        }
+        compose.activityRule.scenario.recreate()
+        compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("ほっとして嬉しい")).fetchSemanticsNodes().isNotEmpty() }
+        openShortTermMemory()
+        compose.onNodeWithText("短期記憶（直近30往復）").performClick()
+        val recent = compose.onNodeWithText("recent-user-31", substring = true)
+        assertTrue(recent.fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text]
+            .joinToString().endsWith("recent-reply-1"))
+        compose.onNodeWithText("recent-user-0\n", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("試合が終わったよ", substring = true).assertDoesNotExist()
+        compose.onNodeWithContentDescription("閉じる").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("記憶")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithContentDescription("閉じる").performClick()
         openShortTermMemory()
         compose.onNodeWithText("人物アイコンを設定").performClick()
         compose.onNodeWithText("写真・画像から選ぶ").assertExists()
@@ -278,11 +334,13 @@ class MainActivityComposeTest {
         add.invoke(null, "assistant".toByteArray(), "こんにちは".toByteArray())
         compose.activityRule.scenario.recreate()
         compose.waitUntil(10_000) {
-            compose.onAllNodes(androidx.compose.ui.test.hasContentDescription("${name}の短期記憶を見る"))
+            compose.onAllNodes(androidx.compose.ui.test.hasContentDescription("${name}の記憶を見る"))
                 .fetchSemanticsNodes().isNotEmpty()
         }
         openShortTermMemory()
         compose.onNodeWithText("感情\n未記録\n\n理由\n未記録\n\n状況\n未記録").assertExists()
+        compose.onNodeWithText("中期記憶（0件）").performClick()
+        compose.onNodeWithText("中期記憶はまだありません。", substring = true).assertExists()
     }
 
     @Test fun namedPersonDraftAndDisplaySettingsSurviveRecreation() {

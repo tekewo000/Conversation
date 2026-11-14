@@ -183,7 +183,7 @@ archive_row_valid :: proc(table: ^Archive_Table, row: json.Object) -> bool {
   case "raw_markdown":maximum=PERSON_SOURCE_MAX_BYTES
   case "section":maximum=512
   case "changes":maximum=32768
-  case "state":maximum=CONTINUITY_MAX_BYTES
+  case "state":maximum=ASSISTANT_STATE_MAX_BYTES if table.name=="assistant_states" else CONTINUITY_MAX_BYTES
   }
   if !ok || len(text)>maximum || !utf8.valid_string(text) || strings.contains_rune(text,0) || (column!="valid_from" && len(strings.trim_space(text))==0) do return false
   if (column=="created_at" || column=="occurred_at" || (column=="valid_from" && text!="")) && !valid_date(text) do return false

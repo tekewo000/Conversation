@@ -394,7 +394,7 @@ valid_date :: proc(text: string) -> bool {
 conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
  context = runtime.default_context()
  if !ready do return fail("History is not open.")
- if payload == nil || len(string(payload)) > 65536 do return fail("Extraction JSON is too large.")
+ if payload == nil || len(string(payload)) > 131072 do return fail("Extraction JSON is too large.")
  root, parsed := parse_json(transmute([]byte)string(payload))
  if !parsed do return false
  defer json.destroy_value(root)

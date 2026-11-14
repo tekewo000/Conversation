@@ -1,9 +1,10 @@
 package conversation
 
 import "core:encoding/json"
+import "core:fmt"
 import "base:runtime"
 
-CONTINUITY_MAX_BYTES :: 12288
+CONTINUITY_MAX_BYTES :: 65536
 CONTINUITY_SCHEMA :: `
 CREATE TABLE IF NOT EXISTS continuity_revisions(id INTEGER PRIMARY KEY,through_id INTEGER NOT NULL UNIQUE REFERENCES messages(id),state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state)='object'),created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')));
 CREATE TRIGGER IF NOT EXISTS continuity_no_update BEFORE UPDATE ON continuity_revisions BEGIN SELECT RAISE(ABORT,'immutable'); END;
@@ -28,7 +29,7 @@ conversation_assistant_emotion :: proc "c" () -> cstring {
 }
 
 continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
- if len(state_text)>CONTINUITY_MAX_BYTES do return fail("Conversation state exceeds 12 KiB.")
+ if len(state_text)>CONTINUITY_MAX_BYTES do return fail("Conversation state exceeds 64 KiB.")
  root,parsed:=parse_json(transmute([]byte)state_text)
  if !parsed do return false
  defer json.destroy_value(root)
@@ -37,7 +38,7 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
  for key in obj { if key!="threads" && key!="episodes" && key!="assistant_state" && key!="relationship" do return fail("Unknown conversation state field.") }
  threads,threads_ok:=obj["threads"].(json.Array)
  episodes,episodes_ok:=obj["episodes"].(json.Array)
- if !threads_ok || !episodes_ok || len(threads)>6 || len(episodes)>6 do return fail("Expected at most six threads and six episodes.")
+ if !threads_ok || !episodes_ok || len(threads)>6 || len(episodes)>30 do return fail("Expected at most six threads and thirty episodes.")
  boundary:=prepare(`SELECT first_id FROM jobs WHERE end_id=?1 AND end_id>(SELECT coalesce(max(through_id),0) FROM continuity_revisions)`)
  if boundary==nil do return false
  valid:=bind_int(boundary,1,through_id) && sqlite3_step(boundary)==100
@@ -135,5 +136,42 @@ continuity_save :: proc(through_id: i64, value: json.Value) -> bool {
  if stmt==nil do return false
  saved:=bind_int(stmt,1,through_id) && bind_text(stmt,2,string(merged)) && sqlite3_step(stmt)==101
  sqlite3_finalize(stmt)
- return saved && archive_capture("continuity_revisions",sqlite3_last_insert_rowid(db))
+ if !saved || !archive_capture("continuity_revisions",sqlite3_last_insert_rowid(db)) do return false
+ // Searchable event revisions preserve scenes after they leave the recent window.
+ for item in value.(json.Object)["episodes"].(json.Array) {
+  if !continuity_index_episode(through_id,item.(json.Object)) do return false
+ }
+ return true
+}
+
+continuity_index_episode :: proc(through_id:i64, episode:json.Object) -> bool {
+ key:=fmt.aprintf("episode:%s",string(episode["key"].(json.String)))
+ defer delete(key)
+ text:=fmt.aprintf("場面: %s\n出来事: %s\n感情: %s",string(episode["scene"].(json.String)),string(episode["text"].(json.String)),string(episode["emotion"].(json.String)))
+ defer delete(text)
+ scope:=string(episode["scope"].(json.String))
+ previous:i64
+ current:=prepare("SELECT m.id,m.text FROM memories m JOIN memory_current c ON c.id=m.id WHERE m.kind='event' AND m.subject='episode' AND m.actor='conversation' AND m.key=?1 AND m.scope=?2 ORDER BY m.id DESC LIMIT 1")
+ if current==nil do return false
+ if !bind_text(current,1,key) || !bind_text(current,2,scope) { sqlite3_finalize(current); return false }
+ step:=sqlite3_step(current)
+ unchanged:=false
+ if step==100 {
+  previous=sqlite3_column_int64(current,0)
+  unchanged=string(sqlite3_column_text(current,1))==text
+ }
+ sqlite3_finalize(current)
+ if step!=100 && step!=101 do return fail("Could not read the previous scene memory.")
+ if unchanged do return true
+ stmt:=prepare("INSERT INTO memories(job_id,kind,actor,subject,key,text,scope,certainty,supersedes_id,valid_from) VALUES((SELECT id FROM jobs WHERE end_id=?1),'event','conversation','episode',?2,?3,?4,'explicit',nullif(?5,0),'')")
+ if stmt==nil do return false
+ saved:=bind_int(stmt,1,through_id) && bind_text(stmt,2,key) && bind_text(stmt,3,text) && bind_text(stmt,4,scope) && bind_int(stmt,5,previous) && sqlite3_step(stmt)==101
+ sqlite3_finalize(stmt)
+ if !saved do return fail("Could not save the scene memory.")
+ id:=sqlite3_last_insert_rowid(db)
+ if !archive_capture("memories",id) do return false
+ for source in episode["source_ids"].(json.Array) {
+  if !insert_source(id,i64(source.(json.Integer))) do return false
+ }
+ return true
 }

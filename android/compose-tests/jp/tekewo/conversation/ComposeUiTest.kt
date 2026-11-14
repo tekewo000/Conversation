@@ -58,7 +58,7 @@ class ComposeUiTest {
             ui.setMessages(page("穏やか", false))
             ui.beginReply()
         }
-        val icon = compose.onNodeWithContentDescription("小春の短期記憶を見る").fetchSemanticsNode().id
+        val icon = compose.onNodeWithContentDescription("小春の記憶を見る").fetchSemanticsNode().id
         compose.onNodeWithContentDescription("返答を入力中").assertIsDisplayed()
         compose.runOnUiThread { ui.streaming = "返答です" }
         compose.waitUntil(5_000) { compose.onAllNodes(hasText("返答です")).fetchSemanticsNodes().isNotEmpty() }
@@ -67,7 +67,7 @@ class ComposeUiTest {
         compose.runOnUiThread { ui.setMessages(page("嬉しい", true), true) }
         compose.onNodeWithText("返答です").assertIsDisplayed()
         compose.runOnIdle { assertEquals("", ui.streaming) }
-        assertEquals(icon, compose.onNodeWithContentDescription("小春の短期記憶を見る").fetchSemanticsNode().id)
+        assertEquals(icon, compose.onNodeWithContentDescription("小春の記憶を見る").fetchSemanticsNode().id)
         assertEquals(body, compose.onNodeWithText("返答です").fetchSemanticsNode().id)
         compose.runOnUiThread { ui.setMessages(page("ほっとした", true)) }
         compose.onNodeWithText("ほっとした").assertIsDisplayed()
@@ -170,12 +170,12 @@ class ComposeUiTest {
         compose.onNodeWithText("ほっとして嬉しい").assertIsDisplayed()
         compose.onAllNodes(hasText("ほっとして嬉しい")).fetchSemanticsNodes().let { assertEquals(1, it.size) }
         compose.onNodeWithText("一緒に喜べて嬉しいよ").assertIsDisplayed()
-        compose.onAllNodes(hasContentDescription("小春の短期記憶を見る")).fetchSemanticsNodes().let { assertEquals(2, it.size) }
+        compose.onAllNodes(hasContentDescription("小春の記憶を見る")).fetchSemanticsNodes().let { assertEquals(2, it.size) }
         InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(
             "screencap -p /data/local/tmp/conversation-avatar-chat.png").use {
             java.io.FileInputStream(it.fileDescriptor).readBytes()
         }
-        compose.onAllNodes(hasContentDescription("小春の短期記憶を見る"))[0].performClick()
+        compose.onAllNodes(hasContentDescription("小春の記憶を見る"))[0].performClick()
         compose.runOnIdle { assertEquals(1, opened) }
         compose.runOnUiThread {
             ui.setMessages("""{"first":0,"total":1,"assistant_emotion":"","messages":[{"id":1,"role":"assistant","text":"続けよう"}]}""")

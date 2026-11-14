@@ -2,6 +2,7 @@ package conversation
 
 import "core:encoding/json"
 
+ASSISTANT_STATE_MAX_BYTES :: 12288
 ASSISTANT_STATE_SCHEMA :: `
 CREATE TABLE IF NOT EXISTS assistant_states(id INTEGER PRIMARY KEY,through_id INTEGER NOT NULL UNIQUE REFERENCES messages(id),state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state) IN ('object','null')),created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')));
 CREATE TRIGGER IF NOT EXISTS assistant_states_no_update BEFORE UPDATE ON assistant_states BEGIN SELECT RAISE(ABORT,'immutable'); END;
@@ -21,7 +22,7 @@ assistant_state_fields_valid :: proc(entry: json.Object, with_sources: bool) -> 
 }
 
 assistant_state_valid :: proc(through_id: i64, encoded: string) -> bool {
- if len(encoded)>CONTINUITY_MAX_BYTES do return fail("Assistant state is too large.")
+ if len(encoded)>ASSISTANT_STATE_MAX_BYTES do return fail("Assistant state is too large.")
  root,parsed:=parse_json(transmute([]byte)encoded)
  if !parsed do return false
  defer json.destroy_value(root)
@@ -45,7 +46,7 @@ assistant_state_valid :: proc(through_id: i64, encoded: string) -> bool {
 
 assistant_state_save :: proc(through_id: i64, payload: string) -> bool {
  // Leave room for the two source IDs added during save.
- if len(payload)>CONTINUITY_MAX_BYTES-128 do return fail("Assistant state is too large.")
+ if len(payload)>ASSISTANT_STATE_MAX_BYTES-128 do return fail("Assistant state is too large.")
  root,parsed:=parse_json(transmute([]byte)payload)
  if !parsed do return false
  defer json.destroy_value(root)

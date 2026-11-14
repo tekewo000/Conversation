@@ -121,7 +121,7 @@ public final class MainActivity extends ComponentActivity {
         if (activePerson != null) compose.setAttachments(getPreferences(MODE_PRIVATE).getString("attachments_" + activePerson.id, ""));
         if (activePerson != null) compose.setGenerateImages(getPreferences(MODE_PRIVATE).getBoolean("image_mode_" + activePerson.id, false));
         compose.setPersonName(activePerson == null ? "" : activePerson.name);
-        compose.setOnIcon(this::showShortTermMemory);
+        compose.setOnIcon(this::showMemory);
         refreshPersonIcon();
         connection = new ChatGptConnection(this);
         imageCredentials = new ConnectionStore(this, "image-api");
@@ -641,32 +641,76 @@ public final class MainActivity extends ComponentActivity {
         });
     }
 
-    private void showShortTermMemory() {
+    private void showMemory() {
         final PersonRegistry.Person person = activePerson;
         if (person == null || changingPerson) return;
         reader.execute(() -> {
             try {
-                final JSONObject state;
+                final JSONObject snapshot;
                 synchronized (storeGate) {
                     requireCurrentPerson();
                     if (!person.id.equals(activePerson.id)) return;
-                    String snapshot = nativeContext(bytes(""));
-                    if (snapshot.isEmpty()) throw new java.io.IOException(nativeLastError());
-                    JSONObject continuity = new JSONObject(snapshot).optJSONObject("continuity");
-                    JSONObject current = continuity == null ? null : continuity.optJSONObject("assistant_state");
-                    state = current == null ? new JSONObject() : current;
+                    String result = nativeContext(bytes(""));
+                    if (result.isEmpty()) throw new java.io.IOException(nativeLastError());
+                    snapshot = new JSONObject(result);
                 }
                 ui(() -> {
                     if (changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
-                    ComposeUi.Panel panel = new ComposeUi.Panel("短期記憶"); panel.sheet = true;
+                    JSONObject continuity = snapshot.optJSONObject("continuity");
+                    JSONObject current = continuity == null ? null : continuity.optJSONObject("assistant_state");
+                    JSONObject state = current == null ? new JSONObject() : current;
+                    org.json.JSONArray episodes = continuity == null ? null : continuity.optJSONArray("episodes");
+                    ComposeUi.Panel panel = new ComposeUi.Panel("記憶"); panel.sheet = true;
                     panel.message = "感情\n" + state.optString("emotion", "未記録")
                             + "\n\n理由\n" + state.optString("reason", "未記録")
                             + "\n\n状況\n" + state.optString("event", "未記録");
+                    panel.rows.add(new ComposeUi.Row("短期記憶（直近30往復）", () -> showMemoryHistory(person, snapshot, false)));
+                    panel.rows.add(new ComposeUi.Row("中期記憶（" + (episodes == null ? 0 : episodes.length()) + "件）",
+                            () -> showMemoryHistory(person, snapshot, true)));
                     panel.rows.add(new ComposeUi.Row("人物アイコンを設定", this::showPersonIcon, 2));
                     compose.show(panel);
                 });
             } catch (Exception error) { ui(() -> showError(safeError(error))); }
         });
+    }
+
+    private void showMemoryHistory(PersonRegistry.Person person, JSONObject snapshot, boolean middleTerm) {
+        if (changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
+        ComposeUi.Panel panel = new ComposeUi.Panel(middleTerm ? "中期記憶" : "短期記憶"); panel.sheet = true;
+        JSONObject continuity = snapshot.optJSONObject("continuity");
+        org.json.JSONArray entries = middleTerm
+                ? (continuity == null ? null : continuity.optJSONArray("episodes")) : snapshot.optJSONArray("messages");
+        StringBuilder text = new StringBuilder();
+        if (entries == null || entries.length() == 0) {
+            text.append(middleTerm ? "中期記憶はまだありません。会話を整理すると、場面ごとの記憶がここに表示されます。"
+                    : "短期記憶の会話はまだありません。");
+        } else {
+            text.append(middleTerm ? "直近30件までの場面を、新しいものから表示します。"
+                    : "直近30往復（最大61発言）を、新しいものから表示します。");
+            int first = Math.max(0, entries.length() - (middleTerm ? 30 : 61));
+            for (int i = entries.length() - 1; i >= first; i--) {
+                JSONObject entry = entries.optJSONObject(i);
+                if (entry == null) continue;
+                text.append("\n\n");
+                if (middleTerm) {
+                    String scene = entry.optString("scene");
+                    text.append(scene.isEmpty() ? "場面の情報は未記録" : scene).append("\n").append(entry.optString("text"));
+                    String emotion = entry.optString("emotion");
+                    if (!emotion.isEmpty()) text.append("\n気持ち：").append(emotion);
+                    String scope = entry.optString("scope");
+                    text.append("\n").append(scope.equals("fiction") ? "創作の場面" : scope.equals("real") ? "現実の出来事" : "会話内の体験");
+                } else {
+                    boolean user = entry.optString("role").equals("user");
+                    text.append(user ? "あなた" : person.name).append("\n");
+                    String content = entry.optString("content");
+                    text.append(user ? content : ReplyText.visible(content, true));
+                    if (entry.optBoolean("truncated")) text.append("\n（長文のため一部を表示）");
+                }
+            }
+        }
+        panel.message = text.toString();
+        panel.onDismiss = this::showMemory;
+        compose.show(panel);
     }
 
     private void showPersonIcon() {

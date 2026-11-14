@@ -48,6 +48,7 @@ public final class ChatSessionTest {
         public void memoryStatus(String error) { warning = error; }
     }
     public static void main(String[] arguments) throws Exception {
+        memoryPayloadAcceptsThirtyDetailedScenesAndRejectsOversizedResults();
         cancelledRetrievalDoesNotStartTransport();
         replySavesFeelingWithoutAnotherRequestOrVisibleMetadata();
         incompleteReplyStateCannotCommitAReply();
@@ -211,6 +212,28 @@ public final class ChatSessionTest {
         cancelledReflectionDoesNotCommit();
         rejectedReflectionStaysPending();
         System.out.println("PASS: chat completion, cancellation, raw evidence, memory retry, query bounds, persona context and reflection retry");
+    }
+
+    static void memoryPayloadAcceptsThirtyDetailedScenesAndRejectsOversizedResults() throws Exception {
+        StringBuilder text = new StringBuilder();
+        for (int i = 0; i < 4096; i++) text.append('a');
+        JSONArray episodes = new JSONArray();
+        for (int i = 0; i < 30; i++) episodes.put(new JSONObject().put("key", "scene-" + i)
+                .put("text", text.substring(0, 1536)).put("emotion", text.substring(0, 256))
+                .put("scene", text.substring(0, 256)).put("scope", "shared").put("source_ids", new JSONArray().put(1)));
+        String payload = new JSONObject().put("memories", new JSONArray().put(new JSONObject()
+                .put("kind", "fact").put("subject", "user").put("key", "detail").put("text", text.toString())
+                .put("scope", "real").put("certainty", "explicit").put("source_ids", new JSONArray().put(1))))
+                .put("continuity", new JSONObject().put("threads", new JSONArray()).put("episodes", episodes)).toString();
+        assert payload.length() > 65536;
+        assert ChatSession.jsonPayload(payload).equals(payload) : "Thirty detailed scenes must reach native validation";
+        StringBuilder oversized = new StringBuilder("{");
+        for (int i = 0; i < 33; i++) oversized.append(text);
+        oversized.append('}');
+        try {
+            ChatSession.jsonPayload(oversized.toString());
+            throw new AssertionError("Unbounded memory output was accepted");
+        } catch (IOException expected) { }
     }
 
     static void cancelledRetrievalDoesNotStartTransport() throws Exception {
