@@ -279,7 +279,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 Column(Modifier.width(56.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Box(Modifier.size(48.dp).clip(CircleShape)
                         .clickable(enabled = onIcon != null, role = Role.Button) { onIcon?.run() }
-                        .semantics { contentDescription = "${personName.ifEmpty { "人物" }}のアイコンを設定" }
+                        .semantics { contentDescription = "${personName.ifEmpty { "人物" }}の短期記憶を見る" }
                         .padding(4.dp).background(MaterialTheme.colorScheme.surfaceVariant, CircleShape),
                         contentAlignment = Alignment.Center) {
                         val bitmap = personIcon

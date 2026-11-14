@@ -30,6 +30,13 @@ class MainActivityComposeTest {
     private var previousTextSize = 16
     private var previousGap = 12
 
+    private fun openShortTermMemory() {
+        compose.onNodeWithContentDescription("${name}の短期記憶を見る").performClick()
+        compose.waitUntil(10_000) {
+            compose.onAllNodes(androidx.compose.ui.test.hasText("短期記憶")).fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
     @Test fun semanticRecallFlowsThroughTheRealReplyStoreWithOriginalEvidence() {
         val people = PersonRegistry(context.filesDir)
         previousPerson = people.active()?.id
@@ -100,11 +107,39 @@ class MainActivityComposeTest {
         compose.onNodeWithText("ほっとして嬉しい").assertExists()
         compose.onNodeWithText("試合終了の報告").assertDoesNotExist()
         compose.onNodeWithText("一緒に喜んだ会話").assertDoesNotExist()
-        compose.onNodeWithContentDescription("${name}のアイコンを設定").performClick()
+        openShortTermMemory()
+        compose.onNodeWithText("短期記憶").assertExists()
+        compose.onNodeWithText("試合終了の報告", substring = true)
+            .assertTextContains("感情\nほっとして嬉しい\n\n理由\n試合終了の報告\n\n状況\n一緒に喜んだ会話")
+        compose.onNodeWithContentDescription("閉じる").performClick()
+        compose.onNodeWithText("試合終了の報告", substring = true).assertDoesNotExist()
+        openShortTermMemory()
+        compose.onNodeWithText("人物アイコンを設定").performClick()
         compose.onNodeWithText("写真・画像から選ぶ").assertExists()
         compose.onNodeWithText("名前のアイコンに戻す").performClick()
         compose.waitUntil(10_000) { PersonRegistry(context.filesDir).icon(person.id).isEmpty() }
         compose.onNodeWithText("ほっとして嬉しい").assertExists()
+    }
+
+    @Test fun iconShowsEmptyShortTermMemoryWithoutInventingDetails() {
+        val people = PersonRegistry(context.filesDir)
+        previousPerson = people.active()?.id
+        val preferences = context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE)
+        previousTextSize = preferences.getInt("text_size", 16)
+        previousGap = preferences.getInt("message_gap", 12)
+        val person = people.stage(PersonDocument.named(name), null)
+        people.commit(person)
+        compose.activityRule.scenario.recreate()
+        val add = MainActivity::class.java.getDeclaredMethod("nativeAddMessage", ByteArray::class.java, ByteArray::class.java)
+            .apply { isAccessible = true }
+        add.invoke(null, "assistant".toByteArray(), "こんにちは".toByteArray())
+        compose.activityRule.scenario.recreate()
+        compose.waitUntil(10_000) {
+            compose.onAllNodes(androidx.compose.ui.test.hasContentDescription("${name}の短期記憶を見る"))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        openShortTermMemory()
+        compose.onNodeWithText("感情\n未記録\n\n理由\n未記録\n\n状況\n未記録").assertExists()
     }
 
     @Test fun namedPersonDraftAndDisplaySettingsSurviveRecreation() {

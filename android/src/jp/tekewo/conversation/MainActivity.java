@@ -113,7 +113,7 @@ public final class MainActivity extends ComponentActivity {
         }
         if (activePerson != null) compose.setDraft(getPreferences(MODE_PRIVATE).getString(draftKey(), ""));
         compose.setPersonName(activePerson == null ? "" : activePerson.name);
-        compose.setOnIcon(this::showPersonIcon);
+        compose.setOnIcon(this::showShortTermMemory);
         refreshPersonIcon();
         connection = new ChatGptConnection(this);
         ChatSession.Store store = new ChatSession.Store() {
@@ -529,6 +529,34 @@ public final class MainActivity extends ComponentActivity {
                 final android.graphics.Bitmap bitmap = image.length == 0 ? null : PersonIcon.decode(image);
                 ui(() -> { if (activePerson != null && person.id.equals(activePerson.id)) compose.setPersonIcon(bitmap); });
             } catch (Exception error) { ui(() -> { compose.setPersonIcon(null); showError(safeError(error)); }); }
+        });
+    }
+
+    private void showShortTermMemory() {
+        final PersonRegistry.Person person = activePerson;
+        if (person == null || changingPerson) return;
+        reader.execute(() -> {
+            try {
+                final JSONObject state;
+                synchronized (storeGate) {
+                    requireCurrentPerson();
+                    if (!person.id.equals(activePerson.id)) return;
+                    String snapshot = nativeContext(bytes(""));
+                    if (snapshot.isEmpty()) throw new java.io.IOException(nativeLastError());
+                    JSONObject continuity = new JSONObject(snapshot).optJSONObject("continuity");
+                    JSONObject current = continuity == null ? null : continuity.optJSONObject("assistant_state");
+                    state = current == null ? new JSONObject() : current;
+                }
+                ui(() -> {
+                    if (changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
+                    ComposeUi.Panel panel = new ComposeUi.Panel("短期記憶"); panel.sheet = true;
+                    panel.message = "感情\n" + state.optString("emotion", "未記録")
+                            + "\n\n理由\n" + state.optString("reason", "未記録")
+                            + "\n\n状況\n" + state.optString("event", "未記録");
+                    panel.rows.add(new ComposeUi.Row("人物アイコンを設定", this::showPersonIcon, 2));
+                    compose.show(panel);
+                });
+            } catch (Exception error) { ui(() -> showError(safeError(error))); }
         });
     }
 

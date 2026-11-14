@@ -60,12 +60,12 @@ class ComposeUiTest {
         compose.onNodeWithText("ほっとして嬉しい").assertIsDisplayed()
         compose.onAllNodes(hasText("ほっとして嬉しい")).fetchSemanticsNodes().let { assertEquals(1, it.size) }
         compose.onNodeWithText("一緒に喜べて嬉しいよ").assertIsDisplayed()
-        compose.onAllNodes(hasContentDescription("小春のアイコンを設定")).fetchSemanticsNodes().let { assertEquals(2, it.size) }
+        compose.onAllNodes(hasContentDescription("小春の短期記憶を見る")).fetchSemanticsNodes().let { assertEquals(2, it.size) }
         InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(
             "screencap -p /data/local/tmp/conversation-avatar-chat.png").use {
             java.io.FileInputStream(it.fileDescriptor).readBytes()
         }
-        compose.onAllNodes(hasContentDescription("小春のアイコンを設定"))[0].performClick()
+        compose.onAllNodes(hasContentDescription("小春の短期記憶を見る"))[0].performClick()
         compose.runOnIdle { assertEquals(1, opened) }
         compose.runOnUiThread {
             ui.setMessages("""{"first":0,"total":1,"assistant_emotion":"","messages":[{"id":1,"role":"assistant","text":"続けよう"}]}""")
