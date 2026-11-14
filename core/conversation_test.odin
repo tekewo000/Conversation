@@ -112,7 +112,7 @@ large_history_restart_is_bounded_and_uses_incremental_storage :: proc(t: ^testin
  assert(conversation_message_count()==20001)
  assert(len(cache)<=80)
  assert(len(string(conversation_pending_job()))<65536)
- assert(len(string(conversation_context("昔の東京")))<=32768)
+ assert(len(string(conversation_context("昔の東京")))<=65536)
  assert(conversation_export(c))
  assert(execute("PRAGMA query_only=ON"))
  testing.expect_value(t,conversation_add_message("user","write must fail"),0)
@@ -145,7 +145,7 @@ escaped_source_snippets_keep_job_and_context_byte_budgets :: proc(t: ^testing.T)
   assert(strings.contains(output,`"truncated":true`))
   assert(conversation_apply_job(job,`{"memories":[]}`))
  }
- testing.expect(t,len(string(conversation_context("a")))<=32768)
+ testing.expect(t,len(string(conversation_context("a")))<=65536)
 }
 
 @(test)

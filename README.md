@@ -4,6 +4,16 @@ AndroidでAIの友達と会話し、出来事・好み・約束を自動で記�
 Odinが会話・記憶・SQLiteを管理し、Jetpack ComposeとMaterial 3で画面を描画します。
 ChatGPTのサブスク認証を組み合わせています。
 
+## 0.5.0 会話の現在地と体験の記憶
+
+- 話題・候補の順番・決定・保留事項を、出典付きの「会話の現在地」として保持します。
+- 出来事・語られた感情・場面を関連付けて記憶し、現実／創作／会話上の共有体験を区別します。
+- 次の返答では現在地を毎回渡し、現在地と検索した記憶の根拠、その前後の会話を取得します。
+- 更新は既存の記憶整理の通信にまとめ、追加のモデル呼び出しは設けません。入力量は増えます。
+- 記憶整理に失敗しても、原文と前回の現在地を残して再試行します。新しい記憶はGit差分・ZIPにも含めます。
+- DBは既存データを保ってschema 4へ移行します。schema 4を読めない旧APKへのダウングレードには対応しません。
+- 感情理解や自然な想起の品質はモデルに依存し、日本語の実会話での継続評価が必要です。
+
 ## 0.4.2 Jetpack Compose・描画調整
 
 - チャット、入力欄、メニュー、設定、人物操作、接続・確認ダイアログをJetpack Composeへ移行。
@@ -106,7 +116,7 @@ Windows PowerShellで実行します。初回はSDK／NDK／Odin／Gradle等の�
 .\scripts\install-android.ps1 -Configuration Release
 ```
 
-出力は`dist/Conversation-0.4.2-arm64-release.apk`。既定の構成はReleaseです。
+出力は`dist/Conversation-0.5.0-arm64-release.apk`。既定の構成はReleaseです。
 Android10/API29以降・ARM64向けです。
 USBデバッグを有効にし、このPCをスマホで許可してからインストールしてください。
 複数端末の場合は`install-android.ps1 -Serial <シリアル>`を指定します。

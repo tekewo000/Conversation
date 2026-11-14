@@ -40,3 +40,9 @@ AndroidのJSON出力ではスラッシュ等のエスケープで容量が増え
 ## 検証
 
 `scripts/test-connection.ps1` で `GitArchiveFilesTest` と `GitHubBackupTest` を実行します。模擬 HTTP では、公開先の拒否、別人物・数値 ID の拒否、空リポジトリの初期化、失われた応答の回復、HEAD 競合、差分ファイルの UTF-8、バッチ上限、認証情報を含まないエラーを確認します。`GitHubBackupTest` の引数 `--live-public-read` は、認証なしで `octocat/Hello-World` の公開メタデータだけを取得し、公開先の拒否を確認します。GitHub への書き込みは行いません。Android Keystore の実機動作と、利用者のトークンによる実際の非公開リポジトリへの保存は、別途端末上で確認します。
+
+## 0.5.0：会話の現在地の保存
+
+schema 4の `continuity_revisions`（`id`, `through_id`, `state`, `created_at`）を、記憶抽出の確定と同じトランザクションの差分へ含める。stateはJSON文字列で、出典付きの話題と体験を保持する。ZIPスナップショットにも `continuity_revisions-*.jsonl` とマニフェストの件数を追加する。既存のformat 2マニフェストへ加える項目であり、認証情報は含めない。
+
+コアの差分復元は、会話原文とジョブが存在すること、処理位置が前進すること、出典の範囲と状態の形式・サイズを検証する。不正な現在地を含む差分は原子的に拒否する。新しいテーブルを知らない旧版のコアは、新しい差分を復元できない。既存の旧形式の差分はschema 4のコアで引き続き受け入れる。

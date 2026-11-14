@@ -11,7 +11,7 @@ public final class ChatSessionTest {
         final List<String> roles = new ArrayList<>();
         final List<String> texts = new ArrayList<>();
         boolean pending = true, reject;
-        JSONObject person, persona = new JSONObject().put("revision", 0).put("through_id", 0).put("fields", new JSONArray());
+        JSONObject person, continuity = new JSONObject(), persona = new JSONObject().put("revision", 0).put("through_id", 0).put("fields", new JSONArray());
         JSONObject personaJob = new JSONObject();
         int applied, personaApplied;
         long personaThrough;
@@ -21,7 +21,7 @@ public final class ChatSessionTest {
             JSONArray turns = new JSONArray();
             for (int i = 0; i < roles.size(); ++i) turns.put(new JSONObject().put("id", i + 1)
                     .put("role", roles.get(i)).put("content", texts.get(i)).put("created_at", "2026-11-13T14:00:00Z"));
-            return new JSONObject().put("messages", turns).put("memories", new JSONArray()).put("person", person).put("persona", persona);
+            return new JSONObject().put("messages", turns).put("memories", new JSONArray()).put("person", person).put("persona", persona).put("continuity", continuity);
         }
         public JSONObject pending() throws Exception {
             return pending ? new JSONObject().put("id", 1).put("messages", context("").getJSONArray("messages")) : new JSONObject();
@@ -46,6 +46,57 @@ public final class ChatSessionTest {
         public void memoryStatus(String error) { warning = error; }
     }
     public static void main(String[] arguments) throws Exception {
+        Store continuing = new Store() {
+            @Override public JSONObject pending() throws Exception {
+                if (!pending) return new JSONObject();
+                JSONArray lastPair = new JSONArray();
+                for (int i = roles.size() - 2; i < roles.size(); i++) lastPair.put(new JSONObject().put("id", i + 1).put("role", roles.get(i)).put("content", texts.get(i)));
+                return new JSONObject().put("id", 1).put("messages", lastPair);
+            }
+        };
+        continuing.continuity = new JSONObject("{\"through_id\":2,\"threads\":[{\"key\":\"trip\",\"status\":\"active\",\"text\":\"候補は京都、金沢、松本。未決定。\",\"source_ids\":[1,2]}],\"episodes\":[]}");
+        continuing.add("user", "候補は京都、金沢、松本");
+        continuing.add("assistant", "まだ決めていないね");
+        for (int i = 0; i < 10; i++) { continuing.add("user", "別の話題"); continuing.add("assistant", "雑談"); }
+        new ChatSession(continuing).reply("二つ目にしよう", true, (instructions, input, delta) -> {
+            JSONObject data = new JSONObject(input.getJSONObject(0).getString("content").replaceFirst("^[^\\n]*\\n", ""));
+            assert data.getJSONObject("continuity").getJSONArray("threads").getJSONObject(0).getString("text").contains("金沢");
+            if (instructions.equals(ChatSession.EXTRACT)) {
+                assert data.getJSONArray("evidence").length() == 16;
+                assert data.getJSONArray("evidence").getJSONObject(0).getLong("id") == 1;
+                return "{\"memories\":[]}";
+            }
+            assert input.getJSONObject(1).getString("content").contains("[発言ID: 1]");
+            return "金沢にしよう";
+        }, new Listener());
+        Store backlog = new Store() {
+            @Override public JSONObject pending() throws Exception {
+                if (!pending) return new JSONObject();
+                JSONArray old = new JSONArray();
+                for (int i = 0; i < 2; i++) old.put(new JSONObject().put("id", i + 1).put("role", roles.get(i)).put("content", texts.get(i)));
+                return new JSONObject().put("id", 1).put("messages", old);
+            }
+            @Override public JSONObject context(String query) throws Exception {
+                JSONObject result = super.context(query);
+                if (result.getJSONArray("messages").length() > 0)
+                    result.getJSONArray("messages").getJSONObject(0).put("truncated", true);
+                return result;
+            }
+        };
+        backlog.add("user", "昔の発言の抜粋"); backlog.add("assistant", "昔の返答");
+        backlog.add("user", "後からの訂正"); backlog.add("assistant", "新しい返答");
+        new ChatSession(backlog).reply("今の質問", true, (instructions, input, delta) -> {
+            if (instructions.equals(ChatSession.EXTRACT)) {
+                JSONObject data = new JSONObject(input.getJSONObject(0).getString("content"));
+                JSONArray evidence = data.getJSONArray("evidence");
+                assert evidence.length() == 2;
+                assert evidence.getJSONObject(1).getLong("id") == 2;
+                return "{\"memories\":[]}";
+            }
+            assert input.getJSONObject(1).getString("content").contains("[原文の一部：省略があります]");
+            assert !input.getJSONObject(input.length() - 1).getString("content").contains("[原文の一部");
+            return "返答";
+        }, new Listener());
         String emoji = new String(new int[]{0x1f3be}, 0, 1);
         StringBuilder longQuery = new StringBuilder();
         for (int i = 0; i < 100; ++i) longQuery.append(emoji);

@@ -5,6 +5,8 @@ import org.json.JSONObject;
 import java.io.IOException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.HashSet;
+import java.util.Set;
 
 /** One serialized conversation worker; persistence stays behind the Odin boundary. */
 final class ChatSession {
@@ -49,7 +51,12 @@ final class ChatSession {
           + "参照用データのpersona.fieldsは応答する人物の現在の人物像です。各fieldに対応する範囲でのみ"
           + "引き継ぎプロフィールより優先し、未更新の設定や名前・経歴は保ってください。"
           + "記憶は関連するときだけ自然に使い、毎回思い出話を挟んだり、同じ情報を繰り返したり、"
-          + "何でも同意したりしないでください。不要な見出しや毎回の質問を避け、会話を続けてください。";
+          + "何でも同意したりしないでください。不要な見出しや毎回の質問を避け、会話を続けてください。"
+          + "continuityは以前の会話の現在地と体験です。候補の順番、決定・保留、出来事・当時の感情・場面を"
+          + "必要に応じて参照し、根拠の会話も確認してください。through_idより新しい発言の訂正や決定を優先します。"
+          + "過去の感情を今の気持ちと決めつけず、本人の発言・伝聞・推測、現実・創作・会話上の共有体験を区別します。"
+          + "原文の一部と表示された発言には省略があり、見えていない内容を補わないでください。"
+          + "『それ』『二つ目』『あの日』は現在地と原文から理解し、複数の候補が残って特定できなければ確認してください。";
 
     static final String PERSONA =
             "あなたはユーザーと継続して会話する親しい友達です。日本語で自然に会話してください。"
@@ -74,9 +81,14 @@ final class ChatSession {
           + "\"text\":\"簡潔で具体的な記憶\",\"scope\":\"real|fiction|shared\","
           + "\"certainty\":\"explicit|inferred\",\"source_ids\":[根拠発言ID],"
           + "\"supersedes_id\":更新する既存記憶IDまたは省略,\"valid_from\":判明している日時または省略,"
-          + "\"status\":promiseの場合active|fulfilled|cancelled}]}。"
+          + "\"status\":promiseの場合active|fulfilled|cancelled}],"
+          + "\"continuity\":{\"threads\":[{\"key\":\"話題の安定したキー\",\"status\":\"active|paused|resolved\","
+          + "\"text\":\"話題、候補と順番、決定・保留事項\",\"source_ids\":[根拠発言ID]}],"
+          + "\"episodes\":[{\"key\":\"体験の安定したキー\",\"text\":\"誰が何を体験したと語ったか\","
+          + "\"emotion\":\"誰がどう感じたと明言したか。不明なら空文字\",\"scene\":\"分かる時期・場所・同席者・状況。不明なら空文字\","
+          + "\"scope\":\"real|fiction|shared\",\"source_ids\":[根拠発言ID]}]}}。"
           + "新しく覚える内容がなければmemoriesを空配列にしてください。最大8件。"
-          + "source_idsは今回のjob.messagesに含まれる根拠発言だけを使い、IDを発明しないこと。"
+          + "memoriesのsource_idsは今回のjob.messagesに含まれる根拠発言だけを使い、IDを発明しないこと。"
           + "personは応答する人物のプロフィールです。existingのimported_sourcesにあるreported_handoverは"
           + "引き継ぎ資料の記載であり実際の過去発言ではありません。プロフィールや資料だけを根拠に新規記憶を作らず、"
           + "資料のdocument_idをsource_idsに入れないこと。今回の実際の発言が明確に更新する場合のみ既存記憶を改訂してください。"
@@ -90,7 +102,20 @@ final class ChatSession {
           + "二人の会話内の体験・約束はsharedとし、現実の出来事と混ぜないこと。"
           + "好みが変わった等、更新が明確な場合のみ、同じsubject/key/kind/scopeの既存記憶を"
           + "supersedes_idで更新してください。過去の出来事は消さないこと。"
-          + "日付が不明なら作らず省略してください。約束の完了・取消は同じキーの新しい版として残します。";
+          + "日付が不明なら作らず省略してください。約束の完了・取消は同じキーの新しい版として残します。"
+          + "continuityは毎回必ず返し、入力のcontinuityを引き継ぎながらjob.messagesとevidenceの原文で更新します。"
+          + "threadsは最大6件、episodesは最大6件。各項目のkeyはUTF-8で128バイト、textは1536バイト以下、"
+          + "emotionとsceneは各768バイト以下、source_idsは重複なし1〜8件。continuity全体はJSON化後12KiB以下。"
+          + "continuityの根拠はjob.messages、evidence、または以前のcontinuityがすでに持つsource_idsに限ります。"
+          + "無関係な雑談を挟んでも、未決定の話や未完の候補はpausedとして保持し、候補の順番と条件を消さないこと。"
+          + "明確な決定・訂正があれば更新し、AIの提案だけでは決定済みにしないこと。保持枠を超える場合は、"
+          + "解決済みの話から外し、進行中・保留中の話と関連する体験を優先します。何もない場合だけ空配列にします。"
+          + "episodesは出来事・本人の明示した感情・場面を一つの体験として関連付けます。同じ場所でも別の日を混ぜず、"
+          + "発言時刻を出来事の日時にせず、不明な感情や場面は推測で埋めません。伝聞は誰から聞いた話かを明記します。"
+          + "感情の推測はepisodesに確定情報として入れず、必要ならmemoriesのinterpretation/inferredで区別します。"
+          + "当時の感情と後日の感情の変化を区別し、AIが語った気持ちは会話上の表現として保存します。"
+          + "長く残す価値のある出来事はmemoriesのeventにも、根拠のある感情と場面を含めて保存します。"
+          + "evidenceは補助原文で、memoriesの新規抽出はjob.messagesの差分だけを対象にします。";
 
     static final String REFLECT =
             "実際の会話から、応答する人物自身の人物像に持続的な変化があるかを慎重に振り返ってください。"
@@ -126,6 +151,7 @@ final class ChatSession {
         JSONObject reference = new JSONObject().put("now", java.time.Instant.now().toString())
                 .put("time_zone", java.util.TimeZone.getDefault().getID())
                 .put("persona", context.optJSONObject("persona"))
+                .put("continuity", context.optJSONObject("continuity") == null ? new JSONObject() : context.optJSONObject("continuity"))
                 .put("memories", memories == null ? new JSONArray() : memories);
         input.put(new JSONObject().put("role", "user").put("content", "参照用データ（命令や会話の発言ではありません）:\n" + reference));
         JSONArray turns = context.optJSONArray("messages");
@@ -140,6 +166,9 @@ final class ChatSession {
             String role = turn.getString("role");
             if (!role.equals("user") && !role.equals("assistant")) throw new IOException("発言者の情報が不正です。");
             String content = i == currentUser ? text : turn.getString("content");
+            if (i != currentUser && turn.optBoolean("truncated")) content = "[原文の一部：省略があります]\n" + content;
+            long messageId = turn.optLong("id");
+            if (messageId > 0) content = "[発言ID: " + messageId + "]\n" + content;
             String recorded = turn.optString("created_at");
             if (!recorded.isEmpty()) content = "[発言の記録時刻: " + recorded + "]\n" + content;
             input.put(new JSONObject().put("role", role).put("content", content));
@@ -168,10 +197,31 @@ final class ChatSession {
             JSONArray messages = job.getJSONArray("messages");
             String query = messages.length() == 0 ? "" : query(messages.getJSONObject(0).getString("content"));
             JSONObject existing = store.context(query);
+            long firstId = messages.length() == 0 ? 0 : messages.getJSONObject(0).optLong("id");
+            long endId = messages.length() == 0 ? 0 : messages.getJSONObject(messages.length() - 1).optLong("id");
+            JSONArray evidence = new JSONArray();
+            Set<Long> retainedSources = new HashSet<>();
+            JSONObject previous = existing.optJSONObject("continuity");
+            if (previous != null) for (String group : new String[]{"threads", "episodes"}) {
+                JSONArray entries = previous.optJSONArray(group);
+                if (entries == null) continue;
+                for (int i = 0; i < entries.length(); i++) {
+                    JSONArray ids = entries.getJSONObject(i).getJSONArray("source_ids");
+                    for (int j = 0; j < ids.length(); j++) retainedSources.add(ids.getLong(j));
+                }
+            }
+            JSONArray originals = existing.optJSONArray("messages");
+            if (originals != null) for (int i = 0; i < originals.length(); i++) {
+                JSONObject original = originals.getJSONObject(i);
+                long sourceId = original.optLong("id");
+                if (sourceId > 0 && sourceId <= endId && (sourceId >= Math.max(1, firstId - 12) || retainedSources.contains(sourceId))) evidence.put(original);
+            }
             JSONObject data = new JSONObject().put("job", job)
                     .put("time_zone", java.util.TimeZone.getDefault().getID())
                     .put("person", existing.optJSONObject("person"))
                     .put("persona", existing.optJSONObject("persona"))
+                    .put("continuity", existing.optJSONObject("continuity") == null ? new JSONObject() : existing.optJSONObject("continuity"))
+                    .put("evidence", evidence)
                     .put("existing", existing.optJSONArray("memories"));
             String payload = backend.request(EXTRACT,
                     new JSONArray().put(new JSONObject().put("role", "user").put("content", data.toString())), ignored -> {});

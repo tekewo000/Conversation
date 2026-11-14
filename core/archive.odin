@@ -20,6 +20,7 @@ ARCHIVE_TABLES := [?]Archive_Table{
  {"source_documents","id,person_id,format,provenance,source_sha256,raw_markdown,created_at",`json_object('id',id,'person_id',person_id,'format',format,'provenance',provenance,'source_sha256',source_sha256,'raw_markdown',raw_markdown,'created_at',created_at)`},
  {"memory_document_sources","memory_id,document_id,section,occurred_at",`json_object('memory_id',memory_id,'document_id',document_id,'section',section,'occurred_at',occurred_at)`},
  {"persona_revisions","id,through_id,changes,created_at",`json_object('id',id,'through_id',through_id,'changes',changes,'created_at',created_at)`},
+ {"continuity_revisions","id,through_id,state,created_at",`json_object('id',id,'through_id',through_id,'state',state,'created_at',created_at)`},
 }
 archive_group:i64
 ARCHIVE_GROUP_MAX :: 16*1048576
@@ -181,6 +182,7 @@ archive_row_valid :: proc(table: ^Archive_Table, row: json.Object) -> bool {
   case "raw_markdown":maximum=PERSON_SOURCE_MAX_BYTES
   case "section":maximum=512
   case "changes":maximum=32768
+  case "state":maximum=CONTINUITY_MAX_BYTES
   }
   if !ok || len(text)>maximum || !utf8.valid_string(text) || strings.contains_rune(text,0) || (column!="valid_from" && len(strings.trim_space(text))==0) do return false
   if (column=="created_at" || column=="occurred_at" || (column=="valid_from" && text!="")) && !valid_date(text) do return false
@@ -209,6 +211,9 @@ archive_restore_event :: proc(event: json.Object, encoded: string) -> bool {
  }
  if table.name=="persona_revisions" {
   if i64(row["id"].(json.Integer))!=scalar("SELECT coalesce(max(id),0)+1 FROM persona_revisions") || !persona_revision_valid(i64(row["through_id"].(json.Integer)),string(row["changes"].(json.String))) do return fail("Invalid archived persona revision; nothing was restored.")
+ }
+ if table.name=="continuity_revisions" {
+  if i64(row["id"].(json.Integer))!=scalar("SELECT coalesce(max(id),0)+1 FROM continuity_revisions") || !continuity_revision_valid(i64(row["through_id"].(json.Integer)),string(row["state"].(json.String))) do return fail("Invalid archived conversation state; nothing was restored.")
  }
  columns:=strings.split(table.columns,",")
  defer delete(columns)

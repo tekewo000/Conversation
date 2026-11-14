@@ -133,7 +133,7 @@ person_schema_migrates_v1_without_replacing_history :: proc(t: ^testing.T) {
  sqlite3_close(db)
  db=nil
  assert(conversation_init(c))
- testing.expect_value(t,scalar("PRAGMA user_version"),3)
+ testing.expect_value(t,scalar("PRAGMA user_version"),4)
  testing.expect_value(t,conversation_message_count(),1)
  assert(conversation_load_window(0,1))
  testing.expect_value(t,string(conversation_message_text(0)),"preserved v1 history")

@@ -1,0 +1,187 @@
+package conversation
+
+import "core:encoding/json"
+import "core:fmt"
+import "core:os"
+import "core:strings"
+import "core:testing"
+
+CONTINUITY_FIXTURE :: `{"memories":[],"continuity":{"threads":[{"key":"trip","status":"active","text":"旅行候補は順に京都、金沢、松本。未決定。","source_ids":[1,2]}],"episodes":[{"key":"rain","text":"ユーザーが大会で友人と待機したと話した。","emotion":"ユーザーは緊張したと述べた。","scene":"雨の日の大会。日時と場所の詳細は不明。","scope":"real","source_ids":[1]}]}}`
+
+@(test)
+continuity_keeps_context_and_originals_after_unrelated_turns :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-continuity-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ assert(conversation_add_message("user","雨の大会で友人と待った。緊張した。旅行候補は京都、金沢、松本。")>0)
+ assert(conversation_add_message("assistant","旅行はこの順で三つの候補があるね。まだ決めていないね。")>0)
+ assert(conversation_apply_job(1,CONTINUITY_FIXTURE),string(conversation_error()))
+ for _ in 0..<10 {
+  assert(conversation_add_message("user","別の話題で雑談する。")>0)
+  assert(conversation_add_message("assistant","別の話を続ける。")>0)
+  assert(conversation_apply_job(scalar("SELECT max(id) FROM jobs"),`{"memories":[]}`))
+ }
+ assert(conversation_add_message("user","二つ目にしよう。あのときは緊張したね。")>0)
+ output:=string(conversation_context("二つ目"))
+ testing.expect(t,strings.contains(output,`"continuity":`))
+ testing.expect(t,strings.contains(output,`"through_id":2`))
+ testing.expect(t,strings.contains(output,"ユーザーは緊張したと述べた。"))
+ testing.expect(t,strings.contains(output,"雨の大会で友人と待った。緊張した。旅行候補は京都、金沢、松本。"),"An implicit reference must retain the original evidence beyond the recent window.")
+ conversation_close()
+ assert(conversation_init(c))
+ testing.expect(t,strings.contains(string(conversation_context("unrelated")),"京都、金沢、松本"))
+}
+
+@(test)
+continuity_invalid_evidence_rolls_back_memory_and_job :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-continuity-invalid-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ assert(conversation_add_message("user","出来事を話す")>0)
+ assert(conversation_add_message("assistant","返事")>0)
+ bad :: `{"memories":[{"kind":"event","actor":"user","subject":"user","key":"event","text":"出来事","scope":"real","certainty":"explicit","source_ids":[1]}],"continuity":{"threads":[{"key":"bad","status":"active","text":"future","source_ids":[3]}],"episodes":[]}}`
+ testing.expect(t,!conversation_apply_job(1,bad))
+ testing.expect_value(t,conversation_memory_count(),0)
+ testing.expect(t,strings.contains(string(conversation_pending_job()),`"id":1`))
+ assert(conversation_apply_job(1,CONTINUITY_FIXTURE),string(conversation_error()))
+ testing.expect(t,conversation_apply_job(1,CONTINUITY_FIXTURE))
+ testing.expect_value(t,scalar("SELECT count(*) FROM continuity_revisions"),1)
+}
+
+@(test)
+continuity_archive_replay_and_snapshot_preserve_state :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-continuity-archive-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ assert(conversation_add_message("user","旅行と大会の話")>0)
+ assert(conversation_add_message("assistant","候補の話")>0)
+ assert(conversation_apply_job(1,CONTINUITY_FIXTURE),string(conversation_error()))
+ delta:=strings.clone_to_cstring(string(conversation_archive_delta(0)))
+ defer delete(delta)
+ assert(conversation_export(c))
+ path:=fmt.aprintf("%s/metadata.json",dir)
+ defer delete(path)
+ bytes,read_e:=os.read_entire_file(path,context.allocator)
+ defer delete(bytes)
+ assert(read_e==nil)
+ root,ok:=parse_json(bytes)
+ assert(ok)
+ obj:=root.(json.Object)
+ testing.expect_value(t,i64(obj["continuity_revisions"].(json.Integer)),1)
+ snapshot:=fmt.aprintf("%s/%s/continuity_revisions-000000.jsonl",dir,string(obj["snapshot"].(json.String)))
+ defer delete(snapshot)
+ saved,saved_e:=os.read_entire_file(snapshot,context.allocator)
+ defer delete(saved)
+ assert(saved_e==nil && strings.contains(string(saved),"ユーザーは緊張"))
+ json.destroy_value(root)
+ conversation_close()
+ target,e2:=os.make_directory_temp("","conversation-continuity-replay-*",context.allocator)
+ assert(e2==nil)
+ defer delete(target)
+ defer os.remove_all(target)
+ destination:=strings.clone_to_cstring(target)
+ defer delete(destination)
+ assert(conversation_init(destination))
+ poisoned_root,poisoned_ok:=parse_json(transmute([]byte)string(delta),12)
+ assert(poisoned_ok)
+ for record in poisoned_root.(json.Object)["records"].(json.Array) {
+  for event in record.(json.Object)["events"].(json.Array) {
+   event_obj:=event.(json.Object)
+   if string(event_obj["table"].(json.String))=="continuity_revisions" {
+    row:=event_obj["row"].(json.Object)
+    json.destroy_value(row["state"])
+    row["state"]=json.String(strings.clone(`{"threads":[{"key":"bad","status":"active","text":"invented","source_ids":[999]}],"episodes":[]}`))
+   }
+  }
+ }
+ poisoned_bytes,poisoned_e:=json.marshal(poisoned_root)
+ assert(poisoned_e==nil)
+ poisoned:=strings.clone_to_cstring(string(poisoned_bytes))
+ delete(poisoned_bytes)
+ json.destroy_value(poisoned_root)
+ defer delete(poisoned)
+ testing.expect(t,!conversation_apply_archive(poisoned))
+ testing.expect_value(t,conversation_message_count(),0)
+ testing.expect_value(t,scalar("SELECT count(*) FROM continuity_revisions"),0)
+ assert(conversation_apply_archive(delta),string(conversation_error()))
+ assert(conversation_apply_archive(delta),string(conversation_error()))
+ testing.expect(t,strings.contains(string(conversation_context("unrelated")),"雨の日の大会"))
+ testing.expect_value(t,scalar("SELECT count(*) FROM continuity_revisions"),1)
+}
+
+@(test)
+continuity_v3_upgrade_and_failed_update_preserve_previous_state :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-continuity-upgrade-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ assert(conversation_add_message("user","移行前の会話")>0)
+ assert(conversation_add_message("assistant","移行前の返事")>0)
+ assert(execute("DROP TABLE continuity_revisions; PRAGMA user_version=3"))
+ conversation_close()
+ assert(conversation_init(c))
+ testing.expect_value(t,scalar("PRAGMA user_version"),4)
+ testing.expect_value(t,conversation_message_count(),2)
+ assert(conversation_apply_job(1,CONTINUITY_FIXTURE))
+ assert(conversation_add_message("user","後からの話")>0)
+ assert(conversation_add_message("assistant","新しい返事")>0)
+ bad_scope,replaced:=strings.replace_all(string(CONTINUITY_FIXTURE),`"real"`,`"unknown"`)
+ assert(replaced)
+ defer delete(bad_scope)
+ payload:=strings.clone_to_cstring(bad_scope)
+ defer delete(payload)
+ testing.expect(t,!conversation_apply_job(2,payload))
+ testing.expect_value(t,scalar("SELECT count(*) FROM continuity_revisions"),1)
+ testing.expect(t,strings.contains(string(conversation_context("無関係")),`"through_id":2`))
+ testing.expect(t,strings.contains(string(conversation_pending_job()),`"id":2`))
+}
+
+@(test)
+continuity_active_original_precedes_newer_episode_context :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-continuity-priority-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ padding,padding_e:=strings.repeat("あ",1800)
+ assert(padding_e==nil)
+ defer delete(padding)
+ original:=strings.concatenate({"候補の条件は土曜の金沢。",padding})
+ defer delete(original)
+ text:=strings.clone_to_cstring(original)
+ defer delete(text)
+ padding_c:=strings.clone_to_cstring(padding)
+ defer delete(padding_c)
+ for i in 0..<20 {
+  assert(conversation_add_message("user",text if i==0 else padding_c)>0)
+  assert(conversation_add_message("assistant",padding_c)>0)
+  if i==0 do assert(conversation_apply_job(1,`{"memories":[],"continuity":{"threads":[{"key":"trip","status":"active","text":"候補の条件を相談中","source_ids":[1]}],"episodes":[]}}`))
+ }
+ state :: `{"memories":[],"continuity":{"threads":[{"key":"trip","status":"active","text":"候補の条件を相談中","source_ids":[1]}],"episodes":[{"key":"newer","text":"新しい出来事","emotion":"","scene":"","scope":"real","source_ids":[10]}]}}`
+ for job:i64=2;job<5;job+=1 { assert(conversation_apply_job(job,`{"memories":[]}`)) }
+ assert(conversation_apply_job(5,state),string(conversation_error()))
+ output:=string(conversation_context("二つ目"))
+ testing.expect(t,strings.contains(output,"候補の条件は土曜の金沢。"),"The oldest active thread's direct source must outrank newer episodes and surrounding messages.")
+}
