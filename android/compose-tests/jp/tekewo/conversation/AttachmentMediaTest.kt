@@ -2,6 +2,9 @@ package jp.tekewo.conversation
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.content.ContentUris
+import android.net.Uri
+import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.*
@@ -33,6 +36,63 @@ class AttachmentMediaTest {
     }
     private fun video(): AttachmentFiles.Ref = InstrumentationRegistry.getInstrumentation().context.assets.open("red-video.mp4").use {
         AttachmentFiles.save(person, "赤い動画", "mp4", it)
+    }
+    @Test fun savedImageHasSaveButtonsOnCardAndExpandedView() {
+        val ref = AttachmentFiles.save(person, "ダウンロード用画像", "png", ByteArrayInputStream(picture()))
+        compose.runOnUiThread {
+            val ui = ComposeUi(compose.activity, {}, {}, {})
+            ui.mediaDirectory = person
+            ui.setMessages(JSONObject().put("first", 0).put("total", 1).put("messages", JSONArray()
+                .put(JSONObject().put("id", 1).put("role", "assistant").put("text", ref.markdown()))).toString())
+        }
+        compose.onNodeWithContentDescription("ダウンロード用画像を保存").assertIsDisplayed()
+        compose.waitUntil(5_000) { compose.onAllNodes(hasContentDescription("ダウンロード用画像")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithContentDescription("ダウンロード用画像").performClick()
+        compose.onNodeWithContentDescription("ダウンロード用画像の元画像を保存").assertIsDisplayed()
+    }
+    @Test fun downloadingKeepsOriginalBytesAndPublishesOnlyTheCompletedImage() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val bitmap = Bitmap.createBitmap(64, 32, Bitmap.Config.ARGB_8888)
+        bitmap.eraseColor(Color.TRANSPARENT); bitmap.setPixel(0, 0, Color.RED)
+        val bytes = try { ByteArrayOutputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it); it.toByteArray() } }
+            finally { bitmap.recycle() }
+        val ref = AttachmentFiles.save(person, "生成した透過画像", "png", ByteArrayInputStream(bytes))
+        val destination = ImageDownload.save(context, person, ref)
+        try {
+            context.contentResolver.openInputStream(destination)!!.use { assertArrayEquals(bytes, it.readBytes()) }
+            assertArrayEquals(bytes, AttachmentFiles.read(person, ref))
+            context.contentResolver.query(destination, arrayOf(MediaStore.MediaColumns.MIME_TYPE,
+                MediaStore.MediaColumns.RELATIVE_PATH, MediaStore.MediaColumns.IS_PENDING), null, null, null)!!.use {
+                assertTrue(it.moveToFirst())
+                assertEquals("image/png", it.getString(0))
+                assertEquals("Download/Conversation/", it.getString(1))
+                assertEquals(0, it.getInt(2))
+            }
+        } finally { context.contentResolver.delete(destination, null, null) }
+    }
+    @Test fun clickingSaveCreatesADownloadWithoutChangingTheConversationImage() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val bytes = picture()
+        val ref = AttachmentFiles.save(person, "保存操作テスト", "png", ByteArrayInputStream(bytes))
+        fun downloads(): Set<Uri> = context.contentResolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.MediaColumns._ID), "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?",
+            arrayOf("Conversation-${ref.fileName.substringBeforeLast('.')}%"), null)!!.use { cursor ->
+            buildSet { while (cursor.moveToNext()) add(ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cursor.getLong(0))) }
+        }
+        val before = downloads()
+        try {
+            compose.runOnUiThread {
+                val ui = ComposeUi(compose.activity, {}, {}, {})
+                ui.mediaDirectory = person
+                ui.setMessages(JSONObject().put("first", 0).put("total", 1).put("messages", JSONArray()
+                    .put(JSONObject().put("id", 1).put("role", "assistant").put("text", ref.markdown()))).toString())
+            }
+            compose.onNodeWithContentDescription("保存操作テストを保存").performClick()
+            compose.waitUntil(10_000) { (downloads() - before).isNotEmpty() }
+            val saved = (downloads() - before).single()
+            context.contentResolver.openInputStream(saved)!!.use { assertArrayEquals(bytes, it.readBytes()) }
+            assertArrayEquals(bytes, AttachmentFiles.read(person, ref))
+        } finally { (downloads() - before).forEach { context.contentResolver.delete(it, null, null) } }
     }
     @Test fun realImageAndVideoBecomeVisionInputAndGeneratedImageIsSaved() {
         val image = AttachmentFiles.save(person, "画像", "png", ByteArrayInputStream(picture()))

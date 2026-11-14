@@ -21,6 +21,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -28,6 +30,8 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import java.io.File
 
 @Composable
@@ -35,6 +39,20 @@ internal fun AttachmentPreview(person: File?, ref: AttachmentFiles.Ref, modifier
     val context = LocalContext.current
     var expanded by remember(person, ref.fileName) { mutableStateOf(false) }
     var failed by remember(person, ref.fileName) { mutableStateOf(false) }
+    var saving by remember(person, ref.fileName) { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    fun saveImage() {
+        if (person == null || saving) return
+        saving = true
+        scope.launch(Dispatchers.Main.immediate) {
+            try {
+                withContext(Dispatchers.IO) { ImageDownload.save(context, person, ref) }
+                Toast.makeText(context, "ダウンロード/Conversation に保存しました。", Toast.LENGTH_LONG).show()
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { Toast.makeText(context, "画像を保存できませんでした。空き容量などを確認してください。", Toast.LENGTH_LONG).show() }
+            finally { saving = false }
+        }
+    }
     val bitmap by produceState<Bitmap?>(null, person, ref.fileName) {
         value = withContext(Dispatchers.IO) {
             try {
@@ -75,12 +93,22 @@ internal fun AttachmentPreview(person: File?, ref: AttachmentFiles.Ref, modifier
             if (remove != null) IconButton(onClick = remove) {
                 Icon(ConversationIcons.menu(6), contentDescription = "${ref.name}を取り外す", tint = Color.White)
             }
+            else if (person != null && ref.image()) TextButton(onClick = ::saveImage, enabled = !saving && !failed,
+                modifier = Modifier.semantics { contentDescription = "${ref.name}を保存" }) {
+                Text(if (saving) "保存中…" else "保存")
+            }
         }
     }
     if (expanded && person != null) Dialog(onDismissRequest = { expanded = false },
         properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(Modifier.fillMaxSize().background(Color(0xFF13171C)).safeDrawingPadding()) {
-            TextButton(onClick = { expanded = false }, modifier = Modifier.align(Alignment.End)) { Text("閉じる") }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                if (remove == null && ref.image()) TextButton(onClick = ::saveImage, enabled = !saving && !failed,
+                    modifier = Modifier.semantics { contentDescription = "${ref.name}の元画像を保存" }) {
+                    Text(if (saving) "保存中…" else "保存")
+                }
+                TextButton(onClick = { expanded = false }) { Text("閉じる") }
+            }
             if (ref.video()) AndroidView(factory = { viewContext ->
                 VideoView(viewContext).apply {
                     val controls = MediaController(viewContext)
