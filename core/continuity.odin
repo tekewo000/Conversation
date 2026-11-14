@@ -2,6 +2,7 @@ package conversation
 
 import "core:encoding/json"
 import "core:fmt"
+import "core:strings"
 import "base:runtime"
 
 CONTINUITY_MAX_BYTES :: 65536
@@ -21,6 +22,8 @@ UNION ALL SELECT CAST(s.value AS INTEGER),2 FROM continuity_revisions r,json_eac
 UNION ALL SELECT CAST(s.value AS INTEGER),2 FROM json_each((SELECT state FROM assistant_states ORDER BY id DESC LIMIT 1),'$.source_ids') s`
 CONTINUITY_SOURCES_SQL :: "SELECT id FROM ("+CONTINUITY_REFERENCES_SQL+")"
 
+EPISODE_SOURCES_SQL :: "SELECT s.message_id FROM memory_sources s JOIN episode_nodes n ON n.memory_id=s.memory_id JOIN memory_current c ON c.id=n.memory_id"
+
 @(export)
 conversation_assistant_emotion :: proc "c" () -> cstring {
  context=runtime.default_context()
@@ -29,8 +32,8 @@ conversation_assistant_emotion :: proc "c" () -> cstring {
 }
 
 continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
- if len(state_text)>CONTINUITY_MAX_BYTES do return fail("Conversation state exceeds 64 KiB.")
- root,parsed:=parse_json(transmute([]byte)state_text)
+ if len(state_text)>131072 do return fail("Conversation state exceeds the extraction budget.")
+ root,parsed:=parse_json(transmute([]byte)state_text,12)
  if !parsed do return false
  defer json.destroy_value(root)
  obj,obj_ok:=root.(json.Object)
@@ -39,6 +42,19 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
  threads,threads_ok:=obj["threads"].(json.Array)
  episodes,episodes_ok:=obj["episodes"].(json.Array)
  if !threads_ok || !episodes_ok || len(threads)>6 || len(episodes)>30 do return fail("Expected at most six threads and thirty episodes.")
+ compact:=episode_compact(state_text)
+ if compact==nil || len(string(compact))>CONTINUITY_MAX_BYTES do return fail("Conversation state exceeds 64 KiB.")
+ episode_entries: json.Array
+ defer delete(episode_entries)
+ seen:=make(map[string]bool)
+ defer { for key in seen do delete(key); delete(seen) }
+ for value in episodes {
+  ep,ok:=value.(json.Object)
+  if !ok do return fail("Expected episode objects.")
+  key,key_ok:=ep["key"].(json.String)
+  scope,scope_ok:=ep["scope"].(json.String)
+  if !key_ok || !scope_ok || !episode_collect(&episode_entries,value,string(key),"",string(scope),0,&seen) do return false
+ }
  boundary:=prepare(`SELECT min(first_id) FROM jobs WHERE end_id=?1 AND end_id>(SELECT coalesce(max(through_id),0) FROM continuity_revisions) HAVING count(*)>0`)
  if boundary==nil do return false
  valid:=bind_int(boundary,1,through_id) && sqlite3_step(boundary)==100
@@ -65,11 +81,11 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
   sqlite3_finalize(same)
   if !valid do return false
  }
- for entries,group in ([4]json.Array{threads,episodes,assistant_entries,relationship_entries}) {
+ for entries,group in ([4]json.Array{threads,episode_entries,assistant_entries,relationship_entries}) {
   for item,i in entries {
    entry,entry_ok:=item.(json.Object)
    expected:=4
-   if group==1 do expected=6
+   if group==1 { expected=6; if _,exists:=entry["children"]; exists do expected=7 }
    if group==2 do expected=5
    if !entry_ok || len(entry)!=expected do return fail("Invalid conversation entry fields.")
    sources,sources_ok:=entry["source_ids"].(json.Array)
@@ -78,9 +94,9 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
     key,key_ok:=string_field(entry,"key",128)
     _,text_ok:=string_field(entry,"text",1536)
     if !key_ok || !text_ok do return fail("Conversation entries need key and text.")
-    for previous in entries[:i] {
+    if group==0 { for previous in entries[:i] {
      if string(previous.(json.Object)["key"].(json.String))==key do return fail("Duplicate conversation entry key.")
-    }
+    } }
    }
    if group==3 {
     if _,ok:=string_field(entry,"trust",768); !ok do return fail("Relationship trust must fit within 768 bytes.")
@@ -108,7 +124,7 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
     id,id_ok:=source.(json.Integer)
     if !id_ok || id<1 || i64(id)>through_id do return fail("Conversation evidence must be a saved message at or before the job boundary.")
     for previous in sources[:j] { if previous.(json.Integer)==id do return fail("Duplicate conversation evidence.") }
-    check:=prepare("SELECT role FROM messages WHERE id=?1 AND (id>=?2 OR id IN ("+CONTINUITY_SOURCES_SQL+"))")
+    check:=prepare("SELECT role FROM messages WHERE id=?1 AND (id>=?2 OR id IN ("+CONTINUITY_SOURCES_SQL+") OR id IN ("+EPISODE_SOURCES_SQL+"))")
     if check==nil do return false
     found:=bind_int(check,1,i64(id)) && bind_int(check,2,first) && sqlite3_step(check)==100
     if found && group==3 {
@@ -131,10 +147,15 @@ continuity_save :: proc(through_id: i64, value: json.Value) -> bool {
  // Omitted fields retain state; a topic-only extraction must not erase feelings or trust.
  merged:=json_query(`WITH mood AS (SELECT CASE WHEN json_type(?1,'$.assistant_state') IS NULL AND json_type(`+EXTRACTED_CONTINUITY_JSON+`,'$.assistant_state') IS NOT NULL THEN json_set(?1,'$.assistant_state',json_extract(`+EXTRACTED_CONTINUITY_JSON+`,'$.assistant_state')) ELSE ?1 END AS state)
  SELECT CASE WHEN json_type(state,'$.relationship') IS NULL AND json_type(`+EXTRACTED_CONTINUITY_JSON+`,'$.relationship') IS NOT NULL THEN json_set(state,'$.relationship',json_extract(`+EXTRACTED_CONTINUITY_JSON+`,'$.relationship')) ELSE state END FROM mood`,string(encoded))
- if merged==nil || !continuity_revision_valid(through_id,string(merged)) do return false
+ if merged==nil do return false
+ state:=strings.clone(string(merged))
+ defer delete(state)
+ if !continuity_revision_valid(through_id,state) do return false
+ compact:=episode_compact(state)
+ if compact==nil do return false
  stmt:=prepare("INSERT INTO continuity_revisions(through_id,state) VALUES(?1,?2)")
  if stmt==nil do return false
- saved:=bind_int(stmt,1,through_id) && bind_text(stmt,2,string(merged)) && sqlite3_step(stmt)==101
+ saved:=bind_int(stmt,1,through_id) && bind_text(stmt,2,string(compact)) && sqlite3_step(stmt)==101
  sqlite3_finalize(stmt)
  if !saved || !archive_capture("continuity_revisions",sqlite3_last_insert_rowid(db)) do return false
  // Searchable event revisions preserve scenes after they leave the recent window.
@@ -144,10 +165,16 @@ continuity_save :: proc(through_id: i64, value: json.Value) -> bool {
  return true
 }
 
-continuity_index_episode :: proc(through_id:i64, episode:json.Object) -> bool {
- key:=fmt.aprintf("episode:%s",string(episode["key"].(json.String)))
+continuity_index_episode :: proc(through_id:i64, episode:json.Object, root_key:string="", parent_key:string="", ancestor_path:string="") -> bool {
+ node_key:=string(episode["key"].(json.String))
+ root:=root_key
+ if root=="" do root=node_key
+ key:=fmt.aprintf("episode:%s",node_key) if parent_key=="" else fmt.aprintf("episode-node:%d:%s:%s",len(root),root,node_key)
  defer delete(key)
- text:=fmt.aprintf("場面: %s\n出来事: %s\n感情: %s",string(episode["scene"].(json.String)),string(episode["text"].(json.String)),string(episode["emotion"].(json.String)))
+ scene:=string(episode["scene"].(json.String))
+ path:=fmt.aprintf("%s / %s",ancestor_path,scene) if parent_key!="" else fmt.aprintf("%s",scene)
+ defer delete(path)
+ text:=fmt.aprintf("場面: %s\n出来事: %s\n感情: %s",path,string(episode["text"].(json.String)),string(episode["emotion"].(json.String)))
  defer delete(text)
  scope:=string(episode["scope"].(json.String))
  previous:i64
@@ -162,7 +189,30 @@ continuity_index_episode :: proc(through_id:i64, episode:json.Object) -> bool {
  }
  sqlite3_finalize(current)
  if step!=100 && step!=101 do return fail("Could not read the previous scene memory.")
- if unchanged do return true
+ if unchanged {
+  encoded,e:=json.marshal(episode["source_ids"])
+  defer delete(encoded)
+  if e!=nil do return false
+  check:=prepare("SELECT count(*) FROM (SELECT message_id FROM memory_sources WHERE memory_id=?1 UNION SELECT CAST(value AS INTEGER) FROM json_each(?2))")
+  if check==nil do return false
+  valid:=bind_int(check,1,previous) && bind_text(check,2,string(encoded)) && sqlite3_step(check)==100
+  if valid do unchanged=sqlite3_column_int64(check,0)<=16
+  sqlite3_finalize(check)
+  if !valid do return false
+ }
+ if unchanged {
+  for source in episode["source_ids"].(json.Array) {
+   check:=prepare("SELECT 1 FROM memory_sources WHERE memory_id=?1 AND message_id=?2")
+   if check==nil do return false
+   valid:=bind_int(check,1,previous) && bind_int(check,2,i64(source.(json.Integer)))
+   code:=sqlite3_step(check) if valid else -1
+   sqlite3_finalize(check)
+   if code!=100 && (code!=101 || !insert_source(previous,i64(source.(json.Integer)))) do return false
+  }
+  if !episode_save_link(previous,root,parent_key,episode) do return false
+  if children,exists:=episode["children"]; exists { for child in children.(json.Array) { if !continuity_index_episode(through_id,child.(json.Object),root,node_key,path) do return false } }
+  return true
+ }
  stmt:=prepare("INSERT INTO memories(job_id,kind,actor,subject,key,text,scope,certainty,supersedes_id,valid_from) VALUES((SELECT id FROM jobs WHERE end_id=?1 ORDER BY first_id LIMIT 1),'event','conversation','episode',?2,?3,?4,'explicit',nullif(?5,0),'')")
  if stmt==nil do return false
  saved:=bind_int(stmt,1,through_id) && bind_text(stmt,2,key) && bind_text(stmt,3,text) && bind_text(stmt,4,scope) && bind_int(stmt,5,previous) && sqlite3_step(stmt)==101
@@ -173,5 +223,7 @@ continuity_index_episode :: proc(through_id:i64, episode:json.Object) -> bool {
  for source in episode["source_ids"].(json.Array) {
   if !insert_source(id,i64(source.(json.Integer))) do return false
  }
+ if !episode_save_link(id,root,parent_key,episode) do return false
+ if children,exists:=episode["children"]; exists { for child in children.(json.Array) { if !continuity_index_episode(through_id,child.(json.Object),root,node_key,path) do return false } }
  return true
 }

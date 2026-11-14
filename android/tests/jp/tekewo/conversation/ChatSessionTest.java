@@ -48,6 +48,7 @@ public final class ChatSessionTest {
         public void memoryStatus(String error) { warning = error; }
     }
     public static void main(String[] arguments) throws Exception {
+        hierarchySourcesReachExtractionAndIdleWorkMakesNoRequests();
         memoryBatchBoundaryComesFromTheStoreNotTheModel();
         memoryPayloadAcceptsThirtyDetailedScenesAndRejectsOversizedResults();
         cancelledRetrievalDoesNotStartTransport();
@@ -213,6 +214,33 @@ public final class ChatSessionTest {
         cancelledReflectionDoesNotCommit();
         rejectedReflectionStaysPending();
         System.out.println("PASS: chat completion, cancellation, raw evidence, memory retry, query bounds, persona context and reflection retry");
+    }
+
+    static void hierarchySourcesReachExtractionAndIdleWorkMakesNoRequests() throws Exception {
+        Store store = new Store() {
+            @Override public JSONObject context(String query) throws Exception {
+                JSONArray messages = new JSONArray().put(new JSONObject().put("id", 1).put("role", "user").put("content", "初日の朝、青葉珈琲で悩みを話した"))
+                        .put(new JSONObject().put("id", 1001).put("role", "user").put("content", "あの旅行の続きを話す"))
+                        .put(new JSONObject().put("id", 1002).put("role", "assistant").put("content", "聞かせて"));
+                return new JSONObject().put("messages", messages).put("continuity", new JSONObject().put("threads", new JSONArray()).put("episodes", new JSONArray()))
+                        .put("memories", new JSONArray().put(new JSONObject().put("source_ids", new JSONArray().put(1))
+                                .put("hierarchy", new JSONArray().put(new JSONObject().put("root_key", "kyoto").put("key", "day1").put("source_ids", new JSONArray().put(1))))));
+            }
+            @Override public JSONObject pending() throws Exception {
+                return pending ? new JSONObject().put("id", 1).put("messages", new JSONArray().put(context("").getJSONArray("messages").getJSONObject(1))
+                        .put(context("").getJSONArray("messages").getJSONObject(2))) : new JSONObject();
+            }
+        };
+        int[] calls = {0};
+        ChatSession session = new ChatSession(store);
+        session.processMemories((instructions, input, delta) -> {
+            calls[0]++;
+            JSONObject data = new JSONObject(input.getJSONObject(0).getString("content"));
+            assert data.getJSONArray("evidence").getJSONObject(0).getLong("id") == 1 : "A retrieved hierarchy node's old original evidence must reach extraction";
+            return "{\"memories\":[]}";
+        });
+        assert calls[0] == 1;
+        session.processMemories((instructions, input, delta) -> { throw new AssertionError("Idle memory work must not call the model"); });
     }
 
     static void memoryPayloadAcceptsThirtyDetailedScenesAndRejectsOversizedResults() throws Exception {

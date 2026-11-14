@@ -14,14 +14,9 @@ public final class ReleaseStartupProbe extends Instrumentation {
     @Override public void onCreate(Bundle arguments) { super.onCreate(arguments); start(); }
     @Override public void onStart() {
         Bundle result = new Bundle();
-        android.content.SharedPreferences preferences = null;
-        boolean wasPaused = false;
         int resultCode = Activity.RESULT_OK;
         try {
             Context context = getTargetContext();
-            preferences = context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE);
-            wasPaused = preferences.getBoolean("memory_paused", false);
-            if (!preferences.edit().putBoolean("memory_paused", true).commit()) throw new AssertionError("Could not isolate the startup diagnostic from AI requests");
             ClassLoader loader = context.getClassLoader();
             Class<?> models = loader.loadClass("jp.tekewo.conversation.RagModels");
             Method ensure = models.getDeclaredMethod("ensure", Context.class, Consumer.class); ensure.setAccessible(true);
@@ -67,7 +62,7 @@ public final class ReleaseStartupProbe extends Instrumentation {
                     for (int i = 1; i < messages.length(); i++)
                         if (messages.getJSONObject(i).getLong("id") != messages.getJSONObject(i - 1).getLong("id") + 1)
                             throw new AssertionError("Memory batch skipped original messages");
-                    sendStatus(0, status("MEMORY_BATCH_PASS: " + messages.length() + " contiguous messages; no AI request made\n"));
+                    sendStatus(0, status("MEMORY_BATCH_PASS: " + messages.length() + " contiguous pending messages\n"));
                 }
                 Method snapshot = activity.getClass().getDeclaredMethod("nativeContext", byte[].class); snapshot.setAccessible(true);
                 org.json.JSONObject progress = new org.json.JSONObject((String)snapshot.invoke(null, new byte[0])).getJSONObject("memory_progress");
@@ -81,11 +76,6 @@ public final class ReleaseStartupProbe extends Instrumentation {
             java.io.StringWriter trace = new java.io.StringWriter(); failure.printStackTrace(new java.io.PrintWriter(trace));
             result.putString("stream", "RELEASE_STARTUP_FAIL\n" + trace);
             resultCode = Activity.RESULT_CANCELED;
-        } finally {
-            if (preferences != null && !preferences.edit().putBoolean("memory_paused", wasPaused).commit()) {
-                result.putString("stream", "RELEASE_STARTUP_FAIL: could not restore background memory settings\n");
-                resultCode = Activity.RESULT_CANCELED;
-            }
         }
         finish(resultCode, result);
     }

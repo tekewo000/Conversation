@@ -127,7 +127,7 @@ public final class PersonDeviceProbe extends Instrumentation {
         android.content.SharedPreferences preferences = app.getSharedPreferences("MainActivity", Context.MODE_PRIVATE);
         String model = preferences.getString("model_slug", "");
         report("MEMORY_CONFIG " + new JSONObject().put("model", model).put("effort", preferences.getString("reasoning_effort:" + model, ""))
-                .put("paused", preferences.getBoolean("memory_paused", false)).put("status", preferences.getString("memory_status", "")));
+                .put("automatic", true).put("status", preferences.getString("memory_status", "")));
         File root = app.getFilesDir().getCanonicalFile();
         JSONObject registry = new JSONObject(new String(Files.readAllBytes(new File(root, "people-registry.json").toPath()), StandardCharsets.UTF_8));
         String id = registry.getString("active_id");
@@ -315,7 +315,8 @@ public final class PersonDeviceProbe extends Instrumentation {
             }
             check(sawMetadata && sawMessage && sawSource, "ZIP includes metadata, conversation, and original source");
             report("PASS: native export metadata JSON and BackupArchive ZIP preserve Unicode and original source");
-            probeExpandedPerson(root);
+            if (!"hierarchy".equals(arguments.getString("mode"))) probeExpandedPerson(root);
+            probeHierarchicalMemory(root);
             probeDigestRules(root);
         } finally {
             cleanupOwned(app, probeId);
@@ -339,6 +340,41 @@ public final class PersonDeviceProbe extends Instrumentation {
         try { databaseDigests(file, baseline); throw new IOException("Changed old rows were not detected"); }
         catch (AssertionError expected) { check(expected.getMessage().equals("Existing SQLite rows changed: jobs"), "Changed-row failure identifies only its table"); }
         report("PASS: release row-prefix digests permit appended rows and detect changed old rows");
+    }
+
+    private void probeHierarchicalMemory(File root) throws Exception {
+        File directory = new File(root, UUID.randomUUID().toString());
+        switchPerson(directory, person(directory.getName(), "Hierarchy Probe", "階層記憶の合成試験").toString());
+        check(add("京都旅行の初日の朝、青葉珈琲で仕事の悩みを話した。安心した。") == 1, "Hierarchy original source");
+        check((Long)call("nativeAddMessage", new Class<?>[]{byte[].class, byte[].class}, bytes("assistant"), bytes("話を聞いた。")) == 2, "Hierarchy assistant source");
+        JSONObject leaf = episode("cafe", "青葉珈琲", "仕事の悩みを話した", "安心した");
+        JSONObject morning = episode("morning", "朝", "朝はカフェに行った", "").put("children", new JSONArray().put(leaf));
+        JSONObject day = episode("day1", "1日目", "初日は観光した", "").put("children", new JSONArray().put(morning));
+        JSONObject trip = episode("trip", "京都旅行", "二日間の京都旅行", "").put("children", new JSONArray().put(day));
+        JSONObject payload = new JSONObject().put("memories", new JSONArray()).put("continuity",
+                new JSONObject().put("threads", new JSONArray()).put("episodes", new JSONArray().put(trip)));
+        success(call("nativeApplyJob", new Class<?>[]{long.class, byte[].class}, 1L, bytes(payload.toString())));
+        JSONObject snapshot = new JSONObject((String)call("nativeContext", new Class<?>[]{byte[].class}, bytes("青葉珈琲")));
+        check(snapshot.getJSONObject("continuity").getJSONArray("episodes").length() == 1, "Four hierarchy levels consume one experience slot");
+        check(!snapshot.getJSONObject("continuity").getJSONArray("episodes").getJSONObject(0).has("children"), "Reply receives compact roots");
+        check(snapshot.toString().contains("hierarchy") && snapshot.toString().contains("仕事の悩みを話した"), "Leaf search includes ancestor context");
+        for (String parent : new String[]{"trip", "day1", "morning"}) {
+            JSONObject query = new JSONObject().put("root_key", "trip").put("parent_key", parent).put("scope", "shared").put("after_id", 0);
+            JSONObject page = new JSONObject((String)call("nativeEpisodeChildren", new Class<?>[]{byte[].class}, bytes(query.toString())));
+            check(page.getJSONArray("episodes").length() == 1 && !page.getBoolean("has_more"), "Release JNI reads hierarchy level " + parent);
+            check(page.getJSONArray("episodes").getJSONObject(0).getJSONArray("source_ids").getLong(0) == 1, "Hierarchy keeps original evidence");
+        }
+        JSONObject delta = archive();
+        check(delta.toString().contains("episode_nodes"), "Hierarchy links reach the Git archive");
+        success(call("nativeExport", new Class<?>[]{}));
+        JSONObject metadata = new JSONObject(new String(Files.readAllBytes(new File(directory, "export/metadata.json").toPath()), StandardCharsets.UTF_8));
+        check(metadata.getInt("episode_nodes") == 4, "Hierarchy links reach the snapshot");
+        report("HIERARCHY_RELEASE_PASS: four levels, one root, leaf retrieval, ancestor context, paged JNI, original evidence, Git and snapshot links");
+    }
+
+    private static JSONObject episode(String key, String scene, String text, String emotion) throws Exception {
+        return new JSONObject().put("key", key).put("scene", scene).put("text", text).put("emotion", emotion)
+                .put("scope", "shared").put("source_ids", new JSONArray().put(1));
     }
 
     private void probeExpandedPerson(File root) throws Exception {

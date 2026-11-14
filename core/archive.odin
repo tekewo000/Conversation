@@ -22,6 +22,7 @@ ARCHIVE_TABLES := [?]Archive_Table{
  {"persona_revisions","id,through_id,changes,created_at",`json_object('id',id,'through_id',through_id,'changes',changes,'created_at',created_at)`},
  {"continuity_revisions","id,through_id,state,created_at",`json_object('id',id,'through_id',through_id,'state',state,'created_at',created_at)`},
  {"assistant_states","id,through_id,state,created_at",`json_object('id',id,'through_id',through_id,'state',state,'created_at',created_at)`},
+ {"episode_nodes","memory_id,root_key,parent_key,node_key,node",`json_object('memory_id',memory_id,'root_key',root_key,'parent_key',parent_key,'node_key',node_key,'node',node)`},
 }
 archive_group:i64
 ARCHIVE_GROUP_MAX :: 16*1048576
@@ -183,9 +184,10 @@ archive_row_valid :: proc(table: ^Archive_Table, row: json.Object) -> bool {
   case "raw_markdown":maximum=PERSON_SOURCE_MAX_BYTES
   case "section":maximum=512
   case "changes":maximum=32768
+  case "node":maximum=32768
   case "state":maximum=ASSISTANT_STATE_MAX_BYTES if table.name=="assistant_states" else CONTINUITY_MAX_BYTES
   }
-  if !ok || len(text)>maximum || !utf8.valid_string(text) || strings.contains_rune(text,0) || (column!="valid_from" && len(strings.trim_space(text))==0) do return false
+  if !ok || len(text)>maximum || !utf8.valid_string(text) || strings.contains_rune(text,0) || (column!="valid_from" && column!="parent_key" && len(strings.trim_space(text))==0) do return false
   if (column=="created_at" || column=="occurred_at" || (column=="valid_from" && text!="")) && !valid_date(text) do return false
   if column=="person_id" && !person_uuid_valid(text) do return false
  }
@@ -218,6 +220,9 @@ archive_restore_event :: proc(event: json.Object, encoded: string) -> bool {
  }
  if table.name=="assistant_states" {
   if i64(row["id"].(json.Integer))!=scalar("SELECT coalesce(max(id),0)+1 FROM assistant_states") || !assistant_state_valid(i64(row["through_id"].(json.Integer)),string(row["state"].(json.String))) do return fail("Invalid archived assistant state; nothing was restored.")
+ }
+ if table.name=="episode_nodes" {
+  if !episode_archive_link_valid(row) do return fail("Invalid archived episode hierarchy; nothing was restored.")
  }
  columns:=strings.split(table.columns,",")
  defer delete(columns)
@@ -322,6 +327,7 @@ conversation_apply_archive :: proc "c" (payload: cstring) -> bool {
   sqlite3_finalize(check)
   if !valid do return fail("Archive owner does not match its source document.")
  } else if scalar("SELECT count(*) FROM person_profiles")!=0 do return fail("Legacy archive cannot replace a person's history.")
+ if scalar("SELECT count(*) FROM memory_current c JOIN memories m ON m.id=c.id JOIN episode_nodes previous ON previous.memory_id=m.supersedes_id WHERE NOT EXISTS(SELECT 1 FROM episode_nodes n WHERE n.memory_id=m.id)")!=0 do return fail("Archive disconnected an episode branch; nothing was restored.")
  if !execute("COMMIT") do return false
  committed=true
  message_count=i32(scalar("SELECT coalesce(max(id),0) FROM messages"))

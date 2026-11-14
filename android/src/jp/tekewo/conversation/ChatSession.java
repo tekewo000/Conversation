@@ -61,7 +61,8 @@ final class ChatSession {
           + "何でも同意したりしないでください。不要な見出しや毎回の質問を避け、会話を続けてください。"
           + "continuityは以前の会話の現在地と体験です。候補の順番、決定・保留、出来事・当時の感情・場面を"
           + "必要に応じて参照し、根拠の会話も確認してください。through_idより新しい発言の訂正や決定を優先します。"
-          + "episodesは場所・時間・用事のまとまりごとの場面記憶です。今の場面と過去の場面を区別し、"
+          + "episodesは旅行や一連の相談など大きな体験の概要です。memoriesのhierarchyには体験→日・段階→場面→出来事の親子関係があります。"
+          + "細部への検索結果は親の体験・日・場面と結び付け、同じ場所でも別の旅行や別の日を混ぜません。今の場面と過去の場面を区別し、"
           + "『あのカフェのとき』などは場面・出来事・感情を関連付けて思い出してください。"
           + "memoriesのsubjectがepisodeのeventも過去の場面記憶で、actorがconversationでも現実に二人が同席した証拠ではありません。"
           + "現在地は最新の明示された会話に従い、昔の場面を今起きていることとして語らないでください。"
@@ -136,9 +137,9 @@ final class ChatSession {
           + "supersedes_idで更新してください。過去の出来事は消さないこと。"
           + "日付が不明なら作らず省略してください。約束の完了・取消は同じキーの新しい版として残します。"
           + "continuityは毎回必ず返し、入力のcontinuityを引き継ぎながらjob.messagesとevidenceの原文で更新します。"
-          + "threadsは最大6件、episodesは直近の場面を最大30件。各項目のkeyはUTF-8で128バイト、textは1536バイト以下、"
+          + "threadsは最大6件、episodesの大きな体験は最大30件。各項目のkeyはUTF-8で128バイト、textは1536バイト以下、"
           + "emotionとsceneは各768バイト以下、source_idsは重複なし1〜8件。continuity全体はJSON化後64KiB以下。"
-          + "continuityの根拠はjob.messages、evidence、または以前のcontinuityがすでに持つsource_idsに限ります。"
+          + "continuityの根拠はjob.messages、evidence、または以前のcontinuity・既存の体験の枝がすでに持つsource_idsに限ります。"
           + "relationshipは任意で、実際のユーザーと応答する人物の会話上の関係だけを保存し、創作の関係や架空の経歴を混ぜません。"
           + "trustとopennessは各UTF-8で768バイト、basisは1536バイト以下、source_idsは重複なし1〜8件でuserとassistant双方の根拠が必要です。"
           + "未保存なら根拠があるときだけ追加し、無関係な会話では既存のrelationshipをそのまま引き継ぎます。省略は保持でありnullで解除しません。"
@@ -152,14 +153,22 @@ final class ChatSession {
           + "無関係な雑談を挟んでも、未決定の話や未完の候補はpausedとして保持し、候補の順番と条件を消さないこと。"
           + "明確な決定・訂正があれば更新し、AIの提案だけでは決定済みにしないこと。保持枠を超える場合は、"
           + "threadsは解決済みの話から外し、進行中・保留中の話を優先します。何もない場合だけ空配列にします。"
-          + "episodesは単発の発言や話題ではなく、一続きの場所・時間・用事で起きた出来事、会話の流れ、決定・未完のこと、"
-          + "本人の明示した感情の変化を一つの場面としてまとめ、場面の開始順に古いものから並べます。"
-          + "場所の移動、翌日など明確な時間の切り替わり、別の用事の開始のいずれかで新しいkeyの場面に分けます。"
-          + "同じ場所でも別の日・別の用事は別の場面です。同じ場所へ戻った場合も前の場面へ混ぜません。"
-          + "同じ場面が続く間はkeyを保って要約と出典を更新し、雑談や小さな話題の変更だけでは分割しません。"
+          + "episodesの1件は京都旅行など大きな一つの体験、または転職相談など一連の用事です。旅行中の移動や翌日は新しい大項目にしません。"
+          + "同じ京都でも別の旅行は別keyにし、体験の開始順に古いものから並べます。"
+          + "各episodeには任意のchildren配列を追加でき、子もkey,text,emotion,scene,scope,source_idsと任意のchildrenを持つ同じ形式です。"
+          + "例えば京都旅行→1日目→夜のホテル→悩みを打ち明けた出来事の最大4階層で保存します。"
+          + "日や朝昼夜が不明なら中間の階層を飛ばし、相談では応募・面接・結果など意味のある区切りを使います。日時・場所を補いません。"
+          + "親は全体の概要、子は具体的な経緯・決定・未完のこと・明示された感情の変化を残し、重要な出来事を親の要約だけへ押し込みません。"
+          + "子のscopeは大項目と同じです。子のkeyはUTF-8で96バイト以下、sceneは256バイト以下、他の上限は親と同じです。"
+          + "同じ体験内では全階層を通してkeyを一意に保ち、一度作った子の親を変えません。同じ場所でも別の日や別の用事は別の子にします。"
+          + "episodesの大項目30件は毎回引き継ぎ、childrenは今回追加・訂正する枝だけを返します。childrenの省略や空配列は既存の子を削除しません。"
+          + "全体で親子合計128件までの変更にし、親の要約だけを更新する場合はchildrenを省略します。大項目の概要部分は全体64KiB以内に保ちます。"
+          + "existingのmemories.hierarchyのroot_key,parent_key,keyとsceneを使って既存の枝を見つけ、同じ出来事を別keyで重複登録しません。"
+          + "枝の続きは必要な祖先を同じkeyで含めます。古い平坦な場面は会話の根拠がある場合だけ大きな体験の下へ整理できます。"
+          + "話題がそれても同じ体験の続きを同じkeyへ戻し、過去の出来事への言及だけで新しい体験を作りません。"
           + "過去の出来事を話題にしただけでは現在地を変えず、会話内の明示された状況だけを使い、実際の位置情報や移動を推測しません。"
           + "sceneには分かる時間・場所・同席者・用事をまとめ、不明な情報は補わないでください。"
-          + "現在の場面と直近29件を保持し、30件を超えるときは開始順で古い場面から外します。"
+          + "現在の大きな体験と直近29件を保持し、30件を超えるときは開始順で古い大項目から外します。子の数は30枠を消費しません。"
           + "episodesはアプリが出典付きのeventとして保存するため、同じ場面要約をmemoriesに重複出力しません。"
           + "その場面から分かる好み・約束など、別の役割の長期記憶は従来どおり抽出します。"
           + "出来事・本人の明示した感情・場面を関連付け、同じ場所でも別の日を混ぜず、"
@@ -286,6 +295,18 @@ final class ChatSession {
                 if (state == null) continue;
                 JSONArray ids = state.getJSONArray("source_ids");
                 for (int i = 0; i < ids.length(); i++) retainedSources.add(ids.getLong(i));
+            }
+            JSONArray recalled = existing.optJSONArray("memories");
+            if (recalled != null) for (int i = 0; i < recalled.length(); i++) {
+                JSONObject memory = recalled.getJSONObject(i);
+                JSONArray hierarchy = memory.optJSONArray("hierarchy");
+                if (hierarchy == null || hierarchy.length() == 0) continue;
+                JSONArray ids = memory.optJSONArray("source_ids");
+                if (ids != null) for (int j = 0; j < ids.length(); j++) retainedSources.add(ids.getLong(j));
+                for (int j = 0; j < hierarchy.length(); j++) {
+                    ids = hierarchy.getJSONObject(j).optJSONArray("source_ids");
+                    if (ids != null) for (int k = 0; k < ids.length(); k++) retainedSources.add(ids.getLong(k));
+                }
             }
             JSONArray originals = existing.optJSONArray("messages");
             if (originals != null) for (int i = 0; i < originals.length(); i++) {

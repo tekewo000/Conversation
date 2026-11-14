@@ -259,6 +259,19 @@ Java_jp_tekewo_conversation_MainActivity_nativeAddReply(JNIEnv* env, jclass, jby
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeEpisodeChildren(JNIEnv* env, jclass, jbyteArray query) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        std::string text;
+        if (!core_ready || !read_text(env, query, text)) { error = "入力が無効です。"; return java_string(env, ""); }
+        const char* result = conversation_episode_children(text.c_str());
+        if (!result) { core_error(); return java_string(env, ""); }
+        error.clear();
+        return java_string(env, result);
+    } catch (const std::exception&) { error = "体験の詳細を読み込めませんでした。"; return java_string(env, ""); }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_jp_tekewo_conversation_MainActivity_nativeContext(JNIEnv* env, jclass, jbyteArray query) {
     std::lock_guard<std::mutex> lock(mutex);
     try {

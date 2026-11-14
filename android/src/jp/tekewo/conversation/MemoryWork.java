@@ -26,16 +26,8 @@ public final class MemoryWork extends Worker {
     public MemoryWork(Context context, WorkerParameters parameters) { super(context, parameters); }
     private static SharedPreferences settings(Context context) { return context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE); }
     static boolean isRunning() { return running.get(); }
-    static boolean isPaused(Context context) { return settings(context).getBoolean("memory_paused", false); }
     static String status(Context context) { return settings(context).getString("memory_status", ""); }
-    static void pause(Context context) { settings(context).edit().putBoolean("memory_paused", true).apply(); }
-    static void resume(Context context) {
-        settings(context).edit().putBoolean("memory_paused", false).apply();
-        if (!isRunning()) WorkManager.getInstance(context).cancelUniqueWork(NAME);
-        enqueue(context);
-    }
     static void enqueue(Context context) {
-        if (isPaused(context)) return;
         OneTimeWorkRequest request = new OneTimeWorkRequest.Builder(MemoryWork.class)
                 .setConstraints(new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS).build();
@@ -44,7 +36,6 @@ public final class MemoryWork extends Worker {
 
     @Override public Result doWork() {
         Context context = getApplicationContext();
-        if (isPaused(context)) return Result.success();
         if (!running.compareAndSet(false, true)) return Result.retry();
         try {
             connection = new ChatGptConnection(context);
@@ -70,7 +61,7 @@ public final class MemoryWork extends Worker {
             setProgressAsync(new Data.Builder().putLong("updated", System.currentTimeMillis()).build()).get();
             // One extraction plus reflection stays inside WorkManager's execution deadline.
             boolean more = session.processMemories((instructions, input, delta) -> {
-                if (isStopped() || isPaused(context)) throw new IOException("記憶の整理を一時停止しました。");
+                if (isStopped()) throw new IOException("記憶の整理が中断されました。");
                 if (instructions.equals(ChatSession.REFLECT)) publishProgress(store);
                 return connection.request(request, instructions, input, delta, true,
                         instructions.equals(ChatSession.EXTRACT) ? 300 : 120);
@@ -85,10 +76,9 @@ public final class MemoryWork extends Worker {
             if (more && !isStopped()) enqueue(context);
             return Result.success();
         } catch (Exception error) {
-            String message = isPaused(context) ? "記憶の整理を一時停止しました。"
-                    : "記憶の整理は自動で再試行します。" + (error instanceof IOException ? error.getMessage() : "");
+            String message = "記憶の整理は自動で再試行します。" + (error instanceof IOException ? error.getMessage() : "");
             settings(context).edit().putString("memory_status", message).apply();
-            return isPaused(context) ? Result.success() : Result.retry();
+            return Result.retry();
         } finally { running.set(false); }
     }
 

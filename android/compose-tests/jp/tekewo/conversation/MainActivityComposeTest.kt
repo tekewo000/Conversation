@@ -251,6 +251,12 @@ class MainActivityComposeTest {
                 .put("text", "場面${i}の出来事").put("scene", "${i}日目のカフェ")
                 .put("emotion", "そのときは安心した").put("scope", "shared")
                 .put("source_ids", org.json.JSONArray().put(1).put(2)))
+            episodes.getJSONObject(29).put("children", org.json.JSONArray().put(org.json.JSONObject()
+                .put("key", "day1").put("text", "旅の初日の出来事").put("scene", "1日目")
+                .put("emotion", "").put("scope", "shared").put("source_ids", org.json.JSONArray().put(1))
+                .put("children", org.json.JSONArray().put(org.json.JSONObject().put("key", "morning")
+                    .put("text", "青葉珈琲で悩みを話した").put("scene", "朝のカフェ").put("emotion", "安心した")
+                    .put("scope", "shared").put("source_ids", org.json.JSONArray().put(1))))))
             val state = org.json.JSONObject("""{"threads":[],"episodes":[],"assistant_state":{"emotion":"ほっとして嬉しい","reason":"試合終了の報告","event":"一緒に喜んだ会話","scope":"shared","source_ids":[1,2]}}""")
                 .put("episodes", episodes)
             val payload = org.json.JSONObject().put("memories", org.json.JSONArray()).put("continuity", state)
@@ -282,13 +288,17 @@ class MainActivityComposeTest {
         compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("記憶")).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithText("中期記憶（30件）").performClick()
         compose.onNodeWithText("中期記憶").assertExists()
-        val scenes = compose.onNodeWithText("30日目のカフェ", substring = true)
+        compose.onNodeWithText("30日目のカフェ", substring = true)
             .assertTextContains("場面30の出来事", substring = true).assertTextContains("そのときは安心した", substring = true)
-            .assertTextContains("1日目のカフェ", substring = true).assertTextContains("場面1の出来事", substring = true)
             .assertTextContains("会話内の体験", substring = true)
-        assertTrue(scenes.fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text]
-            .joinToString().indexOf("30日目のカフェ") < scenes.fetchSemanticsNode()
-            .config[androidx.compose.ui.semantics.SemanticsProperties.Text].joinToString().indexOf("1日目のカフェ"))
+        compose.onNodeWithText("30日目のカフェ", substring = true).performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("1日目\n旅の初日の出来事")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("1日目\n旅の初日の出来事").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("朝のカフェ\n青葉珈琲で悩みを話した")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("朝のカフェ\n青葉珈琲で悩みを話した").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("青葉珈琲で悩みを話した", substring = true)).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("青葉珈琲で悩みを話した", substring = true).assertTextContains("安心した", substring = true)
+        repeat(3) { compose.onNodeWithContentDescription("閉じる").performClick(); compose.waitForIdle() }
         InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(100, 3000)
         InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot().let { image ->
             java.io.File(context.cacheDir, "memory-scenes.png").outputStream().use {
@@ -319,12 +329,11 @@ class MainActivityComposeTest {
         compose.onNodeWithContentDescription("閉じる").performClick()
         compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("記憶")).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithContentDescription("閉じる").performClick()
-        MemoryWork.pause(context)
+        context.getSharedPreferences("MainActivity", android.content.Context.MODE_PRIVATE).edit().putBoolean("memory_paused", true).commit()
         compose.activityRule.scenario.recreate()
         openShortTermMemory()
-        assertTrue(MemoryWork.isPaused(context))
-        compose.onNodeWithText("記憶の整理を続ける").performClick()
-        assertTrue(!MemoryWork.isPaused(context))
+        compose.onNodeWithText("記憶の整理を続ける").assertDoesNotExist()
+        compose.onNodeWithText("この整理のあと一時停止").assertDoesNotExist()
         assertTrue(androidx.work.WorkManager.getInstance(context)
             .getWorkInfosForUniqueWork(MemoryWork.NAME).get(5, java.util.concurrent.TimeUnit.SECONDS).isNotEmpty())
         compose.onNodeWithContentDescription("閉じる").performClick()

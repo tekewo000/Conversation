@@ -35,6 +35,7 @@ public final class MainActivity extends ComponentActivity {
     static native String nativePendingPersona();
     static native String nativeApplyPersona(long throughId, byte[] payload);
     private static native String nativeMemories(byte[] query);
+    private static native String nativeEpisodeChildren(byte[] query);
     private static native String nativeExport();
     private static native String nativeRecentTranscript();
     static native String nativeSwitchPerson(byte[] directory, byte[] payload);
@@ -53,6 +54,7 @@ public final class MainActivity extends ComponentActivity {
     private String semanticStatus = "意味検索を準備しています";
     private String memoryStatus = "";
     private int memoryView;
+    private int episodeRequest;
     private PersonRegistry people;
     private PersonRegistry.Person activePerson;
     private File pendingExportDirectory;
@@ -474,11 +476,9 @@ public final class MainActivity extends ComponentActivity {
             panel.rows.add(new ComposeUi.Row("モデル · " + name, this::showModels, 4));
             panel.rows.add(new ComposeUi.Row("Effort · " + (effort.isEmpty() ? "既定" : effort), () -> showRequestOption(false), 4));
             panel.rows.add(new ComposeUi.Row("Fast · " + (fast ? "On" : "Off"), () -> showRequestOption(true), 4));
-            panel.rows.add(new ComposeUi.Row("記憶の整理を再試行", this::retryMemories, 2));
         }
         panel.rows.add(new ComposeUi.Row(connection.hasSession() ? "ログアウト" : "保存した接続情報をリセット", () -> {
             if (busy) return;
-            MemoryWork.pause(this);
             androidx.work.WorkManager.getInstance(this).cancelUniqueWork(MemoryWork.NAME);
             worker.execute(() -> {
                 connection.signOut(); availableModels = null;
@@ -593,7 +593,7 @@ public final class MainActivity extends ComponentActivity {
         });
     }
 
-    private void retryMemories() { MemoryWork.resume(this); if (semanticMemory != null) semanticMemory.refresh(); }
+    private void retryMemories() { queueMemories(null); if (semanticMemory != null) semanticMemory.refresh(); }
 
     private void queueMemories(ChatRequest selected) {
         if (closed || changingPerson || activePerson == null || !connection.hasSession()) return;
@@ -646,7 +646,7 @@ public final class MainActivity extends ComponentActivity {
 
     private void refreshMemoryView() {
         final int requestedView = memoryView;
-        if (requestedView == 0) return;
+        if (requestedView == 0 || requestedView == 4) return;
         final PersonRegistry.Person person = activePerson;
         if (person == null || changingPerson) return;
         reader.execute(() -> {
@@ -679,13 +679,6 @@ public final class MainActivity extends ComponentActivity {
                     panel.rows.add(new ComposeUi.Row("短期記憶（直近30往復）", () -> showMemoryHistory(person, snapshot, false)));
                     panel.rows.add(new ComposeUi.Row("中期記憶（" + (episodes == null ? 0 : episodes.length()) + "件）",
                             () -> showMemoryHistory(person, snapshot, true)));
-                    if (progress != null && progress.optLong("pending_jobs") > 0) {
-                        boolean running = MemoryWork.isRunning();
-                        panel.rows.add(new ComposeUi.Row(running ? (MemoryWork.isPaused(this) ? "一時停止を予約しました" : "この整理のあと一時停止") : "記憶の整理を続ける", () -> {
-                            if (running) MemoryWork.pause(this); else retryMemories();
-                            showMemory();
-                        }));
-                    }
                     panel.rows.add(new ComposeUi.Row("人物アイコンを設定", () -> { memoryView = 0; showPersonIcon(); }, 2));
                     compose.show(panel);
                 });
@@ -702,24 +695,20 @@ public final class MainActivity extends ComponentActivity {
                 ? (continuity == null ? null : continuity.optJSONArray("episodes")) : snapshot.optJSONArray("messages");
         StringBuilder text = new StringBuilder();
         if (entries == null || entries.length() == 0) {
-            text.append(middleTerm ? "中期記憶はまだありません。会話を整理すると、場面ごとの記憶がここに表示されます。"
+            text.append(middleTerm ? "中期記憶はまだありません。会話を整理すると、体験ごとの記憶がここに表示されます。"
                     : "短期記憶の会話はまだありません。");
         } else {
-            text.append(middleTerm ? "直近30件までの場面を、新しいものから表示します。"
+            text.append(middleTerm ? "直近30件までの体験です。開くと、日・場面・出来事の詳細を確認できます。"
                     : "直近30往復（最大61発言）を、新しいものから表示します。");
             int first = Math.max(0, entries.length() - (middleTerm ? 30 : 61));
             for (int i = entries.length() - 1; i >= first; i--) {
                 JSONObject entry = entries.optJSONObject(i);
                 if (entry == null) continue;
-                text.append("\n\n");
                 if (middleTerm) {
-                    String scene = entry.optString("scene");
-                    text.append(scene.isEmpty() ? "場面の情報は未記録" : scene).append("\n").append(entry.optString("text"));
-                    String emotion = entry.optString("emotion");
-                    if (!emotion.isEmpty()) text.append("\n気持ち：").append(emotion);
-                    String scope = entry.optString("scope");
-                    text.append("\n").append(scope.equals("fiction") ? "創作の場面" : scope.equals("real") ? "現実の出来事" : "会話内の体験");
+                    panel.rows.add(new ComposeUi.Row(episodeDescription(entry), () -> showEpisodeNode(person,
+                            entry.optString("key"), entry, () -> { memoryView = 3; refreshMemoryView(); }, 0)));
                 } else {
+                    text.append("\n\n");
                     boolean user = entry.optString("role").equals("user");
                     text.append(user ? "あなた" : person.name).append("\n");
                     String content = entry.optString("content");
@@ -731,6 +720,50 @@ public final class MainActivity extends ComponentActivity {
         panel.message = text.toString();
         panel.onDismiss = this::showMemory;
         compose.show(panel);
+    }
+
+    private static String episodeDescription(JSONObject entry) {
+        String scene = entry.optString("scene"), scope = entry.optString("scope");
+        String text = (scene.isEmpty() ? "体験" : scene) + "\n" + entry.optString("text");
+        String emotion = entry.optString("emotion");
+        if (!emotion.isEmpty()) text += "\n気持ち：" + emotion;
+        return text + "\n" + (scope.equals("fiction") ? "創作の場面" : scope.equals("real") ? "現実の出来事" : "会話内の体験");
+    }
+
+    private void showEpisodeNode(PersonRegistry.Person person, String rootKey, JSONObject node, Runnable back, long afterId) {
+        memoryView = 4;
+        int requested = ++episodeRequest;
+        reader.execute(() -> {
+            try {
+                final JSONObject page;
+                synchronized (storeGate) {
+                    requireCurrentPerson();
+                    if (!person.id.equals(activePerson.id)) return;
+                    JSONObject query = new JSONObject().put("root_key", rootKey).put("parent_key", node.getString("key"))
+                            .put("scope", node.getString("scope")).put("after_id", afterId);
+                    String result = nativeEpisodeChildren(bytes(query.toString()));
+                    if (result.isEmpty()) throw new java.io.IOException(nativeLastError());
+                    page = new JSONObject(result);
+                }
+                ui(() -> {
+                    if (memoryView != 4 || requested != episodeRequest || changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
+                    ComposeUi.Panel panel = new ComposeUi.Panel(node.optString("scene", "体験の詳細")); panel.sheet = true;
+                    panel.message = episodeDescription(node);
+                    org.json.JSONArray children = page.optJSONArray("episodes");
+                    if (children != null) for (int i = 0; i < children.length(); i++) {
+                        JSONObject child = children.optJSONObject(i);
+                        if (child == null) continue;
+                        String label = child.optString("scene");
+                        panel.rows.add(new ComposeUi.Row((label.isEmpty() ? "出来事" : label) + "\n" + child.optString("text"),
+                                () -> showEpisodeNode(person, rootKey, child, () -> showEpisodeNode(person, rootKey, node, back, 0), 0)));
+                    }
+                    if (page.optBoolean("has_more")) panel.rows.add(new ComposeUi.Row("次の詳細を表示",
+                            () -> showEpisodeNode(person, rootKey, node, back, page.optLong("after_id"))));
+                    panel.onDismiss = back;
+                    compose.show(panel);
+                });
+            } catch (Exception error) { ui(() -> { if (requested == episodeRequest) { back.run(); showError(safeError(error)); } }); }
+        });
     }
 
     private void showPersonIcon() {

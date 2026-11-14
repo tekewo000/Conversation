@@ -32,7 +32,7 @@ conversation_embedding_batch :: proc "c" (after_id: i64) -> cstring {
  cursor:=fmt.aprintf("%d",after_id)
  defer delete(cursor)
  return json_query(`WITH batch AS MATERIALIZED (
- SELECT m.id,m.supersedes_id,m.kind,m.actor,m.subject,m.scope,substr(m.text,1,4096) AS text,EXISTS(SELECT 1 FROM memory_current c WHERE c.id=m.id) AS current FROM memories m WHERE m.id>CAST(?1 AS INTEGER) ORDER BY m.id LIMIT 16
+ SELECT m.id,m.supersedes_id,m.kind,m.actor,m.subject,m.scope,substr(CASE WHEN n.parent_key!='' THEN json_extract(n.node,'$.text')||' / '||m.text ELSE m.text END,1,4096) AS text,EXISTS(SELECT 1 FROM memory_current c WHERE c.id=m.id) AS current FROM memories m LEFT JOIN episode_nodes n ON n.memory_id=m.id WHERE m.id>CAST(?1 AS INTEGER) ORDER BY m.id LIMIT 16
  ) SELECT json_object('through_id',coalesce((SELECT max(id) FROM batch),CAST(?1 AS INTEGER)),
  'items',json((SELECT json_group_array(json_object('id',id,'supersedes_id',coalesce(supersedes_id,0),'kind',kind,'actor',actor,'subject',subject,'scope',scope,'text',text,'current',json(CASE WHEN current THEN 'true' ELSE 'false' END))) FROM batch)),
  'has_more',json(CASE WHEN EXISTS(SELECT 1 FROM memories WHERE id>coalesce((SELECT max(id) FROM batch),CAST(?1 AS INTEGER))) THEN 'true' ELSE 'false' END))`,cursor)

@@ -30,6 +30,8 @@ const char* conversation_pending_persona(void);
 bool conversation_apply_persona(int64_t through_id, const char* payload_json);
 // {memories:[...]} includes source snippets, IDs, versions, and current flag.
 const char* conversation_memories(const char* query);
+// Paged children: {root_key,parent_key,scope,after_id}; 64 nodes per page.
+const char* conversation_episode_children(const char* request_json);
 // Fresh person DB only; retries with the same UUID and source SHA256 are idempotent.
 // {person_id,name,profile,source_md,source_sha256,seeds:[typed document-sourced memories]}
 // Limits: source 2 MiB, profile 128 KiB, 2048 seeds, seed text 16 KiB, JSON 32 MiB.

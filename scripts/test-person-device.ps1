@@ -2,7 +2,7 @@ param(
     [string]$Serial,
     [string]$CleanupProbeId,
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
-    [ValidateSet('Baseline', 'Verify', 'InspectMemory', 'Full')][string]$Mode = 'Full'
+    [ValidateSet('Baseline', 'Verify', 'InspectMemory', 'Hierarchy', 'Full')][string]$Mode = 'Full'
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -59,11 +59,12 @@ try {
     elseif ($Mode -eq 'Baseline') { $instrumentArgs += @('-e', 'mode', 'snapshot-existing') }
     elseif ($Mode -eq 'Verify') { $instrumentArgs += @('-e', 'mode', 'verify-existing') }
     elseif ($Mode -eq 'InspectMemory') { $instrumentArgs += @('-e', 'mode', 'inspect-memory') }
+    elseif ($Mode -eq 'Hierarchy') { $instrumentArgs += @('-e', 'mode', 'hierarchy') }
     $output = @(& $tools.Adb @deviceArgs shell am instrument -w @instrumentArgs jp.tekewo.conversation.probe/jp.tekewo.conversation.PersonDeviceProbe)
     $output | Write-Output
     if ($LASTEXITCODE -ne 0 -or -not ($output -match 'PERSON_DEVICE_PROBE_PASS')) { throw 'Person device probe failed; see instrumentation output.' }
 } finally {
-    if ($installed -and $Mode -eq 'Full' -and -not $CleanupProbeId -and -not ($output -match 'PERSON_DEVICE_PROBE_PASS')) {
+    if ($installed -and $Mode -in @('Full', 'Hierarchy') -and -not $CleanupProbeId -and -not ($output -match 'PERSON_DEVICE_PROBE_PASS')) {
         Write-Host "Cleaning only synthetic probe $probeId after diagnostic failure."
         & $tools.Adb @deviceArgs shell am instrument -w -e probe_id $probeId -e cleanup_only true jp.tekewo.conversation.probe/jp.tekewo.conversation.PersonDeviceProbe
     }
