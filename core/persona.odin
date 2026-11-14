@@ -19,16 +19,26 @@ PERSONA_JSON :: `json_object('revision',(SELECT coalesce(max(id),0) FROM persona
  ) WHERE position=1 ORDER BY field
 ))))`
 
+PERSONA_RELATIONSHIP_JSON :: `coalesce((SELECT json_extract(state,'$.relationship') FROM continuity_revisions WHERE through_id<=?1 ORDER BY through_id DESC LIMIT 1),'{}')`
+
 PERSONA_EVIDENCE_CTE :: `WITH recent AS (
- SELECT id,role,json_object('id',id,'role',role,'content',substr(content,1,512),'created_at',created_at,'truncated',json(CASE WHEN length(content)>512 THEN 'true' ELSE 'false' END)) AS row
- FROM messages WHERE id<=?1 ORDER BY id DESC LIMIT 64
+ SELECT id FROM messages WHERE id<=?1 ORDER BY id DESC LIMIT 64
+), evidence_ids AS (
+ SELECT id,min(priority) AS priority FROM (
+ SELECT id,1 AS priority FROM recent
+ UNION ALL SELECT CAST(value AS INTEGER),0 FROM json_each(`+PERSONA_RELATIONSHIP_JSON+`,'$.source_ids')
+ ) GROUP BY id
+), evidence AS (
+ SELECT m.id,m.role,pick.priority,json_object('id',m.id,'role',m.role,'content',substr(m.content,1,512),'created_at',m.created_at,'truncated',json(CASE WHEN length(m.content)>512 THEN 'true' ELSE 'false' END)) AS row
+ FROM evidence_ids pick JOIN messages m ON m.id=pick.id WHERE m.id<=?1
 ), budget AS (
- SELECT id,role,row,sum(length(CAST(row AS BLOB))+1) OVER(ORDER BY id DESC ROWS UNBOUNDED PRECEDING) AS bytes FROM recent
+ SELECT id,role,row,sum(length(CAST(row AS BLOB))+1) OVER(ORDER BY priority,id DESC ROWS UNBOUNDED PRECEDING) AS bytes FROM evidence
 ) `
 
 PERSONA_PENDING_SQL :: PERSONA_EVIDENCE_CTE + `SELECT json_object(
  'through_id',?1,'after_id',(SELECT coalesce(max(through_id),0) FROM persona_revisions),
  'person',json(` + PERSON_JSON + `),'persona',json(` + PERSONA_JSON + `),
+ 'relationship',json(`+PERSONA_RELATIONSHIP_JSON+`),
  'messages',json((SELECT json_group_array(json(row)) FROM (SELECT row FROM budget WHERE bytes<=40000 ORDER BY id))),
  'memories',json((SELECT json_group_array(json(row)) FROM (
  SELECT json_object('id',m.id,'kind',m.kind,'actor',m.actor,'subject',m.subject,'key',m.key,'text',substr(m.text,1,512),'scope',m.scope,'certainty',m.certainty,'source_ids',json((SELECT json_group_array(message_id) FROM memory_sources WHERE memory_id=m.id))) AS row
@@ -77,13 +87,12 @@ persona_revision_valid :: proc(through_id: i64, changes_text: string) -> bool {
  covered:=bind_int(boundary,1,through_id) && bind_int(boundary,2,after) && sqlite3_step(boundary)==100 && sqlite3_column_int64(boundary,0)==1
  sqlite3_finalize(boundary)
  if !covered do return fail("Persona evidence must end with a saved reply and processed memories.")
- visible:=prepare(PERSONA_EVIDENCE_CTE+"SELECT coalesce(min(id),0) FROM budget WHERE bytes<=40000")
+ visible:=prepare(PERSONA_EVIDENCE_CTE+"SELECT count(*) FROM budget WHERE bytes<=40000")
  if visible==nil do return false
  valid:=bind_int(visible,1,through_id) && sqlite3_step(visible)==100
- first:i64
- if valid do first=sqlite3_column_int64(visible,0)
+ available:=valid && sqlite3_column_int64(visible,0)>0
  sqlite3_finalize(visible)
- if !valid || first<=0 do return fail("Persona evidence is unavailable.")
+ if !available do return fail("Persona evidence is unavailable.")
  for value,i in changes {
   record,record_ok:=value.(json.Object)
   if !record_ok || len(record)!=4 do return fail("Invalid persona change fields.")
@@ -99,17 +108,17 @@ persona_revision_valid :: proc(through_id: i64, changes_text: string) -> bool {
   oldest,newest:=through_id,i64(0)
   for source,j in sources {
    id,id_ok:=source.(json.Integer)
-   if !id_ok || i64(id)<first || i64(id)>through_id do return fail("Persona sources must be visible original-message IDs.")
+   if !id_ok || id<1 || i64(id)>through_id do return fail("Persona sources must be visible original-message IDs.")
    for previous in sources[:j] { if previous.(json.Integer)==id do return fail("Duplicate persona source.") }
-   message:=prepare("SELECT role FROM messages WHERE id=?1")
+   message:=prepare(PERSONA_EVIDENCE_CTE+"SELECT role FROM budget WHERE bytes<=40000 AND id=?2")
    if message==nil do return false
-   found:=bind_int(message,1,i64(id)) && sqlite3_step(message)==100
+   found:=bind_int(message,1,through_id) && bind_int(message,2,i64(id)) && sqlite3_step(message)==100
    if found {
     if string(sqlite3_column_text(message,0))=="user" { users+=1; if i64(id)>after do new_users+=1 }
     else { assistants+=1; if i64(id)>after do new_assistants+=1 }
    }
    sqlite3_finalize(message)
-   if !found do return fail("Persona source does not exist.")
+   if !found do return fail("Persona source must be visible original evidence.")
    oldest=min(oldest,i64(id))
    newest=max(newest,i64(id))
   }

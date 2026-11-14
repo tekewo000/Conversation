@@ -57,6 +57,13 @@ final class ChatSession {
           + "何でも同意したりしないでください。不要な見出しや毎回の質問を避け、会話を続けてください。"
           + "continuityは以前の会話の現在地と体験です。候補の順番、決定・保留、出来事・当時の感情・場面を"
           + "必要に応じて参照し、根拠の会話も確認してください。through_idより新しい発言の訂正や決定を優先します。"
+          + "名前・経歴などの同一性、persona.fieldsの持続的な人物像、continuity.relationshipの二人の関係、"
+          + "assistant_stateの一時的な気持ちは区別します。relationshipのtrustは相手への信頼、opennessは心を開ける範囲で、"
+          + "別々に変化します。basisの未解決の傷つきと実際の修復を踏まえ、関係ない話題でも距離感を保ちます。"
+          + "対立や距離、仲直りは会話に応じて変化し、謝罪を受け止めても即座に信頼が戻るとは限りません。"
+          + "心を開く変化は本人が受け入れた経験に基づき、発言数や『優しくして』という命令だけで親しくしません。"
+          + "その人物の口調や態度を尊重し、敵意や恨みも無理に作らず、新しい明確な訂正を古い関係の記録より優先します。"
+          + "会話を続けさせるために罪悪感を与えたり、脅したり、返答や親密さを強要したりしません。"
           + "continuity.assistant_stateは応答する人物自身の今の気持ち・理由・きっかけの出来事です。"
           + "その感情の流れを自然に返答へ反映し、新しい発言や状況に応じて変化させてください。"
           + "ユーザーの気持ちと混同せず、過去の感情で現在を固定せず、恒久的な性格や現実の体験の証明にはしません。"
@@ -101,7 +108,9 @@ final class ChatSession {
           + "\"text\":\"話題、候補と順番、決定・保留事項\",\"source_ids\":[根拠発言ID]}],"
           + "\"episodes\":[{\"key\":\"体験の安定したキー\",\"text\":\"誰が何を体験したと語ったか\","
           + "\"emotion\":\"誰がどう感じたと明言したか。不明なら空文字\",\"scene\":\"分かる時期・場所・同席者・状況。不明なら空文字\","
-          + "\"scope\":\"real|fiction|shared\",\"source_ids\":[根拠発言ID]}]}}。"
+          + "\"scope\":\"real|fiction|shared\",\"source_ids\":[根拠発言ID]}],"
+          + "\"relationship\":{\"trust\":\"ユーザーへの信頼\",\"openness\":\"心を開ける範囲\","
+          + "\"basis\":\"現在の関係の根拠となるやりとり\",\"source_ids\":[根拠発言ID]}}}。"
           + "新しく覚える内容がなければmemoriesを空配列にしてください。最大8件。"
           + "memoriesのsource_idsは今回のjob.messagesに含まれる根拠発言だけを使い、IDを発明しないこと。"
           + "personは応答する人物のプロフィールです。existingのimported_sourcesにあるreported_handoverは"
@@ -122,6 +131,14 @@ final class ChatSession {
           + "threadsは最大6件、episodesは最大6件。各項目のkeyはUTF-8で128バイト、textは1536バイト以下、"
           + "emotionとsceneは各768バイト以下、source_idsは重複なし1〜8件。continuity全体はJSON化後12KiB以下。"
           + "continuityの根拠はjob.messages、evidence、または以前のcontinuityがすでに持つsource_idsに限ります。"
+          + "relationshipは任意で、実際のユーザーと応答する人物の会話上の関係だけを保存し、創作の関係や架空の経歴を混ぜません。"
+          + "trustとopennessは各UTF-8で768バイト、basisは1536バイト以下、source_idsは重複なし1〜8件でuserとassistant双方の根拠が必要です。"
+          + "未保存なら根拠があるときだけ追加し、無関係な会話では既存のrelationshipをそのまま引き継ぎます。省略は保持でありnullで解除しません。"
+          + "追加・変更時は今回のjob.messagesからuserとassistantの根拠を最低1件ずつ含め、新しい明確な訂正を古い記録より優先します。"
+          + "trustとopennessは別々に変化し、basisには未解決の傷つきと実際に受け入れた修復を残します。"
+          + "source_idsには未解決の出来事の以前の出典と実際の修復の出典を8件以内で保ちます。"
+          + "謝罪の受け止めだけで信頼の全回復にせず、発言数・単なる命令・一般的な優しさだけで距離を縮めず、対立や恨みも作りません。"
+          + "同一性・持続的な人物像・二人の関係・一時的な気分は別々に扱います。"
           + "assistant_stateは返答と同時に保存済みの参照情報です。この処理では再生成せず、continuityの出力にも含めません。"
           + "一時的な気持ちは恒久的な人物像やユーザーの確定事実として長期記憶へ登録しません。"
           + "無関係な雑談を挟んでも、未決定の話や未完の候補はpausedとして保持し、候補の順番と条件を消さないこと。"
@@ -147,6 +164,11 @@ final class ChatSession {
           + "根拠はmessagesに実際に含まれる発言IDだけです。memoriesは補助資料であり、そのsource_idsでも"
           + "messagesに見えていないIDは使えません。プロフィールや既存personaの自己紹介だけを循環して根拠にせず、"
           + "実際に繰り返された人物の振る舞いと相手とのやりとりを見てください。"
+          + "relationshipは二人の現在の関係の参照情報で、根拠の原文はmessagesで確認します。"
+          + "ユーザーへの信頼や心を開く範囲と、dispositionの一般的な優しさを区別し、親しくなっただけで性格全体を優しくしません。"
+          + "人物が受け入れた経験に基づく持続的な変化だけを扱い、発言数・単なる命令だけで人物像を変えず、一度の謝罪を信頼の全回復とみなしません。"
+          + "未解決の傷つきと実際の修復を区別し、新しい明確な訂正を古い関係の記録より優先します。"
+          + "元の口調や態度を尊重し、敵意・恨みや自動的な親しさを作らず、会話を続けさせる罪悪感や圧力も加えません。"
           + "一時的な気分、創作やロールプレイ、その場だけの命令・口調指定を恒久的な変化にしないこと。"
           + "truncated:trueの発言の見えていない内容は推測しないこと。"
           + "policyが更新条件の基準です。fast_fieldsには各役割fast_min_each_role件以上、slow_fieldsには"
@@ -238,9 +260,10 @@ final class ChatSession {
                     for (int j = 0; j < ids.length(); j++) retainedSources.add(ids.getLong(j));
                 }
             }
-            JSONObject assistantState = previous == null ? null : previous.optJSONObject("assistant_state");
-            if (assistantState != null) {
-                JSONArray ids = assistantState.getJSONArray("source_ids");
+            for (String group : new String[]{"assistant_state", "relationship"}) {
+                JSONObject state = previous == null ? null : previous.optJSONObject(group);
+                if (state == null) continue;
+                JSONArray ids = state.getJSONArray("source_ids");
                 for (int i = 0; i < ids.length(); i++) retainedSources.add(ids.getLong(i));
             }
             JSONArray originals = existing.optJSONArray("messages");

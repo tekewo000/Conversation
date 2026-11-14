@@ -16,6 +16,7 @@ CONTINUITY_JSON :: `(CASE WHEN EXISTS(SELECT 1 FROM assistant_states) THEN json_
 CONTINUITY_REFERENCES_SQL :: `SELECT CAST(s.value AS INTEGER) AS id,CASE WHEN CAST(s.key AS INTEGER)>0 THEN 4 WHEN json_extract(item.value,'$.status')='active' THEN 0 WHEN json_extract(item.value,'$.status')='paused' THEN 1 ELSE 3 END AS priority FROM continuity_revisions r,json_each(r.state,'$.threads') item,json_each(item.value,'$.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)
 UNION ALL SELECT CAST(s.value AS INTEGER),CASE WHEN CAST(s.key AS INTEGER)=0 THEN 2 ELSE 4 END FROM continuity_revisions r,json_each(r.state,'$.episodes') item,json_each(item.value,'$.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)
 UNION ALL SELECT CAST(s.value AS INTEGER),2 FROM continuity_revisions r,json_each(r.state,'$.assistant_state.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)
+UNION ALL SELECT CAST(s.value AS INTEGER),2 FROM continuity_revisions r,json_each(r.state,'$.relationship.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)
 UNION ALL SELECT CAST(s.value AS INTEGER),2 FROM json_each((SELECT state FROM assistant_states ORDER BY id DESC LIMIT 1),'$.source_ids') s`
 CONTINUITY_SOURCES_SQL :: "SELECT id FROM ("+CONTINUITY_REFERENCES_SQL+")"
 
@@ -32,16 +33,16 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
  if !parsed do return false
  defer json.destroy_value(root)
  obj,obj_ok:=root.(json.Object)
- if !obj_ok || (len(obj)!=2 && len(obj)!=3) do return fail("Expected conversation threads, episodes and optional assistant state.")
- for key in obj { if key!="threads" && key!="episodes" && key!="assistant_state" do return fail("Unknown conversation state field.") }
+ if !obj_ok || len(obj)<2 || len(obj)>4 do return fail("Expected conversation threads, episodes and optional assistant or relationship state.")
+ for key in obj { if key!="threads" && key!="episodes" && key!="assistant_state" && key!="relationship" do return fail("Unknown conversation state field.") }
  threads,threads_ok:=obj["threads"].(json.Array)
  episodes,episodes_ok:=obj["episodes"].(json.Array)
  if !threads_ok || !episodes_ok || len(threads)>6 || len(episodes)>6 do return fail("Expected at most six threads and six episodes.")
  boundary:=prepare(`SELECT first_id FROM jobs WHERE end_id=?1 AND end_id>(SELECT coalesce(max(through_id),0) FROM continuity_revisions)`)
  if boundary==nil do return false
  valid:=bind_int(boundary,1,through_id) && sqlite3_step(boundary)==100
- first:i64
- if valid do first=max(1,sqlite3_column_int64(boundary,0)-12)
+ first,job_first:i64
+ if valid { job_first=sqlite3_column_int64(boundary,0); first=max(1,job_first-12) }
  sqlite3_finalize(boundary)
  if !valid do return fail("Conversation state must advance to an existing extraction boundary.")
  assistant_entries:json.Array
@@ -49,7 +50,21 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
  if state,exists:=obj["assistant_state"]; exists {
   if _,is_null:=state.(json.Null); !is_null { append(&assistant_entries,state) }
  }
- for entries,group in ([3]json.Array{threads,episodes,assistant_entries}) {
+ relationship_entries:json.Array
+ defer delete(relationship_entries)
+ relationship_unchanged:=false
+ if state,exists:=obj["relationship"]; exists {
+  append(&relationship_entries,state)
+  same:=prepare(`WITH old AS (SELECT coalesce((SELECT state FROM continuity_revisions ORDER BY id DESC LIMIT 1),'{}') AS state)
+   SELECT NOT EXISTS(SELECT fullkey,type,atom FROM json_tree(?1,'$.relationship') EXCEPT SELECT fullkey,type,atom FROM old,json_tree(old.state,'$.relationship'))
+   AND NOT EXISTS(SELECT fullkey,type,atom FROM old,json_tree(old.state,'$.relationship') EXCEPT SELECT fullkey,type,atom FROM json_tree(?1,'$.relationship'))`)
+  if same==nil do return false
+  valid=bind_text(same,1,state_text) && sqlite3_step(same)==100
+  if valid do relationship_unchanged=sqlite3_column_int64(same,0)==1
+  sqlite3_finalize(same)
+  if !valid do return false
+ }
+ for entries,group in ([4]json.Array{threads,episodes,assistant_entries,relationship_entries}) {
   for item,i in entries {
    entry,entry_ok:=item.(json.Object)
    expected:=4
@@ -66,7 +81,11 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
      if string(previous.(json.Object)["key"].(json.String))==key do return fail("Duplicate conversation entry key.")
     }
    }
-   if group==0 {
+   if group==3 {
+    if _,ok:=string_field(entry,"trust",768); !ok do return fail("Relationship trust must fit within 768 bytes.")
+    if _,ok:=string_field(entry,"openness",768); !ok do return fail("Relationship openness must fit within 768 bytes.")
+    if _,ok:=string_field(entry,"basis",1536); !ok do return fail("Relationship basis must fit within 1536 bytes.")
+   } else if group==0 {
     status,status_ok:=string_field(entry,"status",16)
     if !status_ok || (status!="active" && status!="paused" && status!="resolved") do return fail("Invalid conversation thread status.")
    } else {
@@ -83,16 +102,22 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
      }
     }
    }
+   users,assistants,new_users,new_assistants:=0,0,0,0
    for source,j in sources {
     id,id_ok:=source.(json.Integer)
     if !id_ok || id<1 || i64(id)>through_id do return fail("Conversation evidence must be a saved message at or before the job boundary.")
     for previous in sources[:j] { if previous.(json.Integer)==id do return fail("Duplicate conversation evidence.") }
-    check:=prepare("SELECT count(*) FROM messages WHERE id=?1 AND (id>=?2 OR id IN ("+CONTINUITY_SOURCES_SQL+"))")
+    check:=prepare("SELECT role FROM messages WHERE id=?1 AND (id>=?2 OR id IN ("+CONTINUITY_SOURCES_SQL+"))")
     if check==nil do return false
-    found:=bind_int(check,1,i64(id)) && bind_int(check,2,first) && sqlite3_step(check)==100 && sqlite3_column_int64(check,0)==1
+    found:=bind_int(check,1,i64(id)) && bind_int(check,2,first) && sqlite3_step(check)==100
+    if found && group==3 {
+     if string(sqlite3_column_text(check,0))=="user" { users+=1; if i64(id)>=job_first do new_users+=1 }
+     else { assistants+=1; if i64(id)>=job_first do new_assistants+=1 }
+    }
     sqlite3_finalize(check)
     if !found do return fail("Conversation evidence must come from the extraction window or previous conversation state.")
    }
+   if group==3 && (users<1 || assistants<1 || (!relationship_unchanged && (new_users<1 || new_assistants<1))) do return fail("Relationship changes need both sides of a fresh exchange; unchanged state may retain its evidence.")
   }
  }
  return true
@@ -102,8 +127,9 @@ continuity_save :: proc(through_id: i64, value: json.Value) -> bool {
  encoded,e:=json.marshal(value)
  defer delete(encoded)
  if e!=nil do return false
- // Older extraction results can update topics without erasing the current feeling; explicit null clears it.
- merged:=json_query(`SELECT CASE WHEN json_type(?1,'$.assistant_state') IS NULL AND json_type(`+EXTRACTED_CONTINUITY_JSON+`,'$.assistant_state') IS NOT NULL THEN json_set(?1,'$.assistant_state',json_extract(`+EXTRACTED_CONTINUITY_JSON+`,'$.assistant_state')) ELSE ?1 END`,string(encoded))
+ // Omitted fields retain state; a topic-only extraction must not erase feelings or trust.
+ merged:=json_query(`WITH mood AS (SELECT CASE WHEN json_type(?1,'$.assistant_state') IS NULL AND json_type(`+EXTRACTED_CONTINUITY_JSON+`,'$.assistant_state') IS NOT NULL THEN json_set(?1,'$.assistant_state',json_extract(`+EXTRACTED_CONTINUITY_JSON+`,'$.assistant_state')) ELSE ?1 END AS state)
+ SELECT CASE WHEN json_type(state,'$.relationship') IS NULL AND json_type(`+EXTRACTED_CONTINUITY_JSON+`,'$.relationship') IS NOT NULL THEN json_set(state,'$.relationship',json_extract(`+EXTRACTED_CONTINUITY_JSON+`,'$.relationship')) ELSE state END FROM mood`,string(encoded))
  if merged==nil || !continuity_revision_valid(through_id,string(merged)) do return false
  stmt:=prepare("INSERT INTO continuity_revisions(through_id,state) VALUES(?1,?2)")
  if stmt==nil do return false

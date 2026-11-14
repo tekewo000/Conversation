@@ -54,6 +54,8 @@ public final class ChatSessionTest {
         missingReplyStateKeepsTheAnswerAndPreviousFeeling();
         replyRetrievalReceivesFullTextWithoutChangingExtraction();
         assistantFeelingAndOldEvidenceReachReplyAndExtraction();
+        relationshipAndOldEvidenceReachUnrelatedReplyAndExtraction();
+        reflectionReceivesRelationshipAndItsOriginalEvidence();
         replyDoesNotWaitForMemory();
         internalLabelsNeverReachReplyText();
         Store continuing = new Store() {
@@ -339,6 +341,76 @@ public final class ChatSessionTest {
             return "{\"memories\":[]}";
         });
         assert extracted[0];
+    }
+
+    private static void relationshipAndOldEvidenceReachUnrelatedReplyAndExtraction() throws Exception {
+        Store store = new Store() {
+            @Override public JSONObject pending() throws Exception {
+                if (!pending) return new JSONObject();
+                JSONArray pair = new JSONArray();
+                for (int i = roles.size() - 2; i < roles.size(); i++) pair.put(new JSONObject()
+                        .put("id", i + 1).put("role", roles.get(i)).put("content", texts.get(i)));
+                return new JSONObject().put("id", 1).put("messages", pair);
+            }
+        };
+        store.person = new JSONObject().put("id", "rin").put("name", "りん").put("profile", "慎重で率直に短く話す。");
+        store.continuity = new JSONObject("{\"through_id\":2,\"threads\":[],\"episodes\":[],\"relationship\":{\"trust\":\"謝罪は受け止めたが信頼はまだ慎重\",\"openness\":\"雑談はできるが秘密はまだ話さない\",\"basis\":\"約束を破られて傷ついた。謝罪はあったが再発しない行動はまだ確認していない\",\"source_ids\":[1,2]}}");
+        store.add("user", "約束を破ってごめん"); store.add("assistant", "謝罪は受け止めた。まだ秘密は話せない");
+        store.add("user", "根拠にしていない古い雑談"); store.add("assistant", "古い雑談の返事");
+        for (int i = 0; i < 10; i++) { store.add("user", "別の話"); store.add("assistant", "雑談"); }
+        ChatSession session = new ChatSession(store);
+        int[] requests = {0, 0};
+        session.reply("今日の夕飯は何がいい？", true, (instructions, input, delta) -> {
+            JSONObject reference = new JSONObject(input.getJSONObject(0).getString("content").split("\\n", 2)[1]);
+            JSONObject relationship = reference.getJSONObject("continuity").getJSONObject("relationship");
+            assert relationship.getString("trust").equals("謝罪は受け止めたが信頼はまだ慎重");
+            assert relationship.getString("openness").equals("雑談はできるが秘密はまだ話さない");
+            assert instructions.contains("慎重で率直に短く話す。");
+            assert input.getJSONObject(input.length() - 1).getString("content").equals("今日の夕飯は何がいい？");
+            requests[0]++;
+            return reply("温かいスープはどう？");
+        }, new Listener());
+        session.processMemories((instructions, input, delta) -> {
+            JSONObject data = new JSONObject(input.getJSONObject(0).getString("content"));
+            assert data.getJSONObject("continuity").getJSONObject("relationship").getString("basis")
+                    .equals("約束を破られて傷ついた。謝罪はあったが再発しない行動はまだ確認していない");
+            JSONArray evidence = data.getJSONArray("evidence");
+            assert evidence.length() == 16 : "Retain relationship sources in addition to the recent 12 and the job pair";
+            assert evidence.getJSONObject(0).getLong("id") == 1 : "Old relationship evidence must survive unrelated conversations";
+            assert evidence.getJSONObject(0).getString("content").equals("約束を破ってごめん");
+            assert evidence.getJSONObject(1).getLong("id") == 2;
+            assert evidence.getJSONObject(1).getString("content").equals("謝罪は受け止めた。まだ秘密は話せない");
+            assert evidence.getJSONObject(2).getLong("id") == 13 : "Unreferenced old messages should stay outside extraction evidence";
+            assert data.getJSONObject("job").getJSONArray("messages").getJSONObject(0).getLong("id") == 25;
+            requests[1]++;
+            return "{\"memories\":[]}";
+        });
+        assert requests[0] == 1 && requests[1] == 1 : "Relationship continuity must use the existing reply and extraction calls";
+    }
+
+    private static void reflectionReceivesRelationshipAndItsOriginalEvidence() throws Exception {
+        Store store = new Store(); store.pending = false; store.personaJob = reflectionJob();
+        store.personaJob.put("relationship", new JSONObject().put("trust", "行動を見て少し信頼が戻った")
+                .put("openness", "相談はするが話さないこともある").put("basis", "以前の傷つきは残るが約束を守る行動が続いた")
+                .put("source_ids", new JSONArray().put(1).put(2).put(25).put(26)));
+        store.personaJob.getJSONArray("messages").getJSONObject(0).put("content", "傷つけたことはごめん。約束を守る");
+        store.personaJob.getJSONArray("messages").getJSONObject(1).put("content", "謝罪は受け止めたが、まだ少し距離を置きたい");
+        int[] requests = {0};
+        new ChatSession(store).processMemories((instructions, input, delta) -> {
+            assert input.length() == 1;
+            JSONObject data = new JSONObject(input.getJSONObject(0).getString("content"));
+            assert data.getJSONObject("relationship").getString("trust").equals("行動を見て少し信頼が戻った");
+            assert data.getJSONArray("messages").getJSONObject(0).getString("content").equals("傷つけたことはごめん。約束を守る");
+            assert data.getJSONArray("messages").getJSONObject(1).getString("content").equals("謝罪は受け止めたが、まだ少し距離を置きたい");
+            assert data.getJSONObject("policy").getJSONArray("slow_fields").getString(2).equals("disposition");
+            assert data.getJSONObject("policy").getInt("slow_min_each_role") == 6;
+            assert instructions.contains("relationship") && instructions.contains("disposition");
+            assert instructions.contains("ユーザーへの信頼") && instructions.contains("一般的な優しさ")
+                    : "Reflection must distinguish relationship repair from an enduring disposition change";
+            requests[0]++;
+            return "{\"changes\":[]}";
+        });
+        assert requests[0] == 1 && store.personaApplied == 1 && store.personaThrough == 36;
     }
 
     private static void internalLabelsNeverReachReplyText() throws Exception {
