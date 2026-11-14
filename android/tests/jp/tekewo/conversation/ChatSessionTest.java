@@ -46,6 +46,7 @@ public final class ChatSessionTest {
         public void memoryStatus(String error) { warning = error; }
     }
     public static void main(String[] arguments) throws Exception {
+        replyRetrievalReceivesFullTextWithoutChangingExtraction();
         assistantFeelingAndOldEvidenceReachReplyAndExtraction();
         replyDoesNotWaitForMemory();
         internalLabelsNeverReachReplyText();
@@ -202,6 +203,20 @@ public final class ChatSessionTest {
         cancelledReflectionDoesNotCommit();
         rejectedReflectionStaysPending();
         System.out.println("PASS: chat completion, cancellation, raw evidence, memory retry, query bounds, persona context and reflection retry");
+    }
+
+    private static void replyRetrievalReceivesFullTextWithoutChangingExtraction() throws Exception {
+        final boolean[] retrieved = {false};
+        String text = "長い質問です。" + new String(new char[100]).replace('\0', 'あ') + "最後の意味も検索する";
+        Store store = new Store() {
+            @Override public JSONObject replyContext(String fullText) throws Exception {
+                assert fullText.equals(text);
+                retrieved[0] = true;
+                return context(ChatSession.query(fullText));
+            }
+        };
+        new ChatSession(store).reply(text, true, (instructions, input, delta) -> "返答", new Listener());
+        assert retrieved[0] : "Replies must use the semantic retrieval hook with full input";
     }
 
     private static void replyAndOrganize(ChatSession session, String text, boolean persistUser,

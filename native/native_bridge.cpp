@@ -255,6 +255,40 @@ Java_jp_tekewo_conversation_MainActivity_nativeContext(JNIEnv* env, jclass, jbyt
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeContextHybrid(JNIEnv* env, jclass, jbyteArray query, jlongArray input) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        std::string text;
+        if (!core_ready || !read_text(env, query, text) || !input || env->GetArrayLength(input) > 48) {
+            error = "検索の入力が無効です。"; return java_string(env, "");
+        }
+        std::vector<jlong> ids(static_cast<std::size_t>(env->GetArrayLength(input)));
+        if (!ids.empty()) env->GetLongArrayRegion(input, 0, static_cast<jsize>(ids.size()), ids.data());
+        if (env->ExceptionCheck()) return nullptr;
+        std::string candidates = "[";
+        for (std::size_t i = 0; i < ids.size(); ++i) {
+            if (i) candidates += ',';
+            candidates += std::to_string(ids[i]);
+        }
+        candidates += ']';
+        const char* result = conversation_context_semantic(text.c_str(), candidates.c_str());
+        if (!result) { core_error(); return java_string(env, ""); }
+        error.clear(); return java_string(env, result);
+    } catch (const std::exception&) { error = "文脈を読み込めませんでした。"; return java_string(env, ""); }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeEmbeddingBatch(JNIEnv* env, jclass, jlong after_id) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        if (!core_ready) return java_string(env, "");
+        const char* result = conversation_embedding_batch(after_id);
+        if (!result) { core_error(); return java_string(env, ""); }
+        return java_string(env, result);
+    } catch (const std::exception&) { error = "検索用の記憶を読み込めませんでした。"; return java_string(env, ""); }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_jp_tekewo_conversation_MainActivity_nativePendingJob(JNIEnv* env, jclass) {
     std::lock_guard<std::mutex> lock(mutex);
     try {

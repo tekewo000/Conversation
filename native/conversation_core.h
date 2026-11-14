@@ -17,6 +17,8 @@ const char* conversation_message_role(int32_t index);
 int64_t conversation_message_id(int32_t index);
 // Bounded UTF-8 JSON. Queries are literal keywords (at most 256 bytes).
 const char* conversation_context(const char* query);
+const char* conversation_context_semantic(const char* query, const char* memory_ids_json);
+const char* conversation_embedding_batch(int64_t after_id);
 // Current short-term feeling only; no retrieval or source bodies are read.
 const char* conversation_assistant_emotion(void);
 // {} means no pending job; long messages are explicitly marked truncated.

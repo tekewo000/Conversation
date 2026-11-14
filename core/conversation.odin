@@ -100,12 +100,13 @@ result_text :: proc(text: cstring) -> cstring {
  result_buffer = copy
  return copy
 }
-json_query :: proc(sql: cstring, query: string = "", match: cstring = nil) -> cstring {
+json_query :: proc(sql: cstring, query: string = "", match: cstring = nil, candidates: cstring = nil) -> cstring {
  stmt := prepare(sql)
  if stmt == nil do return nil
  defer sqlite3_finalize(stmt)
  if !bind_text(stmt, 1, query) do return nil
  if match!=nil && !bind_text(stmt,2,string(match)) do return nil
+ if candidates!=nil && !bind_text(stmt,3,string(candidates)) do return nil
  if sqlite3_step(stmt) != 100 { fail("Could not read database output."); return nil }
  return result_text(sqlite3_column_text(stmt, 0))
 }
@@ -556,8 +557,12 @@ CONTEXT_JSON :: `WITH RECURSIVE query_grams(i,token) AS (
  SELECT id FROM memory_current WHERE kind='promise' AND status='active' ORDER BY id DESC LIMIT 4
 ), current_recent AS (
  SELECT id FROM memory_current ORDER BY id DESC LIMIT 12
+), retrieval_hits AS (
+ SELECT id,1.0/(60+row_number() OVER(ORDER BY score,id DESC)) AS weight FROM matched
+ UNION ALL SELECT m.id,1.0/(61+CAST(s.key AS INTEGER)) FROM json_each(coalesce(?3,'[]')) s JOIN memories m ON m.id=s.value
+ WHERE EXISTS(SELECT 1 FROM memory_current c WHERE c.id=m.id)
 ), prioritized AS (
- SELECT id,0 AS priority,score FROM matched
+ SELECT id,0 AS priority,-sum(weight) AS score FROM retrieval_hits GROUP BY id
  UNION ALL SELECT id,1,0.0 FROM active_promises
  UNION ALL SELECT id,2,0.0 FROM current_recent
 ), selected AS (

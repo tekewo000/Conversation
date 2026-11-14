@@ -1,0 +1,22 @@
+Conversation on-device semantic retrieval
+
+USearch 2.26.2, Copyright Unum and its contributors.
+https://github.com/unum-cloud/USearch/tree/v2.26.2
+Apache License 2.0; see Apache-2.0.txt.
+
+SentencePiece 0.2.1, Copyright Google Inc. and its contributors.
+https://github.com/google/sentencepiece/tree/v0.2.1
+Apache License 2.0; see Apache-2.0.txt.
+Its bundled protobuf-lite, Darts and esaxx notices are included separately.
+Its bundled Abseil code is also under Apache License 2.0.
+
+ONNX Runtime 1.23.2, Copyright Microsoft Corporation.
+https://github.com/microsoft/onnxruntime/tree/v1.23.2
+MIT License; see ONNX-Runtime-MIT.txt.
+
+Ruri v3 30m, Copyright the CL Research Group in Nagoya, Japan and contributors.
+https://huggingface.co/cl-nagoya/ruri-v3-30m
+ONNX int8 conversion: https://huggingface.co/onnx-community/ruri-v3-30m-ONNX
+Apache License 2.0; see Apache-2.0.txt.
+The quantized model and original tokenizer are downloaded separately at runtime.
+Application pooling, normalization and token limits are described in docs/automatic-memory.md.

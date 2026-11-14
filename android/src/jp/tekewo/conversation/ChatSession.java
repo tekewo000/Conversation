@@ -13,6 +13,7 @@ final class ChatSession {
     interface Store {
         long add(String role, String text) throws Exception;
         JSONObject context(String query) throws Exception;
+        default JSONObject replyContext(String text) throws Exception { return context(query(text)); }
         JSONObject pending() throws Exception;
         void apply(long job, String payload) throws Exception;
         JSONObject pendingPersona() throws Exception;
@@ -159,7 +160,7 @@ final class ChatSession {
             if (store.add("user", text) <= 0) throw new IOException("会話を保存できませんでした。");
             listener.userSaved();
         }
-        JSONObject context = store.context(query(text));
+        JSONObject context = store.replyContext(text);
         JSONArray input = new JSONArray();
         JSONArray memories = context.optJSONArray("memories");
         JSONObject reference = new JSONObject().put("now", java.time.Instant.now().toString())

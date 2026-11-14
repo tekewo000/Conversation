@@ -7,6 +7,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $repo
 $tools = & "$PSScriptRoot/setup-android.ps1"
 & "$PSScriptRoot/setup-sqlite.ps1"
+& "$PSScriptRoot/setup-rag.ps1"
 
 function Run([string]$Program, [string[]]$Arguments) {
     & $Program @Arguments

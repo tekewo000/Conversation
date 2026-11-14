@@ -15,6 +15,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -28,6 +29,47 @@ class MainActivityComposeTest {
     private var previousPerson: String? = null
     private var previousTextSize = 16
     private var previousGap = 12
+
+    @Test fun semanticRecallFlowsThroughTheRealReplyStoreWithOriginalEvidence() {
+        val people = PersonRegistry(context.filesDir)
+        previousPerson = people.active()?.id
+        val preferences = context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE)
+        previousTextSize = preferences.getInt("text_size", 16)
+        previousGap = preferences.getInt("message_gap", 12)
+        val person = people.stage(PersonDocument.named(name), null); people.commit(person)
+        compose.activityRule.scenario.recreate()
+        val add = MainActivity::class.java.getDeclaredMethod("nativeAddMessage", ByteArray::class.java, ByteArray::class.java).apply { isAccessible = true }
+        val apply = MainActivity::class.java.getDeclaredMethod("nativeApplyJob", java.lang.Long.TYPE, ByteArray::class.java).apply { isAccessible = true }
+        add.invoke(null, "user".toByteArray(), "強い雨の日は家で過ごす。ほかにはケーキを焼くのが好き。".toByteArray())
+        add.invoke(null, "assistant".toByteArray(), "好みを覚えておくね".toByteArray())
+        val memories = org.json.JSONArray()
+        for (i in 0 until 32) memories.put(org.json.JSONObject().put("kind", "fact").put("actor", "user").put("subject", "user")
+            .put("key", "topic-$i").put("text", if (i == 0) "強い雨の日は外出を控えて家で過ごすのが好きです。" else "卵と小麦粉でケーキを作るのが趣味です。")
+            .put("scope", "real").put("certainty", "explicit").put("source_ids", org.json.JSONArray().put(1)))
+        assertEquals("", apply.invoke(null, 1L, org.json.JSONObject().put("memories", memories).toString().toByteArray()))
+        val query = "土砂降りならどうしている？"
+        val lexical = MainActivity::class.java.getDeclaredMethod("nativeContext", ByteArray::class.java).apply { isAccessible = true }
+        val ordinary = org.json.JSONObject(lexical.invoke(null, query.toByteArray()) as String).getJSONArray("memories")
+        assertTrue((0 until ordinary.length()).none { ordinary.getJSONObject(it).getLong("id") == 1L })
+        val rag = MainActivity::class.java.getDeclaredField("semanticMemory").apply { isAccessible = true }.get(compose.activity) as SemanticMemory
+        rag.refresh()
+        compose.waitUntil(30_000) { rag.search(query).contains(1) }
+        val session = MainActivity::class.java.getDeclaredField("session").apply { isAccessible = true }.get(compose.activity) as ChatSession
+        var sawSource = false
+        session.reply(query, true, { _, input, _ ->
+            val reference = org.json.JSONObject(input.getJSONObject(0).getString("content").split("\n", limit = 2)[1])
+            val selected = reference.getJSONArray("memories")
+            val rain = (0 until selected.length()).map { selected.getJSONObject(it) }.first { it.getLong("id") == 1L }
+            assertEquals(1L, rain.getJSONArray("source_ids").getLong(0))
+            sawSource = true
+            "雨が強い日は家で過ごすんだね"
+        }, object : ChatSession.Listener {
+            override fun userSaved() {}
+            override fun streaming(text: String) {}
+            override fun replySaved() {}
+        })
+        assertTrue(sawSource)
+    }
 
     @Test fun iconAndCurrentFeelingSurviveRecreationAndIconCanBeReset() {
         val people = PersonRegistry(context.filesDir)

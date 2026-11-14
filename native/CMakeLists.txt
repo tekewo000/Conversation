@@ -14,7 +14,15 @@ target_compile_definitions(sqlite3 PRIVATE SQLITE_THREADSAFE=1 SQLITE_ENABLE_FTS
 target_include_directories(sqlite3 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/sqlite")
 add_library(conversation_core STATIC IMPORTED)
 set_target_properties(conversation_core PROPERTIES IMPORTED_LOCATION "${CONVERSATION_CORE_LIBRARY}")
-add_library(conversation SHARED native_bridge.cpp)
+set(SPM_ENABLE_SHARED OFF CACHE BOOL "" FORCE)
+set(SPM_ENABLE_TCMALLOC OFF CACHE BOOL "" FORCE)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(RAG_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../.tools/rag")
+add_subdirectory("${RAG_SOURCE}/sentencepiece-0.2.1" "${CMAKE_CURRENT_BINARY_DIR}/sentencepiece" EXCLUDE_FROM_ALL)
+add_library(conversation SHARED native_bridge.cpp semantic_jni.cpp)
+target_include_directories(conversation PRIVATE "${RAG_SOURCE}/usearch/include"
+    "${RAG_SOURCE}/sentencepiece-0.2.1/src" "${RAG_SOURCE}/sentencepiece-0.2.1/src/builtin_pb"
+    "${RAG_SOURCE}/sentencepiece-0.2.1/third_party/protobuf-lite")
 target_compile_features(conversation PRIVATE cxx_std_17)
-target_link_libraries(conversation PRIVATE conversation_core sqlite3 android log m)
+target_link_libraries(conversation PRIVATE conversation_core sqlite3 sentencepiece-static android log m)
 target_link_options(conversation PRIVATE "-Wl,--no-undefined" "-Wl,-z,max-page-size=16384")

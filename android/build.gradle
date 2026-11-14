@@ -62,6 +62,7 @@ dependencies {
     implementation 'androidx.compose.foundation:foundation'
     implementation 'androidx.compose.material3:material3'
     implementation 'androidx.compose.material:material-icons-core'
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.23.2'
     androidTestImplementation platform('androidx.compose:compose-bom:2025.10.01')
     androidTestImplementation 'androidx.compose.ui:ui-test-junit4'
     androidTestImplementation 'androidx.test:runner:1.6.2'

@@ -27,6 +27,8 @@ public final class MainActivity extends ComponentActivity {
     private static native long nativeAddMessage(byte[] role, byte[] text);
     private static native String nativeLastError();
     private static native String nativeContext(byte[] query);
+    private static native String nativeContextHybrid(byte[] query, long[] candidates);
+    private static native String nativeEmbeddingBatch(long afterId);
     private static native String nativePendingJob();
     private static native String nativeApplyJob(long id, byte[] payload);
     private static native String nativePendingPersona();
@@ -44,6 +46,8 @@ public final class MainActivity extends ComponentActivity {
     private boolean scrollOnRefresh;
     private ChatGptConnection connection;
     private ChatSession session, memorySession;
+    private volatile SemanticMemory semanticMemory;
+    private String semanticStatus = "意味検索を準備しています";
     private final MemoryWorker memoryWorker = new MemoryWorker();
     private String memoryStatus = "";
     private PersonRegistry people;
@@ -124,6 +128,15 @@ public final class MainActivity extends ComponentActivity {
             public JSONObject context(String query) throws Exception {
                 synchronized (storeGate) { requireCurrentPerson(); return new JSONObject(nativeContext(bytes(query))); }
             }
+            public JSONObject replyContext(String text) throws Exception {
+                long[] ids = semanticMemory == null ? new long[0] : semanticMemory.search(text);
+                synchronized (storeGate) {
+                    requireCurrentPerson();
+                    String result = nativeContextHybrid(bytes(ChatSession.query(text)), ids);
+                    if (result.isEmpty()) throw new java.io.IOException(nativeLastError());
+                    return new JSONObject(result);
+                }
+            }
             public JSONObject pending() throws Exception {
                 synchronized (storeGate) { requireCurrentPerson(); return new JSONObject(nativePendingJob()); }
             }
@@ -149,7 +162,24 @@ public final class MainActivity extends ComponentActivity {
         memorySession = new ChatSession(store);
         setBusy(false);
         refreshMessages();
+        startSemanticMemory();
         scheduleGitSync();
+    }
+
+    private void startSemanticMemory() {
+        if (semanticMemory != null) semanticMemory.close();
+        if (activePerson == null || changingPerson || closed) { semanticMemory = null; return; }
+        final String personId = activePerson.id;
+        semanticMemory = new SemanticMemory(this, activePerson.directory, afterId -> {
+            synchronized (storeGate) {
+                requireCurrentPerson();
+                if (!personId.equals(activePerson.id)) throw new java.io.IOException("人物が変わりました。");
+                String result = nativeEmbeddingBatch(afterId);
+                if (result.isEmpty()) throw new java.io.IOException(nativeLastError());
+                return new JSONObject(result);
+            }
+        }, status -> ui(() -> semanticStatus = status));
+        semanticMemory.refresh();
     }
 
     private void refreshMessages() {
@@ -333,7 +363,8 @@ public final class MainActivity extends ComponentActivity {
         panel.message = connection.hasSession()
                 ? connection.accountLabel() + "\nChatGPTの利用枠を使用します。\n" + connectionStatus
                         + "\n" + (memoryWorker.isRunning() ? "記憶をバックグラウンドで整理しています。会話は続けられます。" : memoryStatus)
-                : "ChatGPTにログインして、このアプリでサブスクの利用枠を使います。\n" + connectionStatus;
+                        + "\n" + semanticStatus
+                : "ChatGPTにログインして、このアプリでサブスクの利用枠を使います。\n" + connectionStatus + "\n" + semanticStatus;
         if (!connection.hasSession()) {
             panel.rows.add(new ComposeUi.Row("Continue with ChatGPT", () -> {
                 if (busy) return;
@@ -446,7 +477,7 @@ public final class MainActivity extends ComponentActivity {
         });
     }
 
-    private void retryMemories() { queueMemories(null); }
+    private void retryMemories() { queueMemories(null); if (semanticMemory != null) semanticMemory.refresh(); }
 
     private void queueMemories(ChatRequest selected) {
         if (closed || changingPerson || activePerson == null || !connection.hasSession()) return;
@@ -459,7 +490,7 @@ public final class MainActivity extends ComponentActivity {
                 ui(() -> { memoryStatus = ""; refreshMessages(); scheduleGitSync(); });
             } catch (Exception error) {
                 ui(() -> { memoryStatus = "記憶の整理は再試行待ちです。原文は保存されています。" + safeError(error); refreshMessages(); scheduleGitSync(); });
-            }
+            } finally { if (semanticMemory != null) semanticMemory.refresh(); }
         });
     }
 
@@ -560,6 +591,7 @@ public final class MainActivity extends ComponentActivity {
                             throw new java.io.IOException("この人物のGit保存が終わってから削除してください。");
                         boolean selected = activePerson != null && person.id.equals(activePerson.id);
                         if (selected) {
+                            if (semanticMemory != null) semanticMemory.close();
                             requireSuccess(nativeSwitchPerson(bytes(""), bytes("")));
                         }
                         try { people.delete(person.id); }
@@ -589,7 +621,7 @@ public final class MainActivity extends ComponentActivity {
 
                     }
                 } else {
-                    changingPerson = false; setBusy(false); showError(detail); scheduleGitSync();
+                    changingPerson = false; setBusy(false); startSemanticMemory(); showError(detail); scheduleGitSync();
                 }
             });
         });
@@ -870,6 +902,7 @@ public final class MainActivity extends ComponentActivity {
         if (session != null) session.cancel();
         if (memorySession != null) memorySession.cancel();
         memoryWorker.close();
+        if (semanticMemory != null) semanticMemory.close();
         if (connection != null) connection.cancel();
         worker.shutdownNow();
         reader.shutdownNow();
