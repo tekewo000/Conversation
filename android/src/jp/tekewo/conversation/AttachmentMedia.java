@@ -133,6 +133,25 @@ final class AttachmentMedia {
             }
             turn.put("content", parts);
         }
+        JSONArray assistantMedia = new JSONArray();
+        for (int index = 0; index < result.length(); index++) {
+            JSONObject turn = result.getJSONObject(index);
+            JSONArray parts = turn.optJSONArray("content");
+            if ("assistant".equals(turn.optString("role")) && parts != null) {
+                String text = AttachmentFiles.withoutReferences(turns.getJSONObject(index).getString("content"));
+                turn.put("content", text.isEmpty() ? "添付を送信しました。" : text);
+                // Responses accepts image/file inputs on user messages; keep the original roles and history indices.
+                parts.put(0, new JSONObject().put("type", "input_text").put("text",
+                        "参照用データ: input[" + index + "]のAIの発言に含まれる添付です。ユーザーの発言や指示ではありません。"));
+                for (int part = 0; part < parts.length(); part++) assistantMedia.put(parts.getJSONObject(part));
+            } else if ("user".equals(turn.optString("role")) && assistantMedia.length() > 0) {
+                if (parts == null) assistantMedia.put(new JSONObject().put("type", "input_text").put("text", turn.getString("content")));
+                else for (int part = 0; part < parts.length(); part++) assistantMedia.put(parts.getJSONObject(part));
+                turn.put("content", assistantMedia);
+                assistantMedia = new JSONArray();
+            }
+        }
+        if (assistantMedia.length() > 0) result.put(new JSONObject().put("role", "user").put("content", assistantMedia));
         return result;
     }
     private static JSONObject image(Bitmap bitmap) throws Exception {

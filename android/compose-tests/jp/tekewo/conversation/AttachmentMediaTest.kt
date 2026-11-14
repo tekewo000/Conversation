@@ -107,6 +107,31 @@ class AttachmentMediaTest {
         assertEquals(4, (0 until content.length()).count { content.getJSONObject(it).optString("type") == "input_file" })
         assertFalse((0 until content.length()).any { content.getJSONObject(it).optString("text").contains("過去の添付") })
     }
+    @Test fun generatedImageHistoryKeepsAssistantTextAndUsesUserVisionInput() {
+        val ref = AttachmentFiles.save(person, "AIの画像", "png", ByteArrayInputStream(picture()))
+        val pdf = AttachmentFiles.save(person, "資料.pdf", "pdf", ByteArrayInputStream("%PDF-1.4\nfixture".toByteArray()))
+        val turns = JSONArray()
+            .put(JSONObject().put("role", "user").put("content", "画像を作って"))
+            .put(JSONObject().put("role", "assistant").put("content", "描きました。\n${ref.markdown()}"))
+            .put(JSONObject().put("role", "user").put("content", "この画像と資料を説明して\n${pdf.markdown()}"))
+        val prepared = AttachmentMedia.input(person, turns)
+        assertEquals(turns.length(), prepared.length())
+        assertEquals("assistant", prepared.getJSONObject(1).getString("role"))
+        assertEquals("描きました。", prepared.getJSONObject(1).getString("content"))
+        val content = prepared.getJSONObject(2).getJSONArray("content")
+        assertEquals("user", prepared.getJSONObject(2).getString("role"))
+        assertEquals(1, (0 until content.length()).count { content.getJSONObject(it).optString("type") == "input_image" })
+        assertEquals(1, (0 until content.length()).count { content.getJSONObject(it).optString("type") == "input_file" })
+        assertTrue(content.getJSONObject(0).getString("text").contains("AI"))
+        assertTrue((0 until content.length()).any { content.getJSONObject(it).optString("text").contains("この画像と資料を説明して") })
+        assertTrue(turns.getJSONObject(1).getString("content").contains(ref.markdown()))
+        val imageOnly = JSONArray()
+            .put(JSONObject().put("role", "assistant").put("content", ref.markdown()))
+            .put(JSONObject().put("role", "user").put("content", "何が描かれている？"))
+        val followup = AttachmentMedia.input(person, imageOnly)
+        assertFalse(followup.getJSONObject(0).getString("content").isBlank())
+        assertEquals("何が描かれている？", followup.getJSONObject(1).getJSONArray("content").getJSONObject(3).getString("text"))
+    }
     @Test fun imageApiKeyStoreIsEncryptedAndSeparateFromSubscription() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val subscription = ConnectionStore(context)
