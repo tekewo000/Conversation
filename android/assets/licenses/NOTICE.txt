@@ -1,4 +1,11 @@
-Conversation on-device semantic retrieval
+Conversation third-party notices
+
+Multiplatform Markdown Renderer 0.38.1, Copyright Mike Penz and contributors.
+https://github.com/mikepenz/multiplatform-markdown-renderer/tree/v0.38.1
+Apache License 2.0 and the bundled Erik Hellman MIT notice; see Markdown-Renderer.txt.
+JetBrains Markdown 0.7.3, Copyright JetBrains and contributors.
+https://github.com/JetBrains/markdown
+Apache License 2.0; see Apache-2.0.txt.
 
 USearch 2.26.2, Copyright Unum and its contributors.
 https://github.com/unum-cloud/USearch/tree/v2.26.2

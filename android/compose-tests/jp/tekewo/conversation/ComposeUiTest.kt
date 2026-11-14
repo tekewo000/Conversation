@@ -49,6 +49,54 @@ class ComposeUiTest {
         ui = ComposeUi(compose.activity, { menus++ }, { sends++ }, { pages.add(it) })
     }
 
+    @Test fun markdownRendersForUserAssistantAndStreamingReply() {
+        compose.runOnUiThread {
+            install()
+            ui.setMessages("""{"first":0,"total":2,"messages":[{"id":1,"role":"user","text":"**ユーザーの太字** と `code`"},{"id":2,"role":"assistant","text":"## AIの見出し\n\n- 項目\n\n> 引用\n\n[リンク](https://example.com)\n\n```text\n**コードは原文**\n```"}]}""")
+        }
+        compose.waitUntil(5_000) {
+            compose.onAllNodes(hasText("ユーザーの太字", substring = true)).fetchSemanticsNodes()
+                .any { it.config[SemanticsProperties.Text].any { text -> !text.text.contains("**") } }
+        }
+        compose.onNodeWithText("ユーザーの太字", substring = true).assertIsDisplayed()
+        val user = compose.onNodeWithText("ユーザーの太字", substring = true).fetchSemanticsNode()
+            .config[SemanticsProperties.Text].single()
+        assertTrue(user.text.contains("code") && !user.text.contains('`'))
+        assertTrue(user.spanStyles.any { it.item.fontWeight == androidx.compose.ui.text.font.FontWeight.Bold })
+        compose.onNodeWithText("AIの見出し").assertIsDisplayed()
+        compose.onNodeWithText("項目").assertIsDisplayed()
+        compose.onNodeWithText("引用").assertIsDisplayed()
+        compose.onNodeWithText("リンク").assertIsDisplayed()
+        compose.onNodeWithText("**コードは原文**", substring = true).assertIsDisplayed()
+        compose.runOnUiThread { ui.streaming = "**途中の返答**" }
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("途中の返答")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("途中の返答").assertIsDisplayed()
+        compose.runOnUiThread { ui.streaming = "**途中の返答が更新**" }
+        compose.waitUntil(5_000) { compose.onAllNodes(hasText("途中の返答が更新")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("途中の返答が更新").assertIsDisplayed()
+    }
+
+    @Test fun markdownTableAndEscapedSyntaxAreReadable() {
+        compose.runOnUiThread {
+            install()
+            ui.setMessages("""{"first":0,"total":1,"messages":[{"id":1,"role":"user","text":"| 項目 | 値 |\n| --- | --- |\n| 名前 | 小春 |\n\n1. 番号付き\n\n~~取り消し~~ と \\*そのまま\\*"}]}""")
+        }
+        compose.waitUntil(5_000) {
+            compose.onAllNodes(hasText("小春", substring = true)).fetchSemanticsNodes()
+                .any { it.config[SemanticsProperties.Text].any { text -> text.text.trim() == "小春" } }
+        }
+        compose.onNodeWithText("小春", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("番号付き").assertIsDisplayed()
+        compose.onNodeWithText("取り消し と *そのまま*").assertIsDisplayed()
+        val text = compose.onNodeWithText("取り消し と *そのまま*").fetchSemanticsNode()
+            .config[SemanticsProperties.Text].single()
+        assertTrue(text.spanStyles.any { it.item.textDecoration == androidx.compose.ui.text.style.TextDecoration.LineThrough })
+        InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(
+            "screencap -p /data/local/tmp/conversation-markdown.png").use {
+            java.io.FileInputStream(it.fileDescriptor).readBytes()
+        }
+    }
+
     @Test fun latestAssistantShowsOnlyCurrentFeelingBesideItsIcon() {
         var opened = 0
         compose.runOnUiThread {

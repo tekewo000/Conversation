@@ -58,11 +58,13 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
@@ -72,6 +74,12 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.ui.window.SecureFlagPolicy
 import org.json.JSONObject
+import com.mikepenz.markdown.m3.Markdown
+import com.mikepenz.markdown.m3.markdownColor
+import com.mikepenz.markdown.m3.markdownTypography
+import com.mikepenz.markdown.model.rememberMarkdownState
+import com.mikepenz.markdown.model.markdownAnnotator
+import com.mikepenz.markdown.model.markdownAnnotatorConfig
 import java.util.function.IntConsumer
 import kotlin.math.roundToInt
 
@@ -299,9 +307,29 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 .background(if (user) Color(0xFF2D4434) else Color(0xFF533643), RoundedCornerShape(16.dp))
                 .padding(horizontal = 12.dp, vertical = 10.dp)) {
                 // ImGui sizes Noto's 1448-unit ascent/descent; Compose sizes its 1000-unit em.
-                Text(text, style = TextStyle(color = Color.White, fontSize = (textSize * (1000f / 1448f)).sp,
+                val style = TextStyle(color = Color.White, fontSize = (textSize * (1000f / 1448f)).sp,
                     fontFamily = chatFont,
-                    lineHeight = textSize.sp, letterSpacing = 0.sp))
+                    lineHeight = textSize.sp, letterSpacing = 0.sp)
+                Markdown(
+                    markdownState = rememberMarkdownState(text, retainState = true),
+                    modifier = Modifier,
+                    colors = markdownColor(text = Color.White),
+                    annotator = markdownAnnotator(markdownAnnotatorConfig(eolAsNewLine = true)),
+                    typography = markdownTypography(
+                        h1 = style.copy(fontSize = style.fontSize * 1.6f, lineHeight = style.lineHeight * 1.6f, fontWeight = FontWeight.Bold),
+                        h2 = style.copy(fontSize = style.fontSize * 1.4f, lineHeight = style.lineHeight * 1.4f, fontWeight = FontWeight.Bold),
+                        h3 = style.copy(fontSize = style.fontSize * 1.2f, lineHeight = style.lineHeight * 1.2f, fontWeight = FontWeight.Bold),
+                        h4 = style.copy(fontWeight = FontWeight.Bold),
+                        h5 = style.copy(fontWeight = FontWeight.Bold),
+                        h6 = style.copy(fontWeight = FontWeight.Bold),
+                        text = style, paragraph = style, quote = style,
+                        ordered = style, bullet = style, list = style, table = style,
+                        textLink = TextLinkStyles(style.copy(color = MaterialTheme.colorScheme.primary,
+                            textDecoration = TextDecoration.Underline).toSpanStyle()),
+                        code = style.copy(fontFamily = FontFamily.Monospace),
+                        inlineCode = style.copy(fontFamily = FontFamily.Monospace)),
+                    loading = { Text(text, style = style) },
+                    error = { Text(text, style = style) })
             }
         }
     }
