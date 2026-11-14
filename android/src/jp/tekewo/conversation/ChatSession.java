@@ -119,7 +119,7 @@ final class ChatSession {
           + "\"scope\":\"real|fiction|shared\",\"source_ids\":[根拠発言ID]}],"
           + "\"relationship\":{\"trust\":\"ユーザーへの信頼\",\"openness\":\"心を開ける範囲\","
           + "\"basis\":\"現在の関係の根拠となるやりとり\",\"source_ids\":[根拠発言ID]}}}。"
-          + "新しく覚える内容がなければmemoriesを空配列にしてください。最大8件。"
+          + "新しく覚える内容がなければmemoriesを空配列にしてください。最大32件。抽出結果全体はJSON化後128KiB以下。"
           + "memoriesのsource_idsは今回のjob.messagesに含まれる根拠発言だけを使い、IDを発明しないこと。"
           + "personは応答する人物のプロフィールです。existingのimported_sourcesにあるreported_handoverは"
           + "引き継ぎ資料の記載であり実際の過去発言ではありません。プロフィールや資料だけを根拠に新規記憶を作らず、"
@@ -256,7 +256,11 @@ final class ChatSession {
     }
 
     boolean processMemories(Transport backend) throws Exception {
-        for (int batch = 0; batch < 3; ++batch) {
+        return processMemories(backend, 3);
+    }
+
+    boolean processMemories(Transport backend, int maxBatches) throws Exception {
+        for (int batch = 0; batch < maxBatches; ++batch) {
             checkCancelled();
             JSONObject job = store.pending();
             long id = job.optLong("id", 0);

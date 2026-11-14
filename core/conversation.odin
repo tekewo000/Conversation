@@ -10,6 +10,8 @@ import "core:unicode/utf8"
 
 MAX_MESSAGE_BYTES :: 65536
 MAX_WINDOW :: 80
+MEMORY_BATCH_MESSAGES :: 4096
+MEMORY_BATCH_BYTES :: 262144
 Cached_Message :: struct { id: i64, text, role: cstring }
 Allocation_Check :: struct { backing: mem.Allocator, failed: bool }
 parsing_check: Allocation_Check
@@ -359,17 +361,32 @@ conversation_message_id :: proc "c" (index: i32) -> i64 {
 conversation_pending_job :: proc "c" () -> cstring {
  context = runtime.default_context()
  if !ready { fail("History is not open."); return nil }
- return json_query(`WITH candidates AS MATERIALIZED (
- SELECT id,first_id,end_id,lag(end_id) OVER(ORDER BY id) AS previous_end FROM (SELECT * FROM jobs WHERE processed=0 ORDER BY id LIMIT 16)
-), sizes AS (
- SELECT *, (SELECT count(*) FROM messages WHERE id BETWEEN j.first_id AND j.end_id) AS messages,
- (SELECT sum(length(CAST(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END)) AS BLOB))+1) FROM messages WHERE id BETWEEN j.first_id AND j.end_id) AS bytes
- FROM candidates j
-), budget AS (
- SELECT *,sum(messages) OVER(ORDER BY id) AS message_count,sum(bytes) OVER(ORDER BY id) AS byte_count,
- sum(CASE WHEN previous_end IS NOT NULL AND previous_end+1!=first_id THEN 1 ELSE 0 END) OVER(ORDER BY id) AS gaps FROM sizes
-), batch AS (SELECT * FROM budget WHERE message_count<=16 AND byte_count<=60001 AND gaps=0)
-SELECT coalesce((SELECT json_object('id',j.id,'first_job_id',(SELECT min(id) FROM batch),'messages',json((SELECT json_group_array(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END))) FROM (SELECT * FROM messages WHERE id BETWEEN (SELECT min(first_id) FROM batch) AND j.end_id ORDER BY id)))) FROM batch j ORDER BY j.id DESC LIMIT 1),'{}') WHERE ?1=''`)
+ pending:=prepare(`SELECT j.id,j.first_id,j.end_id,(SELECT sum(length(CAST(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END)) AS BLOB))+1) FROM messages WHERE id BETWEEN j.first_id AND j.end_id) FROM jobs j WHERE processed=0 ORDER BY j.id LIMIT 4096`)
+ if pending==nil do return nil
+ first_job,last_job,first_id,end_id,total_bytes:i64
+ valid:=true
+ for {
+  step:=sqlite3_step(pending)
+  if step==101 do break
+  if step!=100 { valid=false; break }
+  first,last:=sqlite3_column_int64(pending,1),sqlite3_column_int64(pending,2)
+  size:=sqlite3_column_int64(pending,3)
+  if first_job!=0 && first!=end_id+1 do break
+  start:=first_id if first_job!=0 else first
+  if last-start+1>MEMORY_BATCH_MESSAGES || total_bytes+size>MEMORY_BATCH_BYTES do break
+  if first_job==0 { first_job=sqlite3_column_int64(pending,0); first_id=first }
+  last_job=sqlite3_column_int64(pending,0)
+  end_id=last
+  total_bytes+=size
+ }
+ sqlite3_finalize(pending)
+ if !valid { fail("Could not read pending memory work."); return nil }
+ if first_job==0 do return result_text("{}")
+ output:=prepare(`SELECT json_object('id',?1,'first_job_id',?2,'messages',json((SELECT json_group_array(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END))) FROM (SELECT * FROM messages WHERE id BETWEEN ?3 AND ?4 ORDER BY id))))`)
+ if output==nil do return nil
+ defer sqlite3_finalize(output)
+ if !bind_int(output,1,last_job) || !bind_int(output,2,first_job) || !bind_int(output,3,first_id) || !bind_int(output,4,end_id) || sqlite3_step(output)!=100 { fail("Could not serialize pending memory work."); return nil }
+ return result_text(sqlite3_column_text(output,0))
 }
 
 insert_source :: proc(memory_id, message_id: i64) -> bool {
@@ -443,13 +460,13 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
    first=sqlite3_column_int64(batch,0)
    span=sqlite3_column_int64(batch,2)
    count=sqlite3_column_int64(batch,3)
-   valid=sqlite3_column_int64(batch,1)==end_id && count>=2 && count<=16 && span==end_id-first+1 && span<=16
+   valid=sqlite3_column_int64(batch,1)==end_id && count>=2 && count<=MEMORY_BATCH_MESSAGES && span==end_id-first+1 && span<=MEMORY_BATCH_MESSAGES
   }
   sqlite3_finalize(batch)
-  if !valid do return fail("Memory batches must cover contiguous pending work within sixteen messages.")
+  if !valid do return fail("Memory batches must cover contiguous pending work within the message budget.")
   size:=prepare(`SELECT sum(length(CAST(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END)) AS BLOB))+1) FROM messages WHERE id BETWEEN ?1 AND ?2`)
   if size==nil do return false
-  valid=bind_int(size,1,first) && bind_int(size,2,end_id) && sqlite3_step(size)==100 && sqlite3_column_int64(size,0)<=60001
+  valid=bind_int(size,1,first) && bind_int(size,2,end_id) && sqlite3_step(size)==100 && sqlite3_column_int64(size,0)<=MEMORY_BATCH_BYTES
   sqlite3_finalize(size)
   if !valid do return fail("Memory batch exceeds the source byte budget.")
   if !insert_job(first,end_id) do return false

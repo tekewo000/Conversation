@@ -26,18 +26,18 @@ public final class MainActivity extends ComponentActivity {
     private static native String nativeInit(byte[] storageDir, byte[] font, byte[] emojiFont);
     private static native long nativeAddMessage(byte[] role, byte[] text);
     private static native long nativeAddReply(byte[] text, byte[] state);
-    private static native String nativeLastError();
-    private static native String nativeContext(byte[] query);
+    static native String nativeLastError();
+    static native String nativeContext(byte[] query);
     private static native String nativeContextHybrid(byte[] query, long[] candidates);
     private static native String nativeEmbeddingBatch(long afterId);
-    private static native String nativePendingJob();
-    private static native String nativeApplyJob(long id, byte[] payload);
-    private static native String nativePendingPersona();
-    private static native String nativeApplyPersona(long throughId, byte[] payload);
+    static native String nativePendingJob();
+    static native String nativeApplyJob(long id, byte[] payload);
+    static native String nativePendingPersona();
+    static native String nativeApplyPersona(long throughId, byte[] payload);
     private static native String nativeMemories(byte[] query);
     private static native String nativeExport();
     private static native String nativeRecentTranscript();
-    private static native String nativeSwitchPerson(byte[] directory, byte[] payload);
+    static native String nativeSwitchPerson(byte[] directory, byte[] payload);
     private static native String nativeArchiveDelta(long cursor);
 
     private static native String nativeMessages(int first);
@@ -48,12 +48,11 @@ public final class MainActivity extends ComponentActivity {
     private ChatGptConnection connection;
     private ConnectionStore imageCredentials;
     private final ImageApi imageApi = new ImageApi();
-    private ChatSession session, memorySession;
+    private ChatSession session;
     private volatile SemanticMemory semanticMemory;
     private String semanticStatus = "意味検索を準備しています";
-    private final MemoryWorker memoryWorker = new MemoryWorker();
     private String memoryStatus = "";
-    private volatile boolean memoryPaused;
+    private int memoryView;
     private PersonRegistry people;
     private PersonRegistry.Person activePerson;
     private File pendingExportDirectory;
@@ -64,7 +63,7 @@ public final class MainActivity extends ComponentActivity {
     private final Runnable autoSync = () -> queueGitSync(false);
     private static final ExecutorService gitWorker = Executors.newSingleThreadExecutor();
     private static final Set<String> syncingPeople = new HashSet<>();
-    private static final Object storeGate = new Object();
+    static final Object storeGate = new Object();
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ExecutorService reader = Executors.newSingleThreadExecutor();
     private volatile boolean closed;
@@ -177,10 +176,16 @@ public final class MainActivity extends ComponentActivity {
             }
         };
         session = new ChatSession(store);
-        memorySession = new ChatSession(store);
         setBusy(false);
         refreshMessages();
         startSemanticMemory();
+        androidx.work.WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData(MemoryWork.NAME).observe(this, work -> {
+            memoryStatus = MemoryWork.status(this);
+            refreshMessages();
+            if (semanticMemory != null) semanticMemory.refresh();
+            if (memoryView != 0) refreshMemoryView();
+        });
+        queueMemories(null);
         scheduleGitSync();
     }
 
@@ -436,7 +441,7 @@ public final class MainActivity extends ComponentActivity {
         panel.sheet = true;
         panel.message = connection.hasSession()
                 ? connection.accountLabel() + "\nChatGPTの利用枠を使用します。\n" + connectionStatus
-                        + "\n" + (memoryWorker.isRunning() ? "記憶をバックグラウンドで整理しています。会話は続けられます。" : memoryStatus)
+                        + "\n" + (MemoryWork.isRunning() ? "記憶をバックグラウンドで整理しています。会話は続けられます。" : memoryStatus)
                         + "\n" + semanticStatus
                 : "ChatGPTにログインして、このアプリでサブスクの利用枠を使います。\n" + connectionStatus + "\n" + semanticStatus;
         if (!connection.hasSession()) {
@@ -473,6 +478,8 @@ public final class MainActivity extends ComponentActivity {
         }
         panel.rows.add(new ComposeUi.Row(connection.hasSession() ? "ログアウト" : "保存した接続情報をリセット", () -> {
             if (busy) return;
+            MemoryWork.pause(this);
+            androidx.work.WorkManager.getInstance(this).cancelUniqueWork(MemoryWork.NAME);
             worker.execute(() -> {
                 connection.signOut(); availableModels = null;
                 ui(() -> { connectionStatus = connection.signOutStatus(); showConnection(); });
@@ -586,28 +593,11 @@ public final class MainActivity extends ComponentActivity {
         });
     }
 
-    private void retryMemories() { memoryPaused = false; queueMemories(null); if (semanticMemory != null) semanticMemory.refresh(); }
+    private void retryMemories() { MemoryWork.resume(this); if (semanticMemory != null) semanticMemory.refresh(); }
 
     private void queueMemories(ChatRequest selected) {
-        if (closed || changingPerson || memoryPaused || activePerson == null || !connection.hasSession()) return;
-        memoryWorker.execute(() -> {
-            try {
-                requireOpen();
-                memorySession.begin();
-                final ChatRequest request = selected == null ? selectedRequest() : selected;
-                boolean more = memorySession.processMemories((instructions, turns, delta) -> {
-                    if (memoryPaused) throw new java.io.IOException("記憶の整理を一時停止しました。");
-                    return connection.request(request, instructions, turns, delta, true);
-                });
-                ui(() -> {
-                    memoryStatus = ""; refreshMessages(); scheduleGitSync();
-                    if (more) queueMemories(request);
-                });
-            } catch (Exception error) {
-                ui(() -> { memoryStatus = memoryPaused ? "記憶の整理を一時停止しました。"
-                        : "記憶の整理は再試行待ちです。原文は保存されています。" + safeError(error); refreshMessages(); scheduleGitSync(); });
-            } finally { if (semanticMemory != null) semanticMemory.refresh(); }
-        });
+        if (closed || changingPerson || activePerson == null || !connection.hasSession()) return;
+        MemoryWork.enqueue(this);
     }
 
     private void showPeople() {
@@ -615,22 +605,22 @@ public final class MainActivity extends ComponentActivity {
         panel.sheet = true;
         if (activePerson != null) panel.rows.add(new ComposeUi.Row("人物アイコンを設定", this::showPersonIcon, 2));
         panel.rows.add(new ComposeUi.Row("人物を追加", () -> {
-            if (busy || memoryWorker.isRunning()) { showError("応答と記憶の整理が終わってから追加してください。"); return; }
+            if (busy || MemoryWork.isRunning()) { showError("応答と記憶の整理が終わってから追加してください。"); return; }
             showNewPerson();
         }, 2));
         for (PersonRegistry.Person person : people.list()) {
             ComposeUi.Row row = new ComposeUi.Row(person.name, () -> {
-                if (busy || memoryWorker.isRunning()) { showError("応答と記憶の整理が終わってから人物を切り替えてください。"); return; }
+                if (busy || MemoryWork.isRunning()) { showError("応答と記憶の整理が終わってから人物を切り替えてください。"); return; }
                 switchPerson(person);
             }, 5);
             row.checked = activePerson != null && person.id.equals(activePerson.id); panel.rows.add(row);
         }
         panel.rows.add(new ComposeUi.Row("人物ファイルを読み込む", () -> {
-            if (busy || memoryWorker.isRunning()) { showError("応答と記憶の整理が終わってから読み込んでください。"); return; }
+            if (busy || MemoryWork.isRunning()) { showError("応答と記憶の整理が終わってから読み込んでください。"); return; }
             startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE), 82);
         }, 1));
         if (!people.list().isEmpty()) panel.rows.add(new ComposeUi.Row("人物を削除", () -> {
-            if (busy || memoryWorker.isRunning()) { showError("応答と記憶の整理が終わってから削除してください。"); return; }
+            if (busy || MemoryWork.isRunning()) { showError("応答と記憶の整理が終わってから削除してください。"); return; }
             showDeletePeople();
         }, 6));
         compose.show(panel);
@@ -650,6 +640,13 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void showMemory() {
+        memoryView = 1;
+        refreshMemoryView();
+    }
+
+    private void refreshMemoryView() {
+        final int requestedView = memoryView;
+        if (requestedView == 0) return;
         final PersonRegistry.Person person = activePerson;
         if (person == null || changingPerson) return;
         reader.execute(() -> {
@@ -663,12 +660,14 @@ public final class MainActivity extends ComponentActivity {
                     snapshot = new JSONObject(result);
                 }
                 ui(() -> {
-                    if (changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
+                    if (requestedView != memoryView || changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
+                    if (requestedView != 1) { showMemoryHistory(person, snapshot, requestedView == 3); return; }
                     JSONObject continuity = snapshot.optJSONObject("continuity");
                     JSONObject current = continuity == null ? null : continuity.optJSONObject("assistant_state");
                     JSONObject state = current == null ? new JSONObject() : current;
                     org.json.JSONArray episodes = continuity == null ? null : continuity.optJSONArray("episodes");
                     ComposeUi.Panel panel = new ComposeUi.Panel("記憶"); panel.sheet = true;
+                    panel.onDismiss = () -> memoryView = 0;
                     panel.message = "感情\n" + state.optString("emotion", "未記録")
                             + "\n\n理由\n" + state.optString("reason", "未記録")
                             + "\n\n状況\n" + state.optString("event", "未記録");
@@ -681,13 +680,13 @@ public final class MainActivity extends ComponentActivity {
                     panel.rows.add(new ComposeUi.Row("中期記憶（" + (episodes == null ? 0 : episodes.length()) + "件）",
                             () -> showMemoryHistory(person, snapshot, true)));
                     if (progress != null && progress.optLong("pending_jobs") > 0) {
-                        boolean running = memoryWorker.isRunning();
-                        panel.rows.add(new ComposeUi.Row(running ? (memoryPaused ? "一時停止を予約しました" : "この整理のあと一時停止") : "記憶の整理を続ける", () -> {
-                            if (running) memoryPaused = true; else retryMemories();
+                        boolean running = MemoryWork.isRunning();
+                        panel.rows.add(new ComposeUi.Row(running ? (MemoryWork.isPaused(this) ? "一時停止を予約しました" : "この整理のあと一時停止") : "記憶の整理を続ける", () -> {
+                            if (running) MemoryWork.pause(this); else retryMemories();
                             showMemory();
                         }));
                     }
-                    panel.rows.add(new ComposeUi.Row("人物アイコンを設定", this::showPersonIcon, 2));
+                    panel.rows.add(new ComposeUi.Row("人物アイコンを設定", () -> { memoryView = 0; showPersonIcon(); }, 2));
                     compose.show(panel);
                 });
             } catch (Exception error) { ui(() -> showError(safeError(error))); }
@@ -695,6 +694,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void showMemoryHistory(PersonRegistry.Person person, JSONObject snapshot, boolean middleTerm) {
+        memoryView = middleTerm ? 3 : 2;
         if (changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
         ComposeUi.Panel panel = new ComposeUi.Panel(middleTerm ? "中期記憶" : "短期記憶"); panel.sheet = true;
         JSONObject continuity = snapshot.optJSONObject("continuity");
@@ -779,7 +779,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void deletePerson(PersonRegistry.Person person) {
-        if (busy || memoryWorker.isRunning()) return;
+        if (busy || MemoryWork.isRunning()) return;
         saveDraft(); changingPerson = true; setBusy(true);
         syncTimer.removeCallbacks(autoSync);
         worker.execute(() -> {
@@ -829,7 +829,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void switchPerson(PersonRegistry.Person person) {
-        if ((activePerson != null && person.id.equals(activePerson.id)) || busy || memoryWorker.isRunning()) return;
+        if ((activePerson != null && person.id.equals(activePerson.id)) || busy || MemoryWork.isRunning()) return;
         saveDraft(); changingPerson = true; setBusy(true);
         syncTimer.removeCallbacks(autoSync);
         worker.execute(() -> {
@@ -856,7 +856,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void previewPerson(PersonDocument document) {
-        if (busy || memoryWorker.isRunning()) return;
+        if (busy || MemoryWork.isRunning()) return;
         ComposeUi.Panel panel = new ComposeUi.Panel(document.name);
         panel.secure = true;
         panel.message = (document.profile.length() > 1600 ? document.profile.substring(0, 1600) + "…" : document.profile)
@@ -877,7 +877,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void createPerson(PersonDocument document, String repository, String suppliedToken) {
-        if (busy || memoryWorker.isRunning()) return;
+        if (busy || MemoryWork.isRunning()) return;
         saveDraft(); changingPerson = true; setBusy(true);
         syncTimer.removeCallbacks(autoSync);
         worker.execute(() -> {
@@ -1128,8 +1128,6 @@ public final class MainActivity extends ComponentActivity {
         synchronized (storeGate) { closed = true; }
         syncTimer.removeCallbacks(autoSync);
         if (session != null) session.cancel();
-        if (memorySession != null) memorySession.cancel();
-        memoryWorker.close();
         if (semanticMemory != null) semanticMemory.close();
         if (connection != null) connection.cancel();
         imageApi.cancel();

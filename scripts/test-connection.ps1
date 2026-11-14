@@ -18,7 +18,7 @@ $tests = @(Get-ChildItem -LiteralPath 'android/tests' -Filter '*.java' -Recurse 
 $sources = @("$sourceRoot/OAuthValidation.java", "$sourceRoot/SseReader.java", "$sourceRoot/ChatRequest.java") + $tests
 if (Test-Path -LiteralPath "$sourceRoot/ChatSession.java") { $sources += "$sourceRoot/ChatSession.java" }
 if (Test-Path -LiteralPath "$sourceRoot/BackupArchive.java") { $sources += "$sourceRoot/BackupArchive.java" }
-$sources += @('PersonDocument', 'PersonRegistry', 'GitArchiveFiles', 'GitHubBackup', 'ReplyText', 'MemoryWorker', 'HttpRequestPool', 'AttachmentFiles', 'ImageApi') | ForEach-Object { "$sourceRoot/$_.java" }
+$sources += @('PersonDocument', 'PersonRegistry', 'GitArchiveFiles', 'GitHubBackup', 'ReplyText', 'HttpRequestPool', 'AttachmentFiles', 'ImageApi') | ForEach-Object { "$sourceRoot/$_.java" }
 & "$($toolchain.JavaHome)/bin/javac.exe" '-J-Duser.language=en' -encoding UTF-8 --release 8 -Xlint:-options -classpath $jsonJar -d $classes @sources
 if ($LASTEXITCODE -ne 0) { throw 'Connection test compilation failed.' }
 & "$($toolchain.JavaHome)/bin/java.exe" '-Dfile.encoding=UTF-8' -ea -classpath "$classes;$jsonJar" jp.tekewo.conversation.ConnectionTest
@@ -31,7 +31,7 @@ if (Test-Path -LiteralPath "$sourceRoot/BackupArchive.java") {
     & "$($toolchain.JavaHome)/bin/java.exe" '-Dfile.encoding=UTF-8' -ea -classpath "$classes;$jsonJar" jp.tekewo.conversation.BackupArchiveTest
     if ($LASTEXITCODE -ne 0) { throw 'Backup archive tests failed.' }
 }
-foreach ($test in @('PersonDocumentTest', 'PersonRegistryTest', 'GitArchiveFilesTest', 'GitHubBackupTest', 'MemoryWorkerTest', 'HttpRequestPoolTest', 'ReplyTextTest', 'AttachmentFilesTest', 'ImageApiTest')) {
+foreach ($test in @('PersonDocumentTest', 'PersonRegistryTest', 'GitArchiveFilesTest', 'GitHubBackupTest', 'HttpRequestPoolTest', 'ReplyTextTest', 'AttachmentFilesTest', 'ImageApiTest')) {
     & "$($toolchain.JavaHome)/bin/java.exe" '-Dfile.encoding=UTF-8' -ea -classpath "$classes;$jsonJar" "jp.tekewo.conversation.$test"
     if ($LASTEXITCODE -ne 0) { throw "$test failed." }
 }

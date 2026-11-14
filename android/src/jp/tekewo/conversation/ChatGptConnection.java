@@ -1,6 +1,7 @@
 package jp.tekewo.conversation;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import org.json.JSONArray;
@@ -50,7 +51,8 @@ public final class ChatGptConnection {
 
     private final Activity activity;
     private final ConnectionStore store;
-    private final Object stateLock = new Object(), operationLock = new Object();
+    private final Object stateLock = new Object();
+    private static final Object operationLock = new Object();
     private final HttpRequestPool requests = new HttpRequestPool(), replyRequests = new HttpRequestPool();
     private final AtomicBoolean signingIn = new AtomicBoolean();
     private JSONObject state;
@@ -80,9 +82,10 @@ public final class ChatGptConnection {
         checked(attempt);
     }
 
-    public ChatGptConnection(Activity activity) {
-        this.activity = activity;
-        store = new ConnectionStore(activity.getApplicationContext());
+    public ChatGptConnection(Context context) {
+        this.activity = context instanceof Activity ? (Activity)context : null;
+        store = new ConnectionStore(context.getApplicationContext());
+        synchronized (operationLock) {
         try {
             state = store.load();
             if (state.optString("host_id").isEmpty()) {
@@ -92,6 +95,7 @@ public final class ChatGptConnection {
         } catch (Exception e) {
             state = new JSONObject();
             storageError = "接続情報を読み込めません。サインアウトしてから再接続してください。";
+        }
         }
     }
 
@@ -108,6 +112,7 @@ public final class ChatGptConnection {
     }
 
     public void signIn(LoginCallback callback) {
+        if (activity == null) throw new IllegalStateException("Sign-in requires an Activity.");
         if (!signingIn.compareAndSet(false, true)) {
             activity.runOnUiThread(() -> callback.complete("サインインを処理中です。"));
             return;
@@ -117,7 +122,7 @@ public final class ChatGptConnection {
         Thread worker = new Thread(() -> {
             String error = null;
             synchronized (operationLock) {
-                try { login(attempt); }
+                try { reloadState(); login(attempt); }
                 catch (IOException e) { android.util.Log.w("ConversationAuth", loginPhase + ":" + e.getClass().getSimpleName()); error = safeMessage(e); }
                 catch (Exception e) { android.util.Log.w("ConversationAuth", loginPhase + ":" + e.getClass().getSimpleName()); error = "サインインを完了できませんでした。もう一度お試しください。"; }
                 finally { closeListener(); signingIn.set(false); }
@@ -257,6 +262,11 @@ public final class ChatGptConnection {
     }
 
     public String request(ChatRequest request, String instructions, JSONArray input, Consumer<String> onDelta, boolean background) throws IOException {
+        return request(request, instructions, input, onDelta, background, 120);
+    }
+
+    String request(ChatRequest request, String instructions, JSONArray input, Consumer<String> onDelta, boolean background, int timeoutSeconds) throws IOException {
+        if (timeoutSeconds < 1 || timeoutSeconds > 300) throw new IOException("通信の待機時間が不正です。");
         int attempt = requests.generation(), replyAttempt = replyRequests.generation();
         String token;
         synchronized (operationLock) { token = accessToken(attempt); }
@@ -267,12 +277,13 @@ public final class ChatGptConnection {
             byte[] encoded = body.toString().getBytes(StandardCharsets.UTF_8);
             if (encoded.length > 16 * 1024 * 1024) throw new SafeFailure("送信内容が大きすぎます。添付ファイルを減らしてください。");
             connection = open(RESOURCE + "/responses", "POST", token, attempt);
+            if (background) connection.setReadTimeout(timeoutSeconds * 1000);
             if (!background) replyRequests.register(connection, replyAttempt);
             connection.setRequestProperty("Content-Type", "application/json");
             connection.setRequestProperty("Accept", "text/event-stream");
             connection.setDoOutput(true); connection.setFixedLengthStreamingMode(encoded.length);
             final HttpURLConnection bound = connection;
-            timeout = TIMEOUTS.schedule(bound::disconnect, 120, TimeUnit.SECONDS);
+            timeout = TIMEOUTS.schedule(bound::disconnect, timeoutSeconds, TimeUnit.SECONDS);
             try (OutputStream output = connection.getOutputStream()) { output.write(encoded); }
             int status = connection.getResponseCode();
             if (status != 200) throw httpFailure(connection, status);
@@ -299,6 +310,7 @@ public final class ChatGptConnection {
     private String accessToken(int attempt) throws IOException {
         try {
             checked(attempt);
+            reloadState();
             JSONObject selected = snapshot();
             if (!hasSession()) throw new SafeFailure("ChatGPT にサインインしてください。");
             if (!hasScope(selected.optString("scope"), "chatgpt.tokens.use.direct"))
@@ -356,6 +368,7 @@ public final class ChatGptConnection {
             String refresh = "", client = "";
             boolean cleared = false, unknownRemote = false;
             try {
+                reloadState();
                 JSONObject selected = snapshot();
                 refresh = selected.optString("refresh_token"); client = selected.optString("client_id");
                 clearTokens(attempt); cleared = true;
@@ -502,6 +515,7 @@ public final class ChatGptConnection {
     private void handleUnauthorized(HttpFailure failure, int attempt, String rejectedToken) throws IOException {
         synchronized (operationLock) {
             checked(attempt);
+            reloadState();
             if ((failure.status == 401 || failure.invalidGrant) && snapshot().optString("access_token").equals(rejectedToken))
                 clearTokens(attempt);
         }
@@ -514,6 +528,10 @@ public final class ChatGptConnection {
             persist(clean, attempt);
         } catch (IOException e) { throw e; }
         catch (Exception e) { throw new SafeFailure("接続情報を消去できませんでした。"); }
+    }
+
+    private void reloadState() throws IOException {
+        synchronized (stateLock) { state = store.load(); }
     }
 
     private JSONObject snapshot() throws IOException {

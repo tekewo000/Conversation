@@ -63,7 +63,10 @@ class MainActivityComposeTest {
         compose.onNodeWithContentDescription("画像生成用APIキー").assert(androidx.compose.ui.test.SemanticsMatcher.expectValue(
             androidx.compose.ui.semantics.SemanticsProperties.EditableText, androidx.compose.ui.text.AnnotatedString("")))
         compose.onNodeWithText("APIキーを削除").performClick()
-        compose.waitUntil(5_000) { !keys.load().has("api_key") }
+        compose.waitUntil(5_000) {
+            compose.onAllNodes(androidx.compose.ui.test.hasText("画像生成用APIキーを削除しました。", substring = true)).fetchSemanticsNodes().isNotEmpty()
+        }
+        assertTrue(!keys.load().has("api_key"))
         assertEquals(subscription, ConnectionStore(context).load().toString())
         } finally { if (saved.length() == 0) keys.delete() else keys.save(saved) }
     }
@@ -316,19 +319,14 @@ class MainActivityComposeTest {
         compose.onNodeWithContentDescription("閉じる").performClick()
         compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("記憶")).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithContentDescription("閉じる").performClick()
-        val memoryWorker = MainActivity::class.java.getDeclaredField("memoryWorker").apply { isAccessible = true }
-            .get(compose.activity) as MemoryWorker
-        val started = java.util.concurrent.CountDownLatch(1)
-        val release = java.util.concurrent.CountDownLatch(1)
-        memoryWorker.execute { started.countDown(); release.await(10, java.util.concurrent.TimeUnit.SECONDS) }
-        try {
-            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
-            openShortTermMemory()
-            compose.onNodeWithText("この整理のあと一時停止").performClick()
-            compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("一時停止を予約しました")).fetchSemanticsNodes().isNotEmpty() }
-            assertTrue(MainActivity::class.java.getDeclaredField("memoryPaused").apply { isAccessible = true }.getBoolean(compose.activity))
-        } finally { release.countDown() }
-        compose.waitUntil(10_000) { !memoryWorker.isRunning }
+        MemoryWork.pause(context)
+        compose.activityRule.scenario.recreate()
+        openShortTermMemory()
+        assertTrue(MemoryWork.isPaused(context))
+        compose.onNodeWithText("記憶の整理を続ける").performClick()
+        assertTrue(!MemoryWork.isPaused(context))
+        assertTrue(androidx.work.WorkManager.getInstance(context)
+            .getWorkInfosForUniqueWork(MemoryWork.NAME).get(5, java.util.concurrent.TimeUnit.SECONDS).isNotEmpty())
         compose.onNodeWithContentDescription("閉じる").performClick()
         openShortTermMemory()
         compose.onNodeWithText("人物アイコンを設定").performClick()
@@ -336,6 +334,78 @@ class MainActivityComposeTest {
         compose.onNodeWithText("名前のアイコンに戻す").performClick()
         compose.waitUntil(10_000) { PersonRegistry(context.filesDir).icon(person.id).isEmpty() }
         compose.onNodeWithText("ほっとして嬉しい").assertExists()
+    }
+
+    @Test fun memoryStoreFinishesAfterTheActivityIsDestroyed() {
+        val people = PersonRegistry(context.filesDir)
+        previousPerson = people.active()?.id
+        val person = people.stage(PersonDocument.named(name), null)
+        people.commit(person)
+        compose.activityRule.scenario.recreate()
+        val add = MainActivity::class.java.getDeclaredMethod("nativeAddMessage", ByteArray::class.java, ByteArray::class.java).apply { isAccessible = true }
+        add.invoke(null, "user".toByteArray(), "カフェで旅の相談をした".toByteArray())
+        add.invoke(null, "assistant".toByteArray(), "予算を決めよう".toByteArray())
+        val store = MemoryStore(context, person.id)
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val done = java.util.concurrent.CountDownLatch(1)
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable>()
+        Thread {
+            try {
+                ChatSession(store).processMemories({ instructions, _, _ ->
+                    assertEquals(ChatSession.EXTRACT, instructions)
+                    started.countDown()
+                    assertTrue(release.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                    """{"memories":[],"continuity":{"threads":[],"episodes":[{"key":"cafe","text":"カフェで旅の予算を相談した","emotion":"","scene":"カフェ、旅行相談","scope":"shared","source_ids":[1,2]}]}}"""
+                }, 1)
+            } catch (error: Throwable) { failure.set(error) } finally { done.countDown() }
+        }.start()
+        try {
+            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            compose.activityRule.scenario.close()
+        } finally { release.countDown() }
+        assertTrue(done.await(10, java.util.concurrent.TimeUnit.SECONDS))
+        failure.get()?.let { throw AssertionError("Background memory stopped with the Activity", it) }
+        val snapshot = store.context("")
+        assertEquals(2, snapshot.getJSONObject("memory_progress").getInt("processed_messages"))
+        assertEquals("カフェで旅の予算を相談した", snapshot.getJSONObject("continuity").getJSONArray("episodes").getJSONObject(0).getString("text"))
+    }
+
+    @Test fun openMemoryReflectsBackgroundCommitWithoutReopening() {
+        val people = PersonRegistry(context.filesDir)
+        previousPerson = people.active()?.id
+        val person = people.stage(PersonDocument.named(name), null)
+        people.commit(person)
+        compose.activityRule.scenario.recreate()
+        val add = MainActivity::class.java.getDeclaredMethod("nativeAddMessage", ByteArray::class.java, ByteArray::class.java).apply { isAccessible = true }
+        add.invoke(null, "user".toByteArray(), "家で相談した".toByteArray())
+        add.invoke(null, "assistant".toByteArray(), "話を聞いた".toByteArray())
+        compose.activityRule.scenario.recreate()
+        openShortTermMemory()
+        compose.onNodeWithText("中期記憶（0件）").assertExists()
+        val store = MemoryStore(context, person.id)
+        ChatSession(store).processMemories({ _, _, _ ->
+            """{"memories":[],"continuity":{"threads":[],"episodes":[{"key":"home","text":"家で相談した","emotion":"","scene":"家、相談","scope":"shared","source_ids":[1,2]}]}}"""
+        }, 1)
+        MemoryWork.enqueue(context)
+        compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("中期記憶（1件）")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("会話の記憶整理", substring = true).assertTextContains("2 / 2 発言", substring = true)
+    }
+
+    @Test fun backgroundAndReplyConnectionsReloadTheLatestCredentials() {
+        val saved = ConnectionStore(context).load()
+        try {
+            val background = ChatGptConnection(context)
+            val reply = MainActivity::class.java.getDeclaredField("connection").apply { isAccessible = true }.get(compose.activity)
+            val current = org.json.JSONObject(saved.toString()).put("access_token", "synthetic-rotated-token")
+            ConnectionStore(context).save(current)
+            val reload = ChatGptConnection::class.java.getDeclaredMethod("reloadState").apply { isAccessible = true }
+            val snapshot = ChatGptConnection::class.java.getDeclaredMethod("snapshot").apply { isAccessible = true }
+            for (connection in listOf(reply, background)) {
+                reload.invoke(connection)
+                assertEquals("synthetic-rotated-token", (snapshot.invoke(connection) as org.json.JSONObject).getString("access_token"))
+            }
+        } finally { ConnectionStore(context).save(saved) }
     }
 
     @Test fun iconShowsEmptyShortTermMemoryWithoutInventingDetails() {

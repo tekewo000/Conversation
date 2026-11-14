@@ -14,8 +14,14 @@ public final class ReleaseStartupProbe extends Instrumentation {
     @Override public void onCreate(Bundle arguments) { super.onCreate(arguments); start(); }
     @Override public void onStart() {
         Bundle result = new Bundle();
+        android.content.SharedPreferences preferences = null;
+        boolean wasPaused = false;
+        int resultCode = Activity.RESULT_OK;
         try {
             Context context = getTargetContext();
+            preferences = context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE);
+            wasPaused = preferences.getBoolean("memory_paused", false);
+            if (!preferences.edit().putBoolean("memory_paused", true).commit()) throw new AssertionError("Could not isolate the startup diagnostic from AI requests");
             ClassLoader loader = context.getClassLoader();
             Class<?> models = loader.loadClass("jp.tekewo.conversation.RagModels");
             Method ensure = models.getDeclaredMethod("ensure", Context.class, Consumer.class); ensure.setAccessible(true);
@@ -54,9 +60,9 @@ public final class ReleaseStartupProbe extends Instrumentation {
                 org.json.JSONObject batch = new org.json.JSONObject((String)pending.invoke(null));
                 if (batch.optLong("id") > 0) {
                     org.json.JSONArray messages = batch.getJSONArray("messages");
-                    if (messages.length() < 1 || messages.length() > 16 || batch.getLong("first_job_id") > batch.getLong("id"))
+                    if (messages.length() < 1 || messages.length() > 4096 || batch.getLong("first_job_id") > batch.getLong("id"))
                         throw new AssertionError("Invalid pending memory batch");
-                    if (batch.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 65536)
+                    if (batch.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 262400)
                         throw new AssertionError("Memory batch exceeds the source transport budget");
                     for (int i = 1; i < messages.length(); i++)
                         if (messages.getJSONObject(i).getLong("id") != messages.getJSONObject(i - 1).getLong("id") + 1)
@@ -71,12 +77,17 @@ public final class ReleaseStartupProbe extends Instrumentation {
             }
             runOnMainSync(activity::finish);
             result.putString("stream", "RELEASE_STARTUP_PASS: installed Release model inference and Activity startup\n");
-            finish(Activity.RESULT_OK, result);
         } catch (Throwable failure) {
             java.io.StringWriter trace = new java.io.StringWriter(); failure.printStackTrace(new java.io.PrintWriter(trace));
             result.putString("stream", "RELEASE_STARTUP_FAIL\n" + trace);
-            finish(Activity.RESULT_CANCELED, result);
+            resultCode = Activity.RESULT_CANCELED;
+        } finally {
+            if (preferences != null && !preferences.edit().putBoolean("memory_paused", wasPaused).commit()) {
+                result.putString("stream", "RELEASE_STARTUP_FAIL: could not restore background memory settings\n");
+                resultCode = Activity.RESULT_CANCELED;
+            }
         }
+        finish(resultCode, result);
     }
 
     private static Bundle status(String text) { Bundle value = new Bundle(); value.putString("stream", text); return value; }

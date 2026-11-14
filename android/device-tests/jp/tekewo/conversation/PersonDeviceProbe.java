@@ -124,6 +124,10 @@ public final class PersonDeviceProbe extends Instrumentation {
     }
 
     private void inspectMemory(Context app) throws Exception {
+        android.content.SharedPreferences preferences = app.getSharedPreferences("MainActivity", Context.MODE_PRIVATE);
+        String model = preferences.getString("model_slug", "");
+        report("MEMORY_CONFIG " + new JSONObject().put("model", model).put("effort", preferences.getString("reasoning_effort:" + model, ""))
+                .put("paused", preferences.getBoolean("memory_paused", false)).put("status", preferences.getString("memory_status", "")));
         File root = app.getFilesDir().getCanonicalFile();
         JSONObject registry = new JSONObject(new String(Files.readAllBytes(new File(root, "people-registry.json").toPath()), StandardCharsets.UTF_8));
         String id = registry.getString("active_id");
