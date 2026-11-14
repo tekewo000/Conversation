@@ -29,6 +29,7 @@ public final class ConnectionTest {
                 && "こんにちは".equals(request.getJSONArray("input").getJSONObject(0).getString("content"))
                 && "instructions".equals(request.getString("instructions")), "streaming, privacy and conversation preserved");
         JSONObject defaults = new ChatRequest(model, "", false).body(null, turns);
+        check(!defaults.has("tools"), "ordinary replies do not require image generation support");
         check(!defaults.has("reasoning") && "default".equals(defaults.getString("service_tier")), "default effort omitted and Fast off explicitly standard");
         fails(() -> new ChatRequest(model, "unsupported", false).body("", turns));
         fails(() -> new ChatRequest(model, "low", false).body("", new JSONArray()));

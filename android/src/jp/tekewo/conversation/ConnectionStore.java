@@ -19,12 +19,19 @@ import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
 final class ConnectionStore {
-    private static final String ALIAS = "conversation.chatgpt.credentials.v1";
-    private static final byte[] AAD = "Conversation.ChatGPT.v1".getBytes(StandardCharsets.US_ASCII);
+    private final String alias;
+    private final byte[] aad;
     private final AtomicFile file;
 
     ConnectionStore(Context context) {
-        file = new AtomicFile(new File(context.getNoBackupFilesDir(), "chatgpt-connection.v1"));
+        this(context, "chatgpt");
+    }
+
+    ConnectionStore(Context context, String name) {
+        if (!name.matches("[a-z0-9-]{1,64}")) throw new IllegalArgumentException("Invalid credential store name");
+        alias = "conversation." + name + ".credentials.v1";
+        aad = ("Conversation." + (name.equals("chatgpt") ? "ChatGPT" : name) + ".v1").getBytes(StandardCharsets.US_ASCII);
+        file = new AtomicFile(new File(context.getNoBackupFilesDir(), name + "-connection.v1"));
     }
 
     synchronized JSONObject load() throws IOException {
@@ -41,7 +48,7 @@ final class ConnectionStore {
             if (encoded.length < 30 || encoded[0] != 1) throw new IOException();
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.DECRYPT_MODE, key(false), new GCMParameterSpec(128, encoded, 1, 12));
-            cipher.updateAAD(AAD);
+            cipher.updateAAD(aad);
             return new JSONObject(new String(cipher.doFinal(encoded, 13, encoded.length - 13), StandardCharsets.UTF_8));
         } catch (Exception e) { throw failure(); }
     }
@@ -53,7 +60,7 @@ final class ConnectionStore {
             if (plaintext.length > 240 * 1024) throw new IOException();
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.ENCRYPT_MODE, key(true));
-            cipher.updateAAD(AAD);
+            cipher.updateAAD(aad);
             byte[] iv = cipher.getIV();
             if (iv.length != 12) throw new IOException();
             byte[] ciphertext = cipher.doFinal(plaintext);
@@ -74,20 +81,24 @@ final class ConnectionStore {
         try {
             if (file.getBaseFile().exists()) throw new IOException();
             KeyStore keys = KeyStore.getInstance("AndroidKeyStore"); keys.load(null);
-            keys.deleteEntry(ALIAS);
+            keys.deleteEntry(alias);
         } catch (Exception e) { throw failure(); }
     }
 
     private SecretKey key(boolean create) throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null);
-        if (store.containsAlias(ALIAS)) return (SecretKey)store.getKey(ALIAS, null);
+        if (store.containsAlias(alias)) return (SecretKey)store.getKey(alias, null);
         if (!create) throw new IOException();
         KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
-        generator.init(new KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+        generator.init(new KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setKeySize(256).setRandomizedEncryptionRequired(true).build());
         return generator.generateKey();
     }
 
-    private static IOException failure() { return new IOException("ChatGPT の接続情報を安全に保存・読込できませんでした。サインアウトして再接続してください。"); }
+    private IOException failure() {
+        return new IOException(alias.equals("conversation.chatgpt.credentials.v1")
+                ? "ChatGPT の接続情報を安全に保存・読込できませんでした。サインアウトして再接続してください。"
+                : "画像生成APIの接続情報を安全に保存・読込できませんでした。再設定してください。");
+    }
 }

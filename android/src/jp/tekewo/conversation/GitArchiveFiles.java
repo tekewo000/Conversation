@@ -66,6 +66,16 @@ final class GitArchiveFiles {
         Map<String, byte[]> files = new LinkedHashMap<>();
         files.put("person.md", source);
         files.put("persona.json", settings);
+        JSONObject attachments = delta.optJSONObject("attachment_files");
+        java.util.Iterator<String> attachmentKeys = attachments == null ? java.util.Collections.emptyIterator() : attachments.keys();
+        while (attachmentKeys.hasNext()) {
+            String file = attachmentKeys.next();
+            if (!file.matches("[0-9a-f]{64}\\.(jpg|png|webp|gif|mp4|webm|mov|pdf|txt)")) throw new IOException("Invalid attachment path.");
+            byte[] data = java.util.Base64.getDecoder().decode(attachments.getString(file));
+            if (data.length == 0 || data.length > AttachmentFiles.MAX_BYTES || !file.startsWith(sha256(data) + "."))
+                throw new IOException("Attachment content does not match its fingerprint.");
+            files.put("media/" + file, data);
+        }
         String segment = "";
         String eventHash = sha256(lines.toByteArray());
         if (through > from) {

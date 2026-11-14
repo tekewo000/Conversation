@@ -10,6 +10,13 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.dp
 
 internal object ConversationIcons {
+    val Add = strokeVector("ConversationAdd", 1.8f) {
+        moveTo(5f, 12f); lineTo(19f, 12f)
+        moveTo(12f, 5f); lineTo(12f, 19f)
+    }
+    val Play = strokeVector("ConversationPlay", 1.8f) {
+        moveTo(8f, 5f); lineTo(19f, 12f); lineTo(8f, 19f); close()
+    }
     val Menu = strokeVector("ConversationMenu", 1.8f) {
         moveTo(4f, 6f); lineTo(20f, 6f)
         moveTo(4f, 12f); lineTo(20f, 12f)

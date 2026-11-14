@@ -27,6 +27,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -82,6 +83,9 @@ import com.mikepenz.markdown.model.markdownAnnotator
 import com.mikepenz.markdown.model.markdownAnnotatorConfig
 import java.util.function.IntConsumer
 import kotlin.math.roundToInt
+import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private val chatFont = FontFamily(Font(R.font.noto_sans_jp_regular))
 
@@ -91,6 +95,10 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     var enabled by mutableStateOf(false)
     var sending by mutableStateOf(false)
     var draft by mutableStateOf("")
+    var attachments by mutableStateOf("")
+    var generateImages by mutableStateOf(false)
+    var mediaDirectory by mutableStateOf<File?>(null)
+    var onAttach by mutableStateOf<Runnable?>(null)
     var streaming by mutableStateOf("")
     var textSize by mutableIntStateOf(16)
     var messageGap by mutableIntStateOf(12)
@@ -107,6 +115,8 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     private var scrollTarget = 0
     private var pageDirection = 0
     private val menuFocus = FocusRequester()
+    private val attachmentFocus = FocusRequester()
+    private var attachmentMenu = false
 
     class Panel(@JvmField val title: String) {
         @JvmField var sheet = false
@@ -198,6 +208,12 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         }
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.End) {
+                    IconButton(onClick = { keyboard?.hide(); focus.clearFocus(); attachmentMenu = false; onMenu.run() },
+                        modifier = Modifier.size(48.dp).focusRequester(menuFocus)) {
+                        Icon(ConversationIcons.Menu, contentDescription = "メニュー", tint = Color(0xFFDEE8EF))
+                    }
+                }
                 if (failure.isNotEmpty()) Text(failure, Modifier.padding(20.dp), color = MaterialTheme.colorScheme.error)
                 BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                 val bubbleWidth = minOf((maxWidth - 32.dp).coerceAtLeast(0.dp) * 0.86f, 600.dp)
@@ -227,11 +243,23 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                     }
                 }
                 }
+                if (attachments.isNotBlank()) Row(Modifier.fillMaxWidth().heightIn(max = 180.dp)
+                    .horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AttachmentFiles.references(attachments).forEach { ref ->
+                        AttachmentPreview(mediaDirectory, ref, Modifier.width(160.dp), remove = {
+                            attachments = AttachmentFiles.references(attachments).filter { it.fileName != ref.fileName }.joinToString("\n") { it.markdown() }
+                        })
+                    }
+                }
+                if (generateImages) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("画像生成・有料API（説明文から1枚）", Modifier.weight(1f), color = MaterialTheme.colorScheme.primary)
+                    TextButton(onClick = { generateImages = false }) { Text("解除") }
+                }
                 Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 12.dp, bottom = 10.dp, top = 6.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { keyboard?.hide(); focus.clearFocus(); onMenu.run() },
-                        Modifier.size(48.dp).focusRequester(menuFocus)) {
-                        Icon(ConversationIcons.Menu, contentDescription = "メニュー", tint = Color(0xFFDEE8EF))
+                    IconButton(onClick = { keyboard?.hide(); focus.clearFocus(); attachmentMenu = true; onAttach?.run() },
+                        enabled = enabled && !sending, modifier = Modifier.size(48.dp).focusRequester(attachmentFocus)) {
+                        Icon(ConversationIcons.Add, contentDescription = "添付ファイルを追加", tint = Color(0xFFDEE8EF))
                     }
                     BasicTextField(value = draft, onValueChange = { draft = it }, enabled = enabled,
                         modifier = Modifier.weight(1f).background(Color(0xFF1C2229), RoundedCornerShape(24.dp))
@@ -241,7 +269,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                         cursorBrush = SolidColor(Color(0xFFA6C4BC)), maxLines = 5,
                         decorationBox = { inner -> Box(contentAlignment = Alignment.CenterStart) { inner() } })
                     Spacer(Modifier.width(8.dp))
-                    IconButton(onClick = { onSend.run() }, enabled = enabled && !sending && draft.isNotBlank(),
+                    IconButton(onClick = { onSend.run() }, enabled = enabled && !sending && (draft.isNotBlank() || attachments.isNotBlank()),
                         modifier = Modifier.size(48.dp).alpha(if (sending) 0.45f else 1f)
                             .background(Color(0xFF36594B), RoundedCornerShape(24.dp))) {
                         Icon(ConversationIcons.Send, contentDescription = "送信", tint = Color(0xFFDEE8EF))
@@ -261,7 +289,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 closeFocus.requestFocus()
                 returnFocus = true
             } else if (returnFocus) {
-                menuFocus.requestFocus()
+                if (attachmentMenu) attachmentFocus.requestFocus() else menuFocus.requestFocus()
                 returnFocus = false
             }
         }
@@ -281,6 +309,12 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     }
 
     @Composable private fun MessageText(text: String, user: Boolean, bubbleWidth: Dp, emotion: String = "") {
+        val directory = mediaDirectory
+        val rendered by produceState(text, text, directory) {
+            value = if (directory != null && text.contains("![") && text.contains("(https://"))
+                withContext(Dispatchers.IO) { try { AttachmentMedia.response(directory, text) } catch (_: Exception) { text } }
+            else text
+        }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start,
             verticalAlignment = Alignment.Top) {
             if (!user) {
@@ -306,12 +340,14 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
             SelectionContainer(Modifier.widthIn(max = if (user) bubbleWidth else (bubbleWidth - 64.dp).coerceAtLeast(48.dp))
                 .background(if (user) Color(0xFF2D4434) else Color(0xFF533643), RoundedCornerShape(16.dp))
                 .padding(horizontal = 12.dp, vertical = 10.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                val body = remember(rendered) { AttachmentFiles.withoutReferences(rendered) }
                 // ImGui sizes Noto's 1448-unit ascent/descent; Compose sizes its 1000-unit em.
                 val style = TextStyle(color = Color.White, fontSize = (textSize * (1000f / 1448f)).sp,
                     fontFamily = chatFont,
                     lineHeight = textSize.sp, letterSpacing = 0.sp)
-                Markdown(
-                    markdownState = rememberMarkdownState(text, retainState = true),
+                if (body.isNotEmpty()) Markdown(
+                    markdownState = rememberMarkdownState(body, retainState = true),
                     modifier = Modifier,
                     colors = markdownColor(text = Color.White),
                     annotator = markdownAnnotator(markdownAnnotatorConfig(eolAsNewLine = true)),
@@ -328,8 +364,12 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                             textDecoration = TextDecoration.Underline).toSpanStyle()),
                         code = style.copy(fontFamily = FontFamily.Monospace),
                         inlineCode = style.copy(fontFamily = FontFamily.Monospace)),
-                    loading = { Text(text, style = style) },
-                    error = { Text(text, style = style) })
+                    loading = { Text(body, style = style) },
+                    error = { Text(body, style = style) })
+                remember(rendered) { AttachmentFiles.references(rendered) }.forEach { ref ->
+                    AttachmentPreview(mediaDirectory, ref)
+                }
+                }
             }
         }
     }

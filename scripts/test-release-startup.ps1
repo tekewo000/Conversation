@@ -1,13 +1,14 @@
-param([Parameter(Mandatory)][string]$Serial)
+param([Parameter(Mandatory)][string]$Serial, [switch]$Media)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $tools = Get-Content "$repo/.tools/android-toolchain.json" -Raw | ConvertFrom-Json
+$probeClass = if ($Media) { 'AttachmentApiProbe' } else { 'ReleaseStartupProbe' }
 . "$PSScriptRoot/android-signing.ps1"
 $build = Join-Path $repo "build/release-startup-probe/$([guid]::NewGuid())"
 New-Item -ItemType Directory -Force "$build/classes", "$build/dex" | Out-Null
-& "$($tools.JavaHome)/bin/javac.exe" '-J-Duser.language=en' '-Xlint:-options' -encoding UTF-8 --release 8 -classpath $tools.PlatformJar -d "$build/classes" "$repo/android/device-tests/jp/tekewo/conversation/ReleaseStartupProbe.java"
+& "$($tools.JavaHome)/bin/javac.exe" '-J-Duser.language=en' '-Xlint:-options' -encoding UTF-8 --release 8 -classpath $tools.PlatformJar -d "$build/classes" "$repo/android/device-tests/jp/tekewo/conversation/$probeClass.java"
 if ($LASTEXITCODE -ne 0) { throw 'Release probe compilation failed.' }
-& "$($tools.JavaHome)/bin/java.exe" -classpath "$($tools.BuildTools)/lib/d8.jar" com.android.tools.r8.D8 --min-api 29 --lib $tools.PlatformJar --output "$build/dex" "$build/classes/jp/tekewo/conversation/ReleaseStartupProbe.class"
+& "$($tools.JavaHome)/bin/java.exe" -classpath "$($tools.BuildTools)/lib/d8.jar" com.android.tools.r8.D8 --min-api 29 --lib $tools.PlatformJar --output "$build/dex" "$build/classes/jp/tekewo/conversation/$probeClass.class"
 if ($LASTEXITCODE -ne 0) { throw 'Release probe DEX compilation failed.' }
 $manifest = @'
 <?xml version="1.0" encoding="utf-8"?>
@@ -17,7 +18,7 @@ $manifest = @'
     <application android:label="Conversation Release startup probe" android:debuggable="false" android:allowBackup="false" />
 </manifest>
 '@
-Set-Content "$build/AndroidManifest.xml" $manifest -Encoding utf8
+Set-Content "$build/AndroidManifest.xml" ($manifest.Replace('ReleaseStartupProbe', $probeClass)) -Encoding utf8
 & "$($tools.BuildTools)/aapt2.exe" link -o "$build/unsigned.apk" -I $tools.PlatformJar --manifest "$build/AndroidManifest.xml" --min-sdk-version 29 --target-sdk-version 36
 if ($LASTEXITCODE -ne 0) { throw 'Release probe manifest packaging failed.' }
 & "$($tools.JavaHome)/bin/jar.exe" uf "$build/unsigned.apk" -C "$build/dex" classes.dex
@@ -32,9 +33,10 @@ try {
     & $tools.Adb -s $Serial install -r -t "$build/probe.apk"
     if ($LASTEXITCODE -ne 0) { throw 'Release probe installation failed.' }
     $installed = $true
-    $output = @(& $tools.Adb -s $Serial shell am instrument -w jp.tekewo.conversation.startupprobe/jp.tekewo.conversation.ReleaseStartupProbe)
+    $output = @(& $tools.Adb -s $Serial shell am instrument -w "jp.tekewo.conversation.startupprobe/jp.tekewo.conversation.$probeClass")
     $output | Write-Output
-    if ($LASTEXITCODE -ne 0 -or -not ($output -match 'RELEASE_STARTUP_PASS')) { throw 'Installed Release startup probe failed.' }
+    $expected = if ($Media) { 'MEDIA_API_PASS' } else { 'RELEASE_STARTUP_PASS' }
+    if ($LASTEXITCODE -ne 0 -or -not ($output -match $expected)) { throw "Installed Release $probeClass failed." }
 } finally {
     if ($installed) { & $tools.Adb -s $Serial uninstall jp.tekewo.conversation.startupprobe }
     Clear-ConversationSigning -Signing $signing

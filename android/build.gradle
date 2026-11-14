@@ -28,7 +28,10 @@ android {
             assets.srcDirs = ['assets']
             jniLibs.srcDirs = [providers.gradleProperty('conversationJniDir').get()]
         }
-        androidTest { java.srcDirs = ['compose-tests'] }
+        androidTest {
+            java.srcDirs = ['compose-tests']
+            assets.srcDirs = ['compose-test-assets']
+        }
     }
     buildFeatures { compose true }
     compileOptions {

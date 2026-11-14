@@ -46,6 +46,8 @@ public final class MainActivity extends ComponentActivity {
     private int pageFirst = -1;
     private boolean scrollOnRefresh;
     private ChatGptConnection connection;
+    private ConnectionStore imageCredentials;
+    private final ImageApi imageApi = new ImageApi();
     private ChatSession session, memorySession;
     private volatile SemanticMemory semanticMemory;
     private String semanticStatus = "意味検索を準備しています";
@@ -55,6 +57,7 @@ public final class MainActivity extends ComponentActivity {
     private PersonRegistry.Person activePerson;
     private File pendingExportDirectory;
     private String pendingIconPersonId = "";
+    private String pendingAttachmentPersonId = "";
     private String gitStatus = "";
     private final android.os.Handler syncTimer = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable autoSync = () -> queueGitSync(false);
@@ -81,6 +84,7 @@ public final class MainActivity extends ComponentActivity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         if (state != null) pendingIconPersonId = state.getString("icon_person", "");
+        if (state != null) pendingAttachmentPersonId = state.getString("attachment_person", "");
         textSize = Math.max(16, Math.min(28, getPreferences(MODE_PRIVATE).getInt("text_size", DEFAULT_TEXT_SIZE)));
         messageGap = Math.max(8, Math.min(24, getPreferences(MODE_PRIVATE).getInt("message_gap", 12)));
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
@@ -96,6 +100,7 @@ public final class MainActivity extends ComponentActivity {
             pageFirst = first; refreshMessages();
         });
         applyTypography();
+        compose.setOnAttach(this::showAttachments);
         try {
             System.loadLibrary("conversation");
             synchronized (storeGate) {
@@ -113,10 +118,13 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         if (activePerson != null) compose.setDraft(getPreferences(MODE_PRIVATE).getString(draftKey(), ""));
+        if (activePerson != null) compose.setAttachments(getPreferences(MODE_PRIVATE).getString("attachments_" + activePerson.id, ""));
+        if (activePerson != null) compose.setGenerateImages(getPreferences(MODE_PRIVATE).getBoolean("image_mode_" + activePerson.id, false));
         compose.setPersonName(activePerson == null ? "" : activePerson.name);
         compose.setOnIcon(this::showShortTermMemory);
         refreshPersonIcon();
         connection = new ChatGptConnection(this);
+        imageCredentials = new ConnectionStore(this, "image-api");
         ChatSession.Store store = new ChatSession.Store() {
             public long add(String role, String text) throws Exception {
                 synchronized (storeGate) {
@@ -239,7 +247,9 @@ public final class MainActivity extends ComponentActivity {
     private String draftKey() { return "draft_" + activePerson.id; }
     private void saveDraft() {
         if (!changingPerson && compose != null && activePerson != null) getPreferences(MODE_PRIVATE).edit()
-                .putString(draftKey(), compose.getDraft()).commit();
+                .putString(draftKey(), compose.getDraft())
+                .putBoolean("image_mode_" + activePerson.id, compose.getGenerateImages())
+                .putString("attachments_" + activePerson.id, compose.getAttachments()).commit();
     }
 
     private void setBusy(boolean value) {
@@ -269,35 +279,74 @@ public final class MainActivity extends ComponentActivity {
         return new ChatRequest(model, effort, fast);
     }
 
-    private void sendMessage() {
+    private void showAttachments() {
         if (busy || activePerson == null) return;
-        if (!connection.hasSession()) { showConnection(); return; }
-        String text = compose.getDraft();
-        if (text.trim().isEmpty()) return;
-        runReply(text, true);
+        ComposeUi.Panel panel = new ComposeUi.Panel("追加"); panel.sheet = true;
+        panel.rows.add(new ComposeUi.Row("画像・動画を選ぶ", () -> chooseAttachments(true)));
+        panel.rows.add(new ComposeUi.Row("PDF・テキストを選ぶ", () -> chooseAttachments(false)));
+        panel.rows.add(new ComposeUi.Row("画像を生成（有料API）", () -> compose.setGenerateImages(true)));
+        panel.message = "動画は4枚の代表フレームをAIに送ります。音声は含みません。";
+        compose.show(panel);
     }
 
-    private void runReply(String text, boolean persistUser) {
+    private void chooseAttachments(boolean images) {
+        if (activePerson == null || busy) return;
+        pendingAttachmentPersonId = activePerson.id;
+        Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                .putExtra(Intent.EXTRA_MIME_TYPES, images ? new String[]{"image/*", "video/mp4", "video/webm", "video/quicktime"} : new String[]{"application/pdf", "text/plain"});
+        try { startActivityForResult(picker, 84); }
+        catch (android.content.ActivityNotFoundException error) { pendingAttachmentPersonId = ""; showError("ファイル選択を開けませんでした。"); }
+    }
+
+    private String draftMessage() {
+        return compose.getAttachments().isEmpty() ? compose.getDraft() : compose.getDraft() + "\n\n" + compose.getAttachments();
+    }
+
+    private void sendMessage() {
+        if (busy || activePerson == null) return;
+        if (compose.getGenerateImages()) {
+            if (!compose.getAttachments().isEmpty()) { showError("画像生成は入力した説明文から行います。添付を取り外すか、画像生成を解除して通常送信してください。"); return; }
+            try {
+                if (imageCredentials.load().optString("api_key").isEmpty()) { showImageApiSettings(); return; }
+            } catch (Exception error) { showError(safeError(error)); return; }
+        } else if (!connection.hasSession()) { showConnection(); return; }
+        String text = draftMessage();
+        if (text.trim().isEmpty()) return;
+        runReply(text, true, compose.getGenerateImages());
+    }
+
+    private void runReply(String text, boolean persistUser, boolean images) {
+        final PersonRegistry.Person person = activePerson;
+        final int imageAttempt = images ? imageApi.generation() : 0;
         setBusy(true);
         session.begin();
-        connectionStatus = "応答を生成しています";
+        connectionStatus = images ? "画像を生成しています（有料API）" : "応答を生成しています";
         AtomicBoolean saved = new AtomicBoolean(!persistUser);
         worker.execute(() -> {
             final ChatRequest[] request = {null};
             AtomicBoolean replied = new AtomicBoolean();
             try {
                 session.reply(text, persistUser, (instructions, turns, delta) -> {
+                    if (images) {
+                        setStreaming("画像を生成しています（有料API）…");
+                        JSONObject settings = imageCredentials.load();
+                        return AttachmentMedia.response(person.directory, imageApi.generate(settings.optString("api_key"),
+                                settings.optString("model", ImageApi.DEFAULT_MODEL), text, imageAttempt));
+                    }
                     if (request[0] == null) request[0] = selectedRequest();
-                    return connection.request(request[0], instructions, turns, delta);
+                    return AttachmentMedia.response(person.directory,
+                            connection.request(request[0], instructions, AttachmentMedia.input(person.directory, turns), delta));
                 }, new ChatSession.Listener() {
                     private long lastRender;
                     public void userSaved() {
                         saved.set(true);
                         ui(() -> {
                             pageFirst = -1; scrollOnRefresh = true;
-                            if (compose.getDraft().equals(text)) {
+                            if (draftMessage().equals(text)) {
                                 compose.setDraft("");
-                                getPreferences(MODE_PRIVATE).edit().remove(draftKey()).apply();
+                                compose.setAttachments(""); compose.setGenerateImages(false);
+                                getPreferences(MODE_PRIVATE).edit().remove(draftKey()).remove("attachments_" + person.id).remove("image_mode_" + person.id).apply();
                             }
                             refreshMessages();
                         });
@@ -324,8 +373,8 @@ public final class MainActivity extends ComponentActivity {
                     refreshMessages();
                     ComposeUi.Panel dialog = new ComposeUi.Panel("応答できませんでした");
                     dialog.message = detail + (saved.get() ? "\n送信済みの会話原文は保存されています。" : "");
-                    dialog.rows.add(new ComposeUi.Row(detail.contains("利用上限") ? "利用状況を確認" : "再試行", () -> {
-                        if (detail.contains("利用上限")) openUsage(); else if (!busy) runReply(text, !saved.get());
+                    dialog.rows.add(new ComposeUi.Row(detail.contains("利用上限") ? "利用状況を確認" : images ? "画像を再生成（有料）" : "再試行", () -> {
+                        if (detail.contains("利用上限")) openUsage(); else if (!busy) runReply(text, !saved.get(), images);
                     }));
                     compose.show(dialog);
 
@@ -359,9 +408,10 @@ public final class MainActivity extends ComponentActivity {
         menu.rows.add(new ComposeUi.Row("人物", this::showPeople, 2));
         menu.rows.add(new ComposeUi.Row("表示設定", this::showDisplaySettings, 4));
         menu.rows.add(new ComposeUi.Row("ChatGPT", this::showConnection, 5));
+        menu.rows.add(new ComposeUi.Row("画像生成API", this::showImageApiSettings, 5));
         if (activePerson != null) menu.rows.add(new ComposeUi.Row("Gitバックアップ", this::showGitBackup, 1));
         if (busy) menu.rows.add(new ComposeUi.Row("応答を停止", () -> {
-            session.cancel(); connection.cancelReply(); setStreaming(""); refreshMessages();
+            session.cancel(); connection.cancelReply(); imageApi.cancel(); setStreaming(""); refreshMessages();
         }, 6));
         compose.show(menu);
     }
@@ -414,6 +464,41 @@ public final class MainActivity extends ComponentActivity {
             });
         }, 6));
         panel.rows.add(new ComposeUi.Row("利用状況を確認", this::openUsage, 1));
+        compose.show(panel);
+    }
+
+    private void showImageApiSettings() {
+        if (busy) return;
+        JSONObject loaded; boolean unreadable = false;
+        try { loaded = imageCredentials.load(); }
+        catch (Exception error) { loaded = new JSONObject(); unreadable = true; }
+        final JSONObject current = loaded;
+        ComposeUi.Panel panel = new ComposeUi.Panel("画像生成API"); panel.secure = true;
+        panel.message = "会話・画像認識はChatGPTのサブスク、画像生成だけOpenAI APIの従量課金を使います。\n入力した説明文だけを送信し、過去の会話や添付は送りません。\n"
+                + (unreadable ? "保存したAPI設定を読み込めません。再設定するか削除してください。" : current.optString("api_key").isEmpty() ? "APIキーは未設定です。" : "APIキーは設定済みです。空欄なら現在のキーを保ちます。");
+        ComposeUi.Field key = new ComposeUi.Field("画像生成用APIキー", true);
+        ComposeUi.Field model = new ComposeUi.Field("画像モデル", false);
+        model.setValue(current.optString("model", ImageApi.DEFAULT_MODEL));
+        panel.fields.add(key); panel.fields.add(model); panel.confirmLabel = "保存";
+        panel.confirm = () -> {
+            String token = key.getValue().trim(), selectedModel = model.getValue().trim(); key.setValue("");
+            if (token.isEmpty()) token = current.optString("api_key");
+            final String selectedKey = token;
+            try { ImageApi.validateKey(token); ImageApi.body("設定確認", selectedModel); }
+            catch (Exception error) { showError(safeError(error)); return; }
+            compose.hide();
+            worker.execute(() -> {
+                try {
+                    imageCredentials.save(new JSONObject().put("api_key", selectedKey).put("model", selectedModel));
+                    ui(() -> showError("画像生成APIの設定を保存しました。＋の「画像を生成（有料API）」から利用できます。"));
+                } catch (Exception error) { ui(() -> showError("画像生成APIの設定を保存できませんでした。")); }
+            });
+        };
+        panel.rows.add(new ComposeUi.Row("APIキーを削除", () -> worker.execute(() -> {
+            try { imageCredentials.delete(); ui(() -> showError("画像生成用APIキーを削除しました。ChatGPTの接続は維持しています。")); }
+            catch (Exception error) { ui(() -> showError("画像生成用APIキーを削除できませんでした。")); }
+        })));
+        panel.rows.add(new ComposeUi.Row("API料金を確認", () -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://openai.com/api/pricing/")))));
         compose.show(panel);
     }
 
@@ -531,6 +616,7 @@ public final class MainActivity extends ComponentActivity {
 
     private void refreshPersonIcon() {
         final PersonRegistry.Person person = activePerson;
+        compose.setMediaDirectory(person == null ? null : person.directory);
         if (person == null) { compose.setPersonIcon(null); return; }
         reader.execute(() -> {
             try {
@@ -644,7 +730,7 @@ public final class MainActivity extends ComponentActivity {
                 try {
                     if (person.repository != null) new GitHubTokenStore(this, person.id).clear();
                 } catch (Exception error) { if (failure == null) failure = error; else failure.addSuppressed(error); }
-                if (!getPreferences(MODE_PRIVATE).edit().remove("draft_" + person.id).commit() && failure == null)
+                if (!getPreferences(MODE_PRIVATE).edit().remove("draft_" + person.id).remove("attachments_" + person.id).remove("image_mode_" + person.id).commit() && failure == null)
                     failure = new java.io.IOException("下書きの削除を保存できませんでした。");
             }
             final String detail = failure == null ? null : failure instanceof IllegalArgumentException
@@ -824,6 +910,7 @@ public final class MainActivity extends ComponentActivity {
                 if (delta.has("error")) throw new java.io.IOException("保存する履歴を読み出せませんでした。");
                 byte[] icon = people.icon(person.id);
                 if (icon.length > 0) delta.put("icon_png_base64", java.util.Base64.getEncoder().encodeToString(icon));
+                AttachmentFiles.addToDelta(person.directory, delta);
                 gitWorker.execute(() -> {
                     boolean more = false;
                     try {
@@ -864,7 +951,7 @@ public final class MainActivity extends ComponentActivity {
         worker.execute(() -> {
             String error = nativeExport();
             if (error.isEmpty()) {
-                try { BackupArchive.addIcon(exportDirectory, people.icon(person.id)); }
+                try { BackupArchive.addIcon(exportDirectory, people.icon(person.id)); AttachmentFiles.backup(person.directory, exportDirectory); }
                 catch (Exception failure) { error = safeError(failure); }
             }
             final String exportError = error;
@@ -880,6 +967,31 @@ public final class MainActivity extends ComponentActivity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == 84) {
+            final PersonRegistry.Person person = activePerson;
+            final String selectedPerson = pendingAttachmentPersonId; pendingAttachmentPersonId = "";
+            if (result != RESULT_OK || data == null || person == null) return;
+            if (!person.id.equals(selectedPerson)) { showError("選択中の人物が変わりました。もう一度添付してください。"); return; }
+            List<Uri> sources = new ArrayList<>();
+            if (data.getClipData() != null) for (int i = 0; i < data.getClipData().getItemCount(); i++) sources.add(data.getClipData().getItemAt(i).getUri());
+            else if (data.getData() != null) sources.add(data.getData());
+            final String previous = compose.getAttachments();
+            if (sources.size() + AttachmentFiles.references(previous).size() > 4) { showError("添付は1回4件までです。"); return; }
+            setBusy(true);
+            worker.execute(() -> {
+                try {
+                    StringBuilder attachments = new StringBuilder(previous);
+                    for (Uri source : sources) {
+                        AttachmentFiles.Ref ref = AttachmentMedia.importUri(this, person.directory, source);
+                        if (attachments.length() > 0) attachments.append('\n');
+                        attachments.append(ref.markdown());
+                    }
+                    ui(() -> { if (activePerson != null && activePerson.id.equals(person.id)) { compose.setAttachments(attachments.toString()); saveDraft(); } });
+                } catch (Exception error) { ui(() -> showError(safeError(error))); }
+                finally { ui(() -> setBusy(false)); }
+            });
+            return;
+        }
         if (request == 83) {
             final String personId = pendingIconPersonId; pendingIconPersonId = "";
             if (result != RESULT_OK || data == null || data.getData() == null) return;
@@ -930,6 +1042,7 @@ public final class MainActivity extends ComponentActivity {
 
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putString("icon_person", pendingIconPersonId);
+        state.putString("attachment_person", pendingAttachmentPersonId);
         super.onSaveInstanceState(state);
     }
 
@@ -941,6 +1054,7 @@ public final class MainActivity extends ComponentActivity {
         memoryWorker.close();
         if (semanticMemory != null) semanticMemory.close();
         if (connection != null) connection.cancel();
+        imageApi.cancel();
         worker.shutdownNow();
         reader.shutdownNow();
         super.onDestroy();

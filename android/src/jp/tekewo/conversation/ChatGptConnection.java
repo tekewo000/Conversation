@@ -265,7 +265,7 @@ public final class ChatGptConnection {
         try {
             JSONObject body = request.body(instructions, input);
             byte[] encoded = body.toString().getBytes(StandardCharsets.UTF_8);
-            if (encoded.length > 4 * 1024 * 1024) throw new SafeFailure("会話が長すぎます。新しい会話を開始してください。");
+            if (encoded.length > 16 * 1024 * 1024) throw new SafeFailure("送信内容が大きすぎます。添付ファイルを減らしてください。");
             connection = open(RESOURCE + "/responses", "POST", token, attempt);
             if (!background) replyRequests.register(connection, replyAttempt);
             connection.setRequestProperty("Content-Type", "application/json");

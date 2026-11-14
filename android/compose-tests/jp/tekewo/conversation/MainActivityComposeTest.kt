@@ -3,6 +3,7 @@ package jp.tekewo.conversation
 import android.content.Context
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -34,6 +35,68 @@ class MainActivityComposeTest {
         compose.onNodeWithContentDescription("${name}の短期記憶を見る").performClick()
         compose.waitUntil(10_000) {
             compose.onAllNodes(androidx.compose.ui.test.hasText("短期記憶")).fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    @Test fun paidImageApiHasItsOwnSettingsAndMaskedKeyField() {
+        val keys = ConnectionStore(context, "image-api")
+        val saved = keys.load()
+        val subscription = ConnectionStore(context).load().toString()
+        val fakeKey = "sk-synthetic_key_for_settings_test_only"
+        try {
+        compose.onNodeWithContentDescription("メニュー").performClick()
+        compose.onNodeWithText("画像生成API").performClick()
+        compose.onNodeWithContentDescription("画像生成用APIキー").assertExists()
+            .assert(androidx.compose.ui.test.SemanticsMatcher.keyIsDefined(androidx.compose.ui.semantics.SemanticsProperties.Password))
+        compose.runOnIdle {
+            val root = compose.activity.window.decorView.rootView
+            val dialog = android.view.inspector.WindowInspector.getGlobalWindowViews().single { it !== root && it.visibility == android.view.View.VISIBLE && it.isAttachedToWindow }
+            assertTrue((dialog.layoutParams as android.view.WindowManager.LayoutParams).flags and android.view.WindowManager.LayoutParams.FLAG_SECURE != 0)
+        }
+        compose.onNodeWithContentDescription("画像生成用APIキー").performTextInput(fakeKey)
+        compose.onNodeWithText("保存").performClick()
+        compose.waitUntil(5_000) { keys.load().optString("api_key") == fakeKey }
+        compose.onNodeWithText("閉じる").performClick()
+        compose.onNodeWithContentDescription("メニュー").performClick()
+        compose.onNodeWithText("画像生成API").performClick()
+        compose.onNodeWithContentDescription("画像生成用APIキー").assert(androidx.compose.ui.test.SemanticsMatcher.expectValue(
+            androidx.compose.ui.semantics.SemanticsProperties.EditableText, androidx.compose.ui.text.AnnotatedString("")))
+        compose.onNodeWithText("APIキーを削除").performClick()
+        compose.waitUntil(5_000) { !keys.load().has("api_key") }
+        assertEquals(subscription, ConnectionStore(context).load().toString())
+        } finally { if (saved.length() == 0) keys.delete() else keys.save(saved) }
+    }
+
+    @Test fun pickedImageAndImageModeSurviveActivityRecreation() {
+        val people = PersonRegistry(context.filesDir)
+        previousPerson = people.active()?.id
+        val preferences = context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE)
+        previousTextSize = preferences.getInt("text_size", 16)
+        previousGap = preferences.getInt("message_gap", 12)
+        val person = people.stage(PersonDocument.named(name), null); people.commit(person)
+        compose.activityRule.scenario.recreate()
+        compose.onNodeWithContentDescription("添付ファイルを追加").performClick()
+        compose.onNodeWithText("画像を生成（有料API）").performClick()
+        val fixture = java.io.File(person.directory, "fixture.png")
+        val bitmap = android.graphics.Bitmap.createBitmap(64, 32, android.graphics.Bitmap.Config.ARGB_8888)
+        bitmap.eraseColor(android.graphics.Color.BLUE)
+        fixture.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }; bitmap.recycle()
+        val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.attachments", fixture)
+        val target = MainActivity::class.java.getDeclaredField("pendingAttachmentPersonId").apply { isAccessible = true }
+        val received = MainActivity::class.java.getDeclaredMethod("onActivityResult", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType, android.content.Intent::class.java).apply { isAccessible = true }
+        val uiField = MainActivity::class.java.getDeclaredField("compose").apply { isAccessible = true }
+        compose.runOnUiThread {
+            target.set(compose.activity, person.id)
+            received.invoke(compose.activity, 84, android.app.Activity.RESULT_OK, android.content.Intent().setData(uri))
+        }
+        compose.waitUntil(10_000) { (uiField.get(compose.activity) as ComposeUi).attachments.isNotEmpty() }
+        compose.activityRule.scenario.recreate()
+        compose.runOnIdle {
+            val ui = uiField.get(compose.activity) as ComposeUi
+            val saved = AttachmentFiles.references(ui.attachments).single()
+            assertEquals("fixture.png", saved.name)
+            assertTrue(AttachmentFiles.resolve(person.directory, saved.fileName).isFile)
+            assertTrue(ui.generateImages)
         }
     }
 

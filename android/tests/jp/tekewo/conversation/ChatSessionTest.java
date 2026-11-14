@@ -48,6 +48,7 @@ public final class ChatSessionTest {
         public void memoryStatus(String error) { warning = error; }
     }
     public static void main(String[] arguments) throws Exception {
+        cancelledRetrievalDoesNotStartTransport();
         replySavesFeelingWithoutAnotherRequestOrVisibleMetadata();
         incompleteReplyStateCannotCommitAReply();
         missingReplyStateKeepsTheAnswerAndPreviousFeeling();
@@ -208,6 +209,24 @@ public final class ChatSessionTest {
         cancelledReflectionDoesNotCommit();
         rejectedReflectionStaysPending();
         System.out.println("PASS: chat completion, cancellation, raw evidence, memory retry, query bounds, persona context and reflection retry");
+    }
+
+    static void cancelledRetrievalDoesNotStartTransport() throws Exception {
+        ChatSession[] running = new ChatSession[1];
+        Store store = new Store() {
+            @Override public JSONObject replyContext(String text) throws Exception {
+                running[0].cancel();
+                return super.context(text);
+            }
+        };
+        running[0] = new ChatSession(store);
+        try {
+            running[0].reply("生成前に停止", true, (instructions, input, delta) -> {
+                throw new AssertionError("Cancelled context preparation started a network request");
+            }, new Listener());
+            throw new AssertionError("Cancelled reply succeeded");
+        } catch (IOException expected) { assert running[0].isCancelled(); }
+        assert store.roles.size() == 1 && store.roles.get(0).equals("user");
     }
 
     private static void replySavesFeelingWithoutAnotherRequestOrVisibleMetadata() throws Exception {

@@ -49,6 +49,15 @@ class ComposeUiTest {
         ui = ComposeUi(compose.activity, { menus++ }, { sends++ }, { pages.add(it) })
     }
 
+    @Test fun menuIsAtTopRightAndAttachmentButtonIsAtBottomLeft() {
+        compose.runOnUiThread { install(); ui.enabled = true }
+        val menu = compose.onNodeWithContentDescription("メニュー").fetchSemanticsNode().boundsInRoot
+        val root = compose.onRoot().fetchSemanticsNode().boundsInRoot
+        assertTrue(menu.center.x > root.center.x && menu.center.y < root.center.y)
+        val attach = compose.onNodeWithContentDescription("添付ファイルを追加").fetchSemanticsNode().boundsInRoot
+        assertTrue(attach.center.x < root.center.x && attach.center.y > root.center.y)
+    }
+
     @Test fun markdownRendersForUserAssistantAndStreamingReply() {
         compose.runOnUiThread {
             install()
