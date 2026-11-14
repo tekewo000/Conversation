@@ -37,7 +37,7 @@ public final class ChatSessionTest {
             personaThrough = throughId; personaPayload = payload; personaApplied++; personaJob = new JSONObject();
         }
     }
-    static final class Listener implements ChatSession.Listener {
+    static class Listener implements ChatSession.Listener {
         int users, replies;
         String stream, warning;
         public void userSaved() { users++; }
@@ -46,6 +46,8 @@ public final class ChatSessionTest {
         public void memoryStatus(String error) { warning = error; }
     }
     public static void main(String[] arguments) throws Exception {
+        replyDoesNotWaitForMemory();
+        internalLabelsNeverReachReplyText();
         Store continuing = new Store() {
             @Override public JSONObject pending() throws Exception {
                 if (!pending) return new JSONObject();
@@ -58,7 +60,7 @@ public final class ChatSessionTest {
         continuing.add("user", "候補は京都、金沢、松本");
         continuing.add("assistant", "まだ決めていないね");
         for (int i = 0; i < 10; i++) { continuing.add("user", "別の話題"); continuing.add("assistant", "雑談"); }
-        new ChatSession(continuing).reply("二つ目にしよう", true, (instructions, input, delta) -> {
+        replyAndOrganize(new ChatSession(continuing),"二つ目にしよう", true, (instructions, input, delta) -> {
             JSONObject data = new JSONObject(input.getJSONObject(0).getString("content").replaceFirst("^[^\\n]*\\n", ""));
             assert data.getJSONObject("continuity").getJSONArray("threads").getJSONObject(0).getString("text").contains("金沢");
             if (instructions.equals(ChatSession.EXTRACT)) {
@@ -66,7 +68,7 @@ public final class ChatSessionTest {
                 assert data.getJSONArray("evidence").getJSONObject(0).getLong("id") == 1;
                 return "{\"memories\":[]}";
             }
-            assert input.getJSONObject(1).getString("content").contains("[発言ID: 1]");
+            assert data.getJSONArray("history").getJSONObject(0).getLong("id") == 1;
             return "金沢にしよう";
         }, new Listener());
         Store backlog = new Store() {
@@ -85,7 +87,7 @@ public final class ChatSessionTest {
         };
         backlog.add("user", "昔の発言の抜粋"); backlog.add("assistant", "昔の返答");
         backlog.add("user", "後からの訂正"); backlog.add("assistant", "新しい返答");
-        new ChatSession(backlog).reply("今の質問", true, (instructions, input, delta) -> {
+        replyAndOrganize(new ChatSession(backlog),"今の質問", true, (instructions, input, delta) -> {
             if (instructions.equals(ChatSession.EXTRACT)) {
                 JSONObject data = new JSONObject(input.getJSONObject(0).getString("content"));
                 JSONArray evidence = data.getJSONArray("evidence");
@@ -93,7 +95,7 @@ public final class ChatSessionTest {
                 assert evidence.getJSONObject(1).getLong("id") == 2;
                 return "{\"memories\":[]}";
             }
-            assert input.getJSONObject(1).getString("content").contains("[原文の一部：省略があります]");
+            assert new JSONObject(input.getJSONObject(0).getString("content").split("\\n", 2)[1]).getJSONArray("history").getJSONObject(0).getBoolean("truncated");
             assert !input.getJSONObject(input.length() - 1).getString("content").contains("[原文の一部");
             return "返答";
         }, new Listener());
@@ -107,7 +109,7 @@ public final class ChatSessionTest {
         try { ChatSession.jsonPayload("{} trailing"); throw new AssertionError(); } catch (IOException expected) {}
 
         Store ok = new Store(); Listener events = new Listener(); ChatSession session = new ChatSession(ok);
-        session.reply("またゲームしよう", true, (instructions, input, delta) -> {
+        replyAndOrganize(session,"またゲームしよう", true, (instructions, input, delta) -> {
             if (instructions.equals(ChatSession.EXTRACT)) {
                 JSONObject data = new JSONObject(input.getJSONObject(0).getString("content"));
                 assert data.getJSONObject("job").getJSONArray("messages").length() == 2;
@@ -123,7 +125,7 @@ public final class ChatSessionTest {
 
         Store failed = new Store(); Listener failure = new Listener();
         try {
-            new ChatSession(failed).reply("こんにちは", true, (instructions, input, delta) -> {
+            replyAndOrganize(new ChatSession(failed),"こんにちは", true, (instructions, input, delta) -> {
                 delta.accept("途中"); throw new IOException("network interrupted");
             }, failure);
             throw new AssertionError();
@@ -132,7 +134,7 @@ public final class ChatSessionTest {
 
         Store cancelled = new Store(); ChatSession cancel = new ChatSession(cancelled);
         try {
-            cancel.reply("中断", true, (instructions, input, delta) -> {
+            replyAndOrganize(cancel,"中断", true, (instructions, input, delta) -> {
                 delta.accept("途中"); cancel.cancel(); return "確定させない";
             }, new Listener());
             throw new AssertionError();
@@ -140,12 +142,12 @@ public final class ChatSessionTest {
         assert cancelled.roles.size() == 1;
 
         Store invalidMemory = new Store(); invalidMemory.reject = true; Listener warning = new Listener();
-        new ChatSession(invalidMemory).reply("保存", true, (instructions, input, delta) ->
+        replyAndOrganize(new ChatSession(invalidMemory),"保存", true, (instructions, input, delta) ->
                 instructions.equals(ChatSession.EXTRACT) ? "{\"memories\":[]}" : "返答", warning);
         assert invalidMemory.roles.size() == 2 && invalidMemory.pending && warning.warning != null;
 
         Store retry = new Store(); retry.add("user", "再試行");
-        new ChatSession(retry).reply("再試行", false, (instructions, input, delta) ->
+        replyAndOrganize(new ChatSession(retry),"再試行", false, (instructions, input, delta) ->
                 instructions.equals(ChatSession.EXTRACT) ? "{\"memories\":[]}" : "返答", new Listener());
         assert retry.roles.size() == 2;
         Store truncatedContext = new Store() {
@@ -163,10 +165,10 @@ public final class ChatSessionTest {
         StringBuilder longMessage = new StringBuilder();
         for (int i = 0; i < 800; ++i) longMessage.append("あ");
         longMessage.append("最後の質問");
-        new ChatSession(truncatedContext).reply(longMessage.toString(), true, (instructions, input, delta) -> {
+        replyAndOrganize(new ChatSession(truncatedContext),longMessage.toString(), true, (instructions, input, delta) -> {
             if (instructions.equals(ChatSession.EXTRACT)) return "{\"memories\":[]}";
             assert input.getJSONObject(input.length() - 1).getString("content").endsWith("最後の質問");
-            assert input.getJSONObject(input.length() - 1).getString("content").startsWith("[発言の記録時刻:");
+            assert input.getJSONObject(input.length() - 1).getString("content").equals(longMessage.toString());
             return "全文に返答";
         }, new Listener());
         String[] profiles = {"一人称は私。静かに短く話す。", "一人称は俺。快活に率直に話す。"};
@@ -174,7 +176,7 @@ public final class ChatSessionTest {
             final String profile = profiles[person], otherProfile = profiles[1 - person];
             Store selected = new Store();
             selected.person = new JSONObject().put("id", "person-" + person).put("name", "人物" + person).put("profile", profile);
-            new ChatSession(selected).reply("無関係な新しい話題", true, (instructions, input, delta) -> {
+            replyAndOrganize(new ChatSession(selected),"無関係な新しい話題", true, (instructions, input, delta) -> {
                 if (instructions.equals(ChatSession.EXTRACT)) {
                     JSONObject data = new JSONObject(input.getJSONObject(0).getString("content"));
                     assert data.getJSONObject("person").getString("profile").equals(profile);
@@ -201,6 +203,49 @@ public final class ChatSessionTest {
         System.out.println("PASS: chat completion, cancellation, raw evidence, memory retry, query bounds, persona context and reflection retry");
     }
 
+    private static void replyAndOrganize(ChatSession session, String text, boolean persistUser,
+                                         ChatSession.Transport backend, Listener listener) throws Exception {
+        session.reply(text, persistUser, backend, listener);
+        try { session.processMemories(backend); listener.memoryStatus(null); }
+        catch (Exception error) { listener.memoryStatus("記憶の整理は再試行待ちです。"); }
+    }
+
+    private static void replyDoesNotWaitForMemory() throws Exception {
+        Store store = new Store(); Listener listener = new Listener();
+        new ChatSession(store).reply("次をすぐ送りたい", true, (instructions, input, delta) -> {
+            assert !instructions.equals(ChatSession.EXTRACT) && !instructions.equals(ChatSession.REFLECT)
+                    : "Saving a reply must not run background memory work inline";
+            return "続けて話せるよ";
+        }, listener);
+        assert listener.replies == 1 && store.texts.get(1).equals("続けて話せるよ");
+        assert store.pending && store.applied == 0;
+    }
+
+    private static void internalLabelsNeverReachReplyText() throws Exception {
+        Store store = new Store();
+        store.add("user", "前の相談");
+        store.add("assistant", "[発言ID: 1385]\n[発言の記録時刻: 2026-11-14T03:51:11.093Z]\n前の返答");
+        Listener listener = new Listener() {
+            public void streaming(String text) {
+                assert !text.contains("[発言") && !text.contains("L'd:") : "Internal labels leaked during streaming";
+                super.streaming(text);
+            }
+        };
+        String generated = "うん。\n[発言ID: 1385]\nL'd: 2026-11-14T03:51:11.093Z]\n続けよう。";
+        new ChatSession(store).reply("2026-11-14の予定を話そう", true, (instructions, input, delta) -> {
+            assert input.getJSONObject(2).getString("content").equals("前の返答");
+            assert input.getJSONObject(3).getString("content").equals("2026-11-14の予定を話そう");
+            JSONObject reference = new JSONObject(input.getJSONObject(0).getString("content").split("\\n", 2)[1]);
+            JSONObject metadata = reference.getJSONArray("history").getJSONObject(1);
+            assert metadata.getLong("id") == 2 && metadata.getInt("input_index") == 2;
+            delta.accept("うん。\n[発言");
+            delta.accept("ID: 1385]\nL'd: 2026-11-14T03:51:11.093Z]\n続けよう。");
+            return generated;
+        }, listener);
+        assert listener.stream.equals("うん。\n続けよう。");
+        assert store.texts.get(store.texts.size() - 1).equals("うん。\n続けよう。");
+    }
+
     private static void currentPersonaReachesReplyAndExtraction() throws Exception {
         Store selected = new Store();
         selected.persona = new JSONObject().put("revision", 3).put("through_id", 48).put("fields", new JSONArray()
@@ -211,7 +256,7 @@ public final class ChatSessionTest {
                         .put("revision", 3).put("through_id", 48)
                         .put("updated_at", "2026-11-14T01:00:00Z")));
         int[] requests = {0, 0};
-        new ChatSession(selected).reply("人物像とは無関係な話題", true, (instructions, input, delta) -> {
+        replyAndOrganize(new ChatSession(selected),"人物像とは無関係な話題", true, (instructions, input, delta) -> {
             JSONObject data = new JSONObject(input.getJSONObject(0).getString("content").replaceFirst("^[^\\n]*\\n", ""));
             JSONObject persona = data.getJSONObject("persona");
             assert persona.getInt("revision") == 3;
@@ -298,7 +343,7 @@ public final class ChatSessionTest {
     private static void reflectionFailurePreservesReplyAndRetry() throws Exception {
         Store store = new Store(); store.personaJob = reflectionJob();
         Listener listener = new Listener(); ChatSession session = new ChatSession(store);
-        session.reply("続けよう", true, (instructions, input, delta) -> {
+        replyAndOrganize(session,"続けよう", true, (instructions, input, delta) -> {
             if (instructions.equals(ChatSession.EXTRACT)) return "{\"memories\":[]}";
             if (input.length() == 1) throw new IOException("reflection connection interrupted");
             return "続けよう！";

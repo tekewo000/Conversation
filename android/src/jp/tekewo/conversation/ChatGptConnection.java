@@ -31,7 +31,6 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /** A local, public OAuth client. Blocking methods belong on the app's worker queue. */
@@ -52,12 +51,11 @@ public final class ChatGptConnection {
     private final Activity activity;
     private final ConnectionStore store;
     private final Object stateLock = new Object(), operationLock = new Object();
-    private final AtomicInteger generation = new AtomicInteger();
+    private final HttpRequestPool requests = new HttpRequestPool(), replyRequests = new HttpRequestPool();
     private final AtomicBoolean signingIn = new AtomicBoolean();
     private JSONObject state;
     private String storageError;
     private volatile String lastSignOutMessage = "";
-    private volatile HttpURLConnection activeHttp;
     private volatile ServerSocket activeListener;
     private volatile Socket activeCallback;
     private volatile String loginPhase = "idle";
@@ -115,7 +113,7 @@ public final class ChatGptConnection {
             return;
         }
         cancel();
-        final int attempt = generation.get();
+        final int attempt = requests.generation();
         Thread worker = new Thread(() -> {
             String error = null;
             synchronized (operationLock) {
@@ -157,7 +155,7 @@ public final class ChatGptConnection {
         }
         String authorization = discovery.getString("authorization_endpoint") + "?" + encode(params);
         activity.runOnUiThread(() -> {
-            if (attempt != generation.get()) return;
+            if (attempt != requests.generation()) return;
             try { activity.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(authorization))); }
             catch (Exception e) { cancel(); }
         });
@@ -233,7 +231,7 @@ public final class ChatGptConnection {
 
     public List<ChatRequest.Model> listModels() throws IOException {
         synchronized (operationLock) {
-            int attempt = generation.get();
+            int attempt = requests.generation();
             String token = accessToken(attempt);
             try {
                 JSONObject catalog = json(RESOURCE + "/models", "GET", null, token, attempt);
@@ -248,48 +246,53 @@ public final class ChatGptConnection {
                 }
                 if (visible.isEmpty()) throw new SafeFailure("このアカウントで利用できるモデルがありません。");
                 return visible;
-            } catch (HttpFailure e) { handleUnauthorized(e, attempt); throw e; }
+            } catch (HttpFailure e) { handleUnauthorized(e, attempt, token); throw e; }
             catch (IOException e) { throw e; }
             catch (Exception e) { throw new SafeFailure("モデル一覧を読み取れませんでした。"); }
         }
     }
 
     public String request(ChatRequest request, String instructions, JSONArray input, Consumer<String> onDelta) throws IOException {
-        synchronized (operationLock) {
-            int attempt = generation.get();
-            String token = accessToken(attempt);
-            HttpURLConnection connection = null;
-            ScheduledFuture<?> timeout = null;
-            try {
-                JSONObject body = request.body(instructions, input);
-                byte[] encoded = body.toString().getBytes(StandardCharsets.UTF_8);
-                if (encoded.length > 4 * 1024 * 1024) throw new SafeFailure("会話が長すぎます。新しい会話を開始してください。");
-                connection = open(RESOURCE + "/responses", "POST", token, attempt);
-                connection.setRequestProperty("Content-Type", "application/json");
-                connection.setRequestProperty("Accept", "text/event-stream");
-                connection.setDoOutput(true); connection.setFixedLengthStreamingMode(encoded.length);
-                final HttpURLConnection bound = connection;
-                timeout = TIMEOUTS.schedule(bound::disconnect, 120, TimeUnit.SECONDS);
-                try (OutputStream output = connection.getOutputStream()) { output.write(encoded); }
-                int status = connection.getResponseCode();
-                if (status != 200) throw httpFailure(connection, status);
-                String contentType = connection.getContentType();
-                android.util.Log.i("ConversationApi", "Response status=" + status + " contentType=" + contentType);
-                try (InputStream stream = connection.getInputStream()) {
-                    Consumer<String> delta = value -> { if (attempt == generation.get()) onDelta.accept(value); };
-                    // Subscription responses can omit Content-Type; the parser still requires verified completion.
-                    String result = SseReader.readAuto(stream, delta);
-                    checked(attempt);
-                    return result;
-                }
-            } catch (HttpFailure e) { handleUnauthorized(e, attempt); throw e; }
-            catch (IOException e) { throw sanitized(e); }
-            catch (Exception e) { throw new SafeFailure("ChatGPT に接続できませんでした。接続状態を確認してください。"); }
-            finally {
-                if (timeout != null) timeout.cancel(false);
-                if (connection != null) connection.disconnect();
-                activeHttp = null;
+        return request(request, instructions, input, onDelta, false);
+    }
+
+    public String request(ChatRequest request, String instructions, JSONArray input, Consumer<String> onDelta, boolean background) throws IOException {
+        int attempt = requests.generation(), replyAttempt = replyRequests.generation();
+        String token;
+        synchronized (operationLock) { token = accessToken(attempt); }
+        HttpURLConnection connection = null;
+        ScheduledFuture<?> timeout = null;
+        try {
+            JSONObject body = request.body(instructions, input);
+            byte[] encoded = body.toString().getBytes(StandardCharsets.UTF_8);
+            if (encoded.length > 4 * 1024 * 1024) throw new SafeFailure("会話が長すぎます。新しい会話を開始してください。");
+            connection = open(RESOURCE + "/responses", "POST", token, attempt);
+            if (!background) replyRequests.register(connection, replyAttempt);
+            connection.setRequestProperty("Content-Type", "application/json");
+            connection.setRequestProperty("Accept", "text/event-stream");
+            connection.setDoOutput(true); connection.setFixedLengthStreamingMode(encoded.length);
+            final HttpURLConnection bound = connection;
+            timeout = TIMEOUTS.schedule(bound::disconnect, 120, TimeUnit.SECONDS);
+            try (OutputStream output = connection.getOutputStream()) { output.write(encoded); }
+            int status = connection.getResponseCode();
+            if (status != 200) throw httpFailure(connection, status);
+            String contentType = connection.getContentType();
+            android.util.Log.i("ConversationApi", "Response status=" + status + " contentType=" + contentType);
+            try (InputStream stream = connection.getInputStream()) {
+                Consumer<String> delta = value -> { if (requests.isCurrent(attempt) && (background || replyRequests.isCurrent(replyAttempt))) onDelta.accept(value); };
+                // Subscription responses can omit Content-Type; the parser still requires verified completion.
+                String result = SseReader.readAuto(stream, delta);
+                checked(attempt);
+                if (!background && !replyRequests.isCurrent(replyAttempt)) throw new SafeFailure("処理をキャンセルしました。");
+                return result;
             }
+        } catch (HttpFailure e) { handleUnauthorized(e, attempt, token); throw e; }
+        catch (IOException e) { throw sanitized(e); }
+        catch (Exception e) { throw new SafeFailure("ChatGPT に接続できませんでした。接続状態を確認してください。"); }
+        finally {
+            if (timeout != null) timeout.cancel(false);
+            requests.finish(connection);
+            if (!background) replyRequests.finish(connection);
         }
     }
 
@@ -347,7 +350,9 @@ public final class ChatGptConnection {
     public void signOut() {
         cancel();
         synchronized (operationLock) {
-            int attempt = generation.get();
+            // Cancel requests that obtained the old token while sign-out waited for refresh.
+            cancel();
+            int attempt = requests.generation();
             String refresh = "", client = "";
             boolean cleared = false, unknownRemote = false;
             try {
@@ -391,11 +396,12 @@ public final class ChatGptConnection {
     public String signOutStatus() { return lastSignOutMessage; }
 
     public void cancel() {
-        generation.incrementAndGet();
-        HttpURLConnection http = activeHttp;
-        if (http != null) http.disconnect();
+        requests.cancel();
+        replyRequests.cancel();
         closeListener();
     }
+
+    public void cancelReply() { replyRequests.cancel(); }
 
     private void closeListener() {
         Socket callback = activeCallback; activeCallback = null;
@@ -451,8 +457,7 @@ public final class ChatGptConnection {
         }
         finally {
             if (timeout != null) timeout.cancel(false);
-            if (connection != null) connection.disconnect();
-            activeHttp = null;
+            requests.finish(connection);
         }
     }
 
@@ -463,16 +468,17 @@ public final class ChatGptConnection {
                 || !("auth.openai.com".equals(url.getHost()) || "api.openai.com".equals(url.getHost())))
             throw new SafeFailure("接続先を確認できませんでした。");
         HttpURLConnection connection = (HttpURLConnection)url.openConnection();
-        activeHttp = connection;
-        connection.setInstanceFollowRedirects(false);
-        connection.setConnectTimeout(15000); connection.setReadTimeout(30000);
-        connection.setRequestMethod(method);
-        connection.setRequestProperty("Accept", "application/json");
-        connection.setRequestProperty("User-Agent", "Conversation-Android/0.1");
-        if (!bearer.isEmpty()) connection.setRequestProperty("Authorization", "Bearer " + bearer);
-        try { checked(attempt); }
-        catch (IOException e) { connection.disconnect(); throw e; }
-        return connection;
+        try {
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(15000); connection.setReadTimeout(30000);
+            connection.setRequestMethod(method);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("User-Agent", "Conversation-Android/0.1");
+            if (!bearer.isEmpty()) connection.setRequestProperty("Authorization", "Bearer " + bearer);
+            requests.register(connection, attempt);
+            checked(attempt);
+            return connection;
+        } catch (IOException | RuntimeException error) { requests.finish(connection); throw error; }
     }
 
     private HttpFailure httpFailure(HttpURLConnection connection, int status) {
@@ -493,8 +499,12 @@ public final class ChatGptConnection {
         return new HttpFailure(message, status, "invalid_grant".equals(code));
     }
 
-    private void handleUnauthorized(HttpFailure failure, int attempt) throws IOException {
-        if (failure.status == 401 || failure.invalidGrant) clearTokens(attempt);
+    private void handleUnauthorized(HttpFailure failure, int attempt, String rejectedToken) throws IOException {
+        synchronized (operationLock) {
+            checked(attempt);
+            if ((failure.status == 401 || failure.invalidGrant) && snapshot().optString("access_token").equals(rejectedToken))
+                clearTokens(attempt);
+        }
     }
 
     private void clearTokens(int attempt) throws IOException {
@@ -531,7 +541,7 @@ public final class ChatGptConnection {
     }
 
     private void checked(int attempt) throws IOException {
-        if (generation.get() != attempt || Thread.currentThread().isInterrupted()) throw new SafeFailure("処理をキャンセルしました。");
+        if (requests.generation() != attempt || Thread.currentThread().isInterrupted()) throw new SafeFailure("処理をキャンセルしました。");
     }
 
     private static Map<String,String> form(String... pairs) {

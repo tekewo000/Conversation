@@ -42,7 +42,9 @@ public final class MainActivity extends ComponentActivity {
     private int pageFirst = -1;
     private boolean scrollOnRefresh;
     private ChatGptConnection connection;
-    private ChatSession session;
+    private ChatSession session, memorySession;
+    private final MemoryWorker memoryWorker = new MemoryWorker();
+    private String memoryStatus = "";
     private PersonRegistry people;
     private PersonRegistry.Person activePerson;
     private File pendingExportDirectory;
@@ -104,7 +106,7 @@ public final class MainActivity extends ComponentActivity {
         }
         if (activePerson != null) compose.setDraft(getPreferences(MODE_PRIVATE).getString(draftKey(), ""));
         connection = new ChatGptConnection(this);
-        session = new ChatSession(new ChatSession.Store() {
+        ChatSession.Store store = new ChatSession.Store() {
             public long add(String role, String text) throws Exception {
                 synchronized (storeGate) {
                     requireCurrentPerson();
@@ -136,7 +138,9 @@ public final class MainActivity extends ComponentActivity {
                     if (!error.isEmpty()) throw new java.io.IOException(error);
                 }
             }
-        });
+        };
+        session = new ChatSession(store);
+        memorySession = new ChatSession(store);
         setBusy(false);
         refreshMessages();
         scheduleGitSync();
@@ -154,14 +158,19 @@ public final class MainActivity extends ComponentActivity {
                     snapshot = nativeMessages(requested);
                     if (snapshot.isEmpty()) throw new java.io.IOException(nativeLastError());
                 }
+                JSONObject page = new JSONObject(snapshot);
+                org.json.JSONArray rows = page.getJSONArray("messages");
+                for (int i = 0; i < rows.length(); i++) {
+                    JSONObject row = rows.getJSONObject(i);
+                    if ("assistant".equals(row.getString("role"))) row.put("text", ReplyText.visible(row.getString("text"), true));
+                }
+                final String visibleSnapshot = page.toString();
+                final boolean latest = page.getInt("first") + rows.length() >= page.getInt("total");
                 ui(() -> {
                     if (pageFirst != requested || changingPerson) return;
-                    try {
-                        JSONObject page = new JSONObject(snapshot);
-                        if (page.getInt("first") + page.getJSONArray("messages").length() >= page.getInt("total")) pageFirst = -1;
-                        compose.setMessages(snapshot);
-                        if (scrollOnRefresh) { compose.scrollToLatest(); scrollOnRefresh = false; }
-                    } catch (org.json.JSONException error) { showError("会話の表示データを読み出せませんでした。"); }
+                    if (latest) pageFirst = -1;
+                    compose.setMessages(visibleSnapshot);
+                    if (scrollOnRefresh) { compose.scrollToLatest(); scrollOnRefresh = false; }
                 });
             } catch (Exception error) { ui(() -> showError(safeError(error))); }
         });
@@ -227,8 +236,9 @@ public final class MainActivity extends ComponentActivity {
         connectionStatus = "応答を生成しています";
         AtomicBoolean saved = new AtomicBoolean(!persistUser);
         worker.execute(() -> {
+            final ChatRequest[] request = {null};
+            AtomicBoolean replied = new AtomicBoolean();
             try {
-                final ChatRequest[] request = {null};
                 session.reply(text, persistUser, (instructions, turns, delta) -> {
                     if (request[0] == null) request[0] = selectedRequest();
                     return connection.request(request[0], instructions, turns, delta);
@@ -250,11 +260,8 @@ public final class MainActivity extends ComponentActivity {
                         if (now - lastRender > 45) { lastRender = now; ui(() -> compose.setStreaming(full)); }
                     }
                     public void replySaved() {
-                        setStreaming("");
-                        ui(() -> { refreshMessages(); connectionStatus = "記憶を整理しています"; });
-                    }
-                    public void memoryStatus(String error) {
-                        ui(() -> connectionStatus = error == null ? "ChatGPTに接続しています" : error);
+                        replied.set(true); setStreaming("");
+                        ui(() -> { refreshMessages(); connectionStatus = "ChatGPTに接続しています"; });
                     }
                 });
             } catch (Exception error) {
@@ -276,7 +283,10 @@ public final class MainActivity extends ComponentActivity {
                     compose.show(dialog);
 
                 });
-            } finally { ui(() -> { setBusy(false); scheduleGitSync(); }); }
+            } finally { ui(() -> {
+                setBusy(false); scheduleGitSync();
+                if (replied.get()) queueMemories(request[0]);
+            }); }
         });
     }
 
@@ -304,7 +314,7 @@ public final class MainActivity extends ComponentActivity {
         menu.rows.add(new ComposeUi.Row("ChatGPT", this::showConnection, 5));
         if (activePerson != null) menu.rows.add(new ComposeUi.Row("Gitバックアップ", this::showGitBackup, 1));
         if (busy) menu.rows.add(new ComposeUi.Row("応答を停止", () -> {
-            session.cancel(); connection.cancel(); setStreaming(""); refreshMessages();
+            session.cancel(); connection.cancelReply(); setStreaming(""); refreshMessages();
         }, 6));
         compose.show(menu);
     }
@@ -314,6 +324,7 @@ public final class MainActivity extends ComponentActivity {
         panel.sheet = true;
         panel.message = connection.hasSession()
                 ? connection.accountLabel() + "\nChatGPTの利用枠を使用します。\n" + connectionStatus
+                        + "\n" + (memoryWorker.isRunning() ? "記憶をバックグラウンドで整理しています。会話は続けられます。" : memoryStatus)
                 : "ChatGPTにログインして、このアプリでサブスクの利用枠を使います。\n" + connectionStatus;
         if (!connection.hasSession()) {
             panel.rows.add(new ComposeUi.Row("Continue with ChatGPT", () -> {
@@ -427,16 +438,20 @@ public final class MainActivity extends ComponentActivity {
         });
     }
 
-    private void retryMemories() {
-        if (busy || activePerson == null || !connection.hasSession()) return;
-        setBusy(true); session.begin(); connectionStatus = "記憶を整理しています";
-        worker.execute(() -> {
+    private void retryMemories() { queueMemories(null); }
+
+    private void queueMemories(ChatRequest selected) {
+        if (closed || changingPerson || activePerson == null || !connection.hasSession()) return;
+        memoryWorker.execute(() -> {
             try {
-                final ChatRequest request = selectedRequest();
-                session.processMemories((instructions, turns, delta) -> connection.request(request, instructions, turns, delta));
-                ui(() -> connectionStatus = "記憶の整理を進めました");
-            } catch (Exception error) { ui(() -> connectionStatus = "記憶の整理は再試行待ちです。" + safeError(error)); }
-            finally { ui(() -> { setBusy(false); scheduleGitSync(); }); }
+                requireOpen();
+                memorySession.begin();
+                final ChatRequest request = selected == null ? selectedRequest() : selected;
+                memorySession.processMemories((instructions, turns, delta) -> connection.request(request, instructions, turns, delta, true));
+                ui(() -> { memoryStatus = ""; scheduleGitSync(); });
+            } catch (Exception error) {
+                ui(() -> { memoryStatus = "記憶の整理は再試行待ちです。原文は保存されています。" + safeError(error); scheduleGitSync(); });
+            }
         });
     }
 
@@ -444,22 +459,22 @@ public final class MainActivity extends ComponentActivity {
         ComposeUi.Panel panel = new ComposeUi.Panel("人物");
         panel.sheet = true;
         panel.rows.add(new ComposeUi.Row("人物を追加", () -> {
-            if (busy) { showError("応答と記憶の整理が終わってから追加してください。"); return; }
+            if (busy || memoryWorker.isRunning()) { showError("応答と記憶の整理が終わってから追加してください。"); return; }
             showNewPerson();
         }, 2));
         for (PersonRegistry.Person person : people.list()) {
             ComposeUi.Row row = new ComposeUi.Row(person.name, () -> {
-                if (busy) { showError("応答と記憶の整理が終わってから人物を切り替えてください。"); return; }
+                if (busy || memoryWorker.isRunning()) { showError("応答と記憶の整理が終わってから人物を切り替えてください。"); return; }
                 switchPerson(person);
             }, 5);
             row.checked = activePerson != null && person.id.equals(activePerson.id); panel.rows.add(row);
         }
         panel.rows.add(new ComposeUi.Row("人物ファイルを読み込む", () -> {
-            if (busy) { showError("応答と記憶の整理が終わってから読み込んでください。"); return; }
+            if (busy || memoryWorker.isRunning()) { showError("応答と記憶の整理が終わってから読み込んでください。"); return; }
             startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE), 82);
         }, 1));
         if (!people.list().isEmpty()) panel.rows.add(new ComposeUi.Row("人物を削除", () -> {
-            if (busy) { showError("応答と記憶の整理が終わってから削除してください。"); return; }
+            if (busy || memoryWorker.isRunning()) { showError("応答と記憶の整理が終わってから削除してください。"); return; }
             showDeletePeople();
         }, 6));
         compose.show(panel);
@@ -493,7 +508,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void deletePerson(PersonRegistry.Person person) {
-        if (busy) return;
+        if (busy || memoryWorker.isRunning()) return;
         saveDraft(); changingPerson = true; setBusy(true);
         syncTimer.removeCallbacks(autoSync);
         worker.execute(() -> {
@@ -542,7 +557,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void switchPerson(PersonRegistry.Person person) {
-        if ((activePerson != null && person.id.equals(activePerson.id)) || busy) return;
+        if ((activePerson != null && person.id.equals(activePerson.id)) || busy || memoryWorker.isRunning()) return;
         saveDraft(); changingPerson = true; setBusy(true);
         syncTimer.removeCallbacks(autoSync);
         worker.execute(() -> {
@@ -569,7 +584,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void previewPerson(PersonDocument document) {
-        if (busy) return;
+        if (busy || memoryWorker.isRunning()) return;
         ComposeUi.Panel panel = new ComposeUi.Panel(document.name);
         panel.secure = true;
         panel.message = (document.profile.length() > 1600 ? document.profile.substring(0, 1600) + "…" : document.profile)
@@ -590,7 +605,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void createPerson(PersonDocument document, String repository, String suppliedToken) {
-        if (busy) return;
+        if (busy || memoryWorker.isRunning()) return;
         saveDraft(); changingPerson = true; setBusy(true);
         syncTimer.removeCallbacks(autoSync);
         worker.execute(() -> {
@@ -786,6 +801,8 @@ public final class MainActivity extends ComponentActivity {
         synchronized (storeGate) { closed = true; }
         syncTimer.removeCallbacks(autoSync);
         if (session != null) session.cancel();
+        if (memorySession != null) memorySession.cancel();
+        memoryWorker.close();
         if (connection != null) connection.cancel();
         worker.shutdownNow();
         reader.shutdownNow();

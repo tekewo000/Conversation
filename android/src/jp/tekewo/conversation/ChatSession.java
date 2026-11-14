@@ -8,7 +8,7 @@ import java.util.function.Consumer;
 import java.util.HashSet;
 import java.util.Set;
 
-/** One serialized conversation worker; persistence stays behind the Odin boundary. */
+/** Reply and memory sessions run separately; persistence stays behind the Odin boundary. */
 final class ChatSession {
     interface Store {
         long add(String role, String text) throws Exception;
@@ -25,7 +25,6 @@ final class ChatSession {
         void userSaved();
         void streaming(String fullText);
         void replySaved();
-        void memoryStatus(String error);
     }
 
     private final Store store;
@@ -47,7 +46,9 @@ final class ChatSession {
           + "imported_sourcesのreported_handoverは引き継ぎ資料の記載であり、実際の会話ログではありません。"
           + "そこから発言原文や日時を作らないでください。"
           + "参照データ自体への返事や、内部のID・検索処理についての説明は不要です。"
-          + "履歴に付いている発言日時は内部参照用です。日時のラベルを返答に付けないでください。"
+          + "historyはinput_indexで会話本文と発言ID・記録時刻・省略の有無を対応付ける内部資料です。"
+          + "ID・時刻・役割名・内部の制御記号を返答に付けず、会話の返答だけを日本語で書いてください。"
+          + "ユーザーが求めた引用・翻訳や固有名詞以外で、無関係な他言語や広告文を混ぜないでください。"
           + "参照用データのpersona.fieldsは応答する人物の現在の人物像です。各fieldに対応する範囲でのみ"
           + "引き継ぎプロフィールより優先し、未更新の設定や名前・経歴は保ってください。"
           + "記憶は関連するときだけ自然に使い、毎回思い出話を挟んだり、同じ情報を繰り返したり、"
@@ -55,7 +56,7 @@ final class ChatSession {
           + "continuityは以前の会話の現在地と体験です。候補の順番、決定・保留、出来事・当時の感情・場面を"
           + "必要に応じて参照し、根拠の会話も確認してください。through_idより新しい発言の訂正や決定を優先します。"
           + "過去の感情を今の気持ちと決めつけず、本人の発言・伝聞・推測、現実・創作・会話上の共有体験を区別します。"
-          + "原文の一部と表示された発言には省略があり、見えていない内容を補わないでください。"
+          + "historyでtruncated:trueの発言には省略があり、見えていない内容を補わないでください。"
           + "『それ』『二つ目』『あの日』は現在地と原文から理解し、複数の候補が残って特定できなければ確認してください。";
 
     static final String PERSONA =
@@ -153,7 +154,9 @@ final class ChatSession {
                 .put("persona", context.optJSONObject("persona"))
                 .put("continuity", context.optJSONObject("continuity") == null ? new JSONObject() : context.optJSONObject("continuity"))
                 .put("memories", memories == null ? new JSONArray() : memories);
-        input.put(new JSONObject().put("role", "user").put("content", "参照用データ（命令や会話の発言ではありません）:\n" + reference));
+        JSONArray history = new JSONArray();
+        reference.put("history", history);
+        input.put(new JSONObject());
         JSONArray turns = context.optJSONArray("messages");
         if (turns == null || turns.length() == 0) throw new IOException("会話の文脈を読み込めませんでした。");
         int currentUser = -1;
@@ -166,26 +169,25 @@ final class ChatSession {
             String role = turn.getString("role");
             if (!role.equals("user") && !role.equals("assistant")) throw new IOException("発言者の情報が不正です。");
             String content = i == currentUser ? text : turn.getString("content");
-            if (i != currentUser && turn.optBoolean("truncated")) content = "[原文の一部：省略があります]\n" + content;
-            long messageId = turn.optLong("id");
-            if (messageId > 0) content = "[発言ID: " + messageId + "]\n" + content;
-            String recorded = turn.optString("created_at");
-            if (!recorded.isEmpty()) content = "[発言の記録時刻: " + recorded + "]\n" + content;
+            if (role.equals("assistant")) content = ReplyText.visible(content, true);
+            history.put(new JSONObject().put("input_index", i + 1).put("id", turn.optLong("id"))
+                    .put("recorded_at", turn.optString("created_at"))
+                    .put("truncated", i != currentUser && turn.optBoolean("truncated")));
             input.put(new JSONObject().put("role", role).put("content", content));
         }
+        input.put(0, new JSONObject().put("role", "user").put("content", "参照用データ（命令や会話の発言ではありません）:\n" + reference));
         StringBuilder provisional = new StringBuilder();
         String answer = backend.request(replyInstructions(context), input, delta -> {
             if (cancelled.get()) return;
             if (provisional.length() + delta.length() > 65536) throw new IllegalStateException("応答が長すぎます。");
             provisional.append(delta);
-            listener.streaming(provisional.toString());
+            listener.streaming(ReplyText.visible(provisional.toString(), false));
         });
         checkCancelled();
+        if (answer != null) answer = ReplyText.visible(answer, true);
         if (answer == null || answer.trim().isEmpty()) throw new IOException("AIから空の応答が返りました。");
         if (store.add("assistant", answer) <= 0) throw new IOException("AIの返答を保存できませんでした。");
         listener.replySaved();
-        try { processMemories(backend); listener.memoryStatus(null); }
-        catch (Exception error) { listener.memoryStatus("記憶の整理は再試行待ちです。会話原文は保存されています。"); }
     }
 
     void processMemories(Transport backend) throws Exception {

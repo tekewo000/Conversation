@@ -100,6 +100,15 @@ public final class ConnectionTest {
                 + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"にちは\"}\n\n"
                 + "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n", deltas);
         check("こんにちは".equals(text) && text.equals(deltas.toString()), "UTF-8 streamed deltas");
+        String hiddenAndFinal = "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"hidden\",\"type\":\"message\",\"role\":\"assistant\",\"channel\":\"analysis\"}}\n\n"
+                + "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"hidden\",\"delta\":\"内部の文章\"}\n\n"
+                + "data: {\"type\":\"response.output_text.delta\",\"channel\":\"analysis\",\"delta\":\"別の内部文章\"}\n\n"
+                + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"日本語の返答\"}\n\n"
+                + "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":["
+                + "{\"type\":\"message\",\"role\":\"assistant\",\"channel\":\"analysis\",\"content\":[{\"type\":\"output_text\",\"text\":\"内部の文章\"}]},"
+                + "{\"type\":\"message\",\"role\":\"assistant\",\"channel\":\"final\",\"content\":[{\"type\":\"output_text\",\"text\":\"日本語の返答\"}]}]}}\n\n";
+        StringBuilder visibleDeltas = new StringBuilder();
+        check(stream(hiddenAndFinal, visibleDeltas).equals("日本語の返答") && visibleDeltas.toString().equals("日本語の返答"), "internal channels must never become visible response text");
         check("final".equals(stream("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"content\":[{\"type\":\"output_text\",\"text\":\"final\"}]}]}}\n\n", new StringBuilder())), "final output");
         fails(() -> stream("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n", new StringBuilder()));
         fails(() -> stream("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"subscription_sharing_usage_limit_exceeded\"}}}\n\n", new StringBuilder()));

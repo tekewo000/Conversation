@@ -10,6 +10,8 @@ import java.io.PushbackReader;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.function.Consumer;
+import java.util.HashSet;
+import java.util.Set;
 
 final class SseReader {
     private static final int LIMIT = 2 * 1024 * 1024;
@@ -44,7 +46,7 @@ final class SseReader {
             if (!"response".equals(response.optString("object")) || !"completed".equals(response.optString("status")))
                 throw new StreamFailure("AIの応答の完了を確認できませんでした。");
             return event(new JSONObject().put("type", "response.completed").put("response", response).toString(),
-                    new StringBuilder(), onDelta);
+                    new StringBuilder(), onDelta, new HashSet<>());
         } catch (IOException error) { throw error; }
         catch (Exception error) { throw new StreamFailure("AIの応答形式を読み取れませんでした。"); }
     }
@@ -54,6 +56,7 @@ final class SseReader {
                 StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                         .onUnmappableCharacter(CodingErrorAction.REPORT)), 1);
         StringBuilder event = new StringBuilder(), output = new StringBuilder();
+        Set<String> hiddenItems = new HashSet<>();
         String line;
         boolean first = true;
         while ((line = line(reader)) != null) {
@@ -61,7 +64,7 @@ final class SseReader {
             first = false;
             if (line.isEmpty()) {
                 if (event.length() == 0) continue;
-                String result = event(event.toString(), output, onDelta);
+                String result = event(event.toString(), output, onDelta, hiddenItems);
                 if (result != null) return result;
                 event.setLength(0);
             } else if (line.startsWith("data:")) {
@@ -74,12 +77,26 @@ final class SseReader {
         throw new StreamFailure("応答が完了する前に接続が切れました。もう一度送信してください。");
     }
 
-    private static String event(String data, StringBuilder output, Consumer<String> onDelta) throws IOException {
+    private static boolean visibleChannel(JSONObject item) {
+        String channel = item.optString("channel");
+        return channel.isEmpty() || channel.equals("final");
+    }
+
+    private static boolean visibleMessage(JSONObject item) {
+        String type = item.optString("type"), role = item.optString("role");
+        return (type.isEmpty() || type.equals("message")) && (role.isEmpty() || role.equals("assistant")) && visibleChannel(item);
+    }
+
+    private static String event(String data, StringBuilder output, Consumer<String> onDelta, Set<String> hiddenItems) throws IOException {
         try {
             if ("[DONE]".equals(data.trim())) throw new StreamFailure("応答の完了を確認できませんでした。");
             JSONObject event = new JSONObject(data);
             String type = event.getString("type");
-            if ("response.output_text.delta".equals(type) || "response.refusal.delta".equals(type)) {
+            if ("response.output_item.added".equals(type)) {
+                JSONObject item = event.getJSONObject("item");
+                if (!visibleMessage(item) && !item.optString("id").isEmpty()) hiddenItems.add(item.getString("id"));
+            } else if ("response.output_text.delta".equals(type) || "response.refusal.delta".equals(type)) {
+                if (!visibleChannel(event) || hiddenItems.contains(event.optString("item_id"))) return null;
                 String delta = event.getString("delta");
                 if (output.length() + delta.length() > LIMIT) throw limit();
                 output.append(delta);
@@ -90,7 +107,9 @@ final class SseReader {
                 StringBuilder complete = new StringBuilder();
                 JSONArray items = response.optJSONArray("output");
                 if (items != null) for (int i = 0; i < items.length(); i++) {
-                    JSONArray content = items.getJSONObject(i).optJSONArray("content");
+                    JSONObject item = items.getJSONObject(i);
+                    if (!visibleMessage(item)) continue;
+                    JSONArray content = item.optJSONArray("content");
                     if (content == null) continue;
                     for (int j = 0; j < content.length(); j++) {
                         JSONObject part = content.getJSONObject(j);
@@ -99,7 +118,7 @@ final class SseReader {
                         if (complete.length() > LIMIT) throw limit();
                     }
                 }
-                if (complete.length() == 0) complete.append(output);
+                if (complete.length() == 0 && (items == null || items.length() == 0)) complete.append(output);
                 if (complete.length() == 0) throw new StreamFailure("テキストの応答がありませんでした。");
                 String result = complete.toString();
                 if (result.startsWith(output.toString()) && result.length() > output.length()) onDelta.accept(result.substring(output.length()));
