@@ -255,7 +255,7 @@ final class ChatSession {
         listener.replySaved();
     }
 
-    void processMemories(Transport backend) throws Exception {
+    boolean processMemories(Transport backend) throws Exception {
         for (int batch = 0; batch < 3; ++batch) {
             checkCancelled();
             JSONObject job = store.pending();
@@ -299,16 +299,23 @@ final class ChatSession {
             String payload = backend.request(EXTRACT,
                     new JSONArray().put(new JSONObject().put("role", "user").put("content", data.toString())), ignored -> {});
             checkCancelled();
-            store.apply(id, jsonPayload(payload));
+            JSONObject extraction = new JSONObject(jsonPayload(payload));
+            extraction.remove("first_job_id");
+            long firstJob = job.optLong("first_job_id", id);
+            if (firstJob != id) extraction.put("first_job_id", firstJob);
+            store.apply(id, extraction.toString());
         }
         checkCancelled();
         JSONObject reflection = store.pendingPersona();
         long throughId = reflection.optLong("through_id", 0);
-        if (throughId <= 0) return;
-        String payload = backend.request(REFLECT,
-                new JSONArray().put(new JSONObject().put("role", "user").put("content", reflection.toString())), ignored -> {});
+        if (throughId > 0) {
+            String payload = backend.request(REFLECT,
+                    new JSONArray().put(new JSONObject().put("role", "user").put("content", reflection.toString())), ignored -> {});
+            checkCancelled();
+            store.applyPersona(throughId, jsonPayload(payload));
+        }
         checkCancelled();
-        store.applyPersona(throughId, jsonPayload(payload));
+        return store.pending().optLong("id", 0) > 0;
     }
 
     static String jsonPayload(String value) throws IOException {

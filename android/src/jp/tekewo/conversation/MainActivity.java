@@ -53,6 +53,7 @@ public final class MainActivity extends ComponentActivity {
     private String semanticStatus = "意味検索を準備しています";
     private final MemoryWorker memoryWorker = new MemoryWorker();
     private String memoryStatus = "";
+    private volatile boolean memoryPaused;
     private PersonRegistry people;
     private PersonRegistry.Person activePerson;
     private File pendingExportDirectory;
@@ -585,19 +586,26 @@ public final class MainActivity extends ComponentActivity {
         });
     }
 
-    private void retryMemories() { queueMemories(null); if (semanticMemory != null) semanticMemory.refresh(); }
+    private void retryMemories() { memoryPaused = false; queueMemories(null); if (semanticMemory != null) semanticMemory.refresh(); }
 
     private void queueMemories(ChatRequest selected) {
-        if (closed || changingPerson || activePerson == null || !connection.hasSession()) return;
+        if (closed || changingPerson || memoryPaused || activePerson == null || !connection.hasSession()) return;
         memoryWorker.execute(() -> {
             try {
                 requireOpen();
                 memorySession.begin();
                 final ChatRequest request = selected == null ? selectedRequest() : selected;
-                memorySession.processMemories((instructions, turns, delta) -> connection.request(request, instructions, turns, delta, true));
-                ui(() -> { memoryStatus = ""; refreshMessages(); scheduleGitSync(); });
+                boolean more = memorySession.processMemories((instructions, turns, delta) -> {
+                    if (memoryPaused) throw new java.io.IOException("記憶の整理を一時停止しました。");
+                    return connection.request(request, instructions, turns, delta, true);
+                });
+                ui(() -> {
+                    memoryStatus = ""; refreshMessages(); scheduleGitSync();
+                    if (more) queueMemories(request);
+                });
             } catch (Exception error) {
-                ui(() -> { memoryStatus = "記憶の整理は再試行待ちです。原文は保存されています。" + safeError(error); refreshMessages(); scheduleGitSync(); });
+                ui(() -> { memoryStatus = memoryPaused ? "記憶の整理を一時停止しました。"
+                        : "記憶の整理は再試行待ちです。原文は保存されています。" + safeError(error); refreshMessages(); scheduleGitSync(); });
             } finally { if (semanticMemory != null) semanticMemory.refresh(); }
         });
     }
@@ -664,9 +672,21 @@ public final class MainActivity extends ComponentActivity {
                     panel.message = "感情\n" + state.optString("emotion", "未記録")
                             + "\n\n理由\n" + state.optString("reason", "未記録")
                             + "\n\n状況\n" + state.optString("event", "未記録");
+                    JSONObject progress = snapshot.optJSONObject("memory_progress");
+                    if (progress != null) {
+                        long processed = progress.optLong("processed_messages"), total = progress.optLong("total_messages");
+                        panel.message += "\n\n会話の記憶整理\n" + processed + " / " + total + " 発言（残り" + Math.max(0, total - processed) + "発言）";
+                    }
                     panel.rows.add(new ComposeUi.Row("短期記憶（直近30往復）", () -> showMemoryHistory(person, snapshot, false)));
                     panel.rows.add(new ComposeUi.Row("中期記憶（" + (episodes == null ? 0 : episodes.length()) + "件）",
                             () -> showMemoryHistory(person, snapshot, true)));
+                    if (progress != null && progress.optLong("pending_jobs") > 0) {
+                        boolean running = memoryWorker.isRunning();
+                        panel.rows.add(new ComposeUi.Row(running ? (memoryPaused ? "一時停止を予約しました" : "この整理のあと一時停止") : "記憶の整理を続ける", () -> {
+                            if (running) memoryPaused = true; else retryMemories();
+                            showMemory();
+                        }));
+                    }
                     panel.rows.add(new ComposeUi.Row("人物アイコンを設定", this::showPersonIcon, 2));
                     compose.show(panel);
                 });

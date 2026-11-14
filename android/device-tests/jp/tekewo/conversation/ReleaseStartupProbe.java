@@ -50,6 +50,24 @@ public final class ReleaseStartupProbe extends Instrumentation {
                     Thread.sleep(100);
                 } while (android.os.SystemClock.uptimeMillis() < deadline);
                 if (!"意味検索の準備ができました".equals(current.get())) throw new AssertionError("Release background retrieval did not become ready");
+                Method pending = activity.getClass().getDeclaredMethod("nativePendingJob"); pending.setAccessible(true);
+                org.json.JSONObject batch = new org.json.JSONObject((String)pending.invoke(null));
+                if (batch.optLong("id") > 0) {
+                    org.json.JSONArray messages = batch.getJSONArray("messages");
+                    if (messages.length() < 1 || messages.length() > 16 || batch.getLong("first_job_id") > batch.getLong("id"))
+                        throw new AssertionError("Invalid pending memory batch");
+                    if (batch.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 65536)
+                        throw new AssertionError("Memory batch exceeds the source transport budget");
+                    for (int i = 1; i < messages.length(); i++)
+                        if (messages.getJSONObject(i).getLong("id") != messages.getJSONObject(i - 1).getLong("id") + 1)
+                            throw new AssertionError("Memory batch skipped original messages");
+                    sendStatus(0, status("MEMORY_BATCH_PASS: " + messages.length() + " contiguous messages; no AI request made\n"));
+                }
+                Method snapshot = activity.getClass().getDeclaredMethod("nativeContext", byte[].class); snapshot.setAccessible(true);
+                org.json.JSONObject progress = new org.json.JSONObject((String)snapshot.invoke(null, new byte[0])).getJSONObject("memory_progress");
+                long processed = progress.getLong("processed_messages"), total = progress.getLong("total_messages");
+                if (processed < 0 || total < processed) throw new AssertionError("Invalid memory progress");
+                sendStatus(0, status("MEMORY_PROGRESS_PASS: " + processed + "/" + total + " messages processed\n"));
             }
             runOnMainSync(activity::finish);
             result.putString("stream", "RELEASE_STARTUP_PASS: installed Release model inference and Activity startup\n");
@@ -60,4 +78,6 @@ public final class ReleaseStartupProbe extends Instrumentation {
             finish(Activity.RESULT_CANCELED, result);
         }
     }
+
+    private static Bundle status(String text) { Bundle value = new Bundle(); value.putString("stream", text); return value; }
 }

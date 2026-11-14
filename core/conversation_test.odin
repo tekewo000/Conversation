@@ -7,6 +7,81 @@ import "core:time"
 import "core:encoding/json"
 
 @(test)
+backlog_batches_preserve_sources_progress_atomicity_and_archive_replay :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-backlog-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ for _ in 0..<20 {
+  assert(conversation_add_message("user","昔の会話を順番に整理する")>0)
+  assert(conversation_add_message("assistant","原文を残して整理する")>0)
+ }
+ {
+ raw:=string(conversation_pending_job())
+ pending,ok:=parse_json(transmute([]byte)raw)
+ assert(ok)
+ defer json.destroy_value(pending)
+ batch:=pending.(json.Object)
+ testing.expect_value(t,i64(batch["id"].(json.Integer)),8)
+ testing.expect_value(t,i64(batch["first_job_id"].(json.Integer)),1)
+ rows:=batch["messages"].(json.Array)
+ testing.expect_value(t,len(rows),16)
+ testing.expect_value(t,i64(rows[0].(json.Object)["id"].(json.Integer)),1)
+ testing.expect_value(t,i64(rows[15].(json.Object)["id"].(json.Integer)),16)
+ }
+ testing.expect(t,!conversation_apply_job(8,`{"memories":[],"first_job_id":2}`),"A batch must not skip the oldest pending work.")
+ testing.expect(t,!conversation_apply_job(20,`{"memories":[],"first_job_id":1}`),"A batch must not exceed sixteen messages.")
+ bad :: `{"memories":[],"first_job_id":1,"continuity":{"threads":[],"episodes":[{"key":"home","text":"家で相談した","emotion":"","scene":"初日の家","scope":"shared","source_ids":[41]}]}}`
+ testing.expect(t,!conversation_apply_job(8,bad))
+ testing.expect_value(t,scalar("SELECT count(*) FROM jobs WHERE processed=0"),20)
+ testing.expect_value(t,scalar("SELECT count(*) FROM jobs"),20)
+ good :: `{"memories":[],"first_job_id":1,"continuity":{"threads":[],"episodes":[{"key":"home","text":"家で相談した","emotion":"","scene":"初日の家","scope":"shared","source_ids":[1,16]}]}}`
+ assert(conversation_apply_job(8,good),string(conversation_error()))
+ assert(conversation_apply_job(8,good),string(conversation_error()))
+ testing.expect_value(t,scalar("SELECT count(*) FROM jobs WHERE processed=0"),12)
+ testing.expect_value(t,scalar("SELECT count(*) FROM jobs"),21)
+ testing.expect_value(t,conversation_memory_count(),1)
+ testing.expect(t,strings.contains(string(conversation_pending_job()),`"id":16`))
+ {
+ raw:=string(conversation_context("unrelated"))
+ output,context_ok:=parse_json(transmute([]byte)raw)
+ assert(context_ok)
+ defer json.destroy_value(output)
+ progress:=output.(json.Object)["memory_progress"].(json.Object)
+ testing.expect_value(t,i64(progress["processed_messages"].(json.Integer)),16)
+ testing.expect_value(t,i64(progress["total_messages"].(json.Integer)),40)
+ }
+ delta:=strings.clone_to_cstring(string(conversation_archive_delta(0)))
+ defer delete(delta)
+ conversation_close()
+ target,e2:=os.make_directory_temp("","conversation-backlog-replay-*",context.allocator)
+ assert(e2==nil)
+ defer delete(target)
+ defer os.remove_all(target)
+ destination:=strings.clone_to_cstring(target)
+ defer delete(destination)
+ assert(conversation_init(destination))
+ assert(conversation_apply_archive(delta),string(conversation_error()))
+ testing.expect_value(t,scalar("SELECT count(*) FROM jobs WHERE processed=0"),12)
+ testing.expect_value(t,conversation_memory_count(),1)
+ testing.expect(t,strings.contains(string(conversation_context("unrelated")),`"source_ids":[1,16]`))
+ assert(conversation_apply_job(16,`{"memories":[],"first_job_id":9}`),string(conversation_error()))
+ for _ in 0..<4 {
+  assert(conversation_add_message("user","追いつく間にも会話が増える")>0)
+  assert(conversation_add_message("assistant","新しい会話も順番を守る")>0)
+ }
+ testing.expect(t,strings.contains(string(conversation_pending_job()),`"id":26`))
+ assert(conversation_apply_job(26,`{"memories":[],"first_job_id":17}`),string(conversation_error()))
+ testing.expect_value(t,scalar("SELECT count(*) FROM jobs WHERE processed=0"),0)
+ testing.expect_value(t,string(conversation_pending_job()),"{}")
+ testing.expect(t,strings.contains(string(conversation_context("unrelated")),`"processed_messages":48`))
+}
+
+@(test)
 short_term_context_keeps_thirty_exchanges_plus_current_input_with_escaped_long_text :: proc(t: ^testing.T) {
  dir,e:=os.make_directory_temp("","conversation-thirty-exchanges-*",context.allocator)
  assert(e==nil)

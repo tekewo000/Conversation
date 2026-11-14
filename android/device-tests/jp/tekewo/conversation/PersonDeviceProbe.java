@@ -44,6 +44,7 @@ public final class PersonDeviceProbe extends Instrumentation {
             if ("true".equals(arguments.getString("cleanup_only"))) cleanupOwned(getTargetContext(), probeId);
             else if ("snapshot-existing".equals(arguments.getString("mode"))) existingData(getTargetContext(), false);
             else if ("verify-existing".equals(arguments.getString("mode"))) existingData(getTargetContext(), true);
+            else if ("inspect-memory".equals(arguments.getString("mode"))) inspectMemory(getTargetContext());
             else runProbe(getTargetContext(), probeId);
             result.putString("stream", "PERSON_DEVICE_PROBE_PASS\n");
             finish(Activity.RESULT_OK, result);
@@ -119,6 +120,34 @@ public final class PersonDeviceProbe extends Instrumentation {
                 try (FileInputStream input = marker.openRead()) { check(MessageDigest.isEqual(encoded, readBounded(input, 1024 * 1024)), "Baseline marker was saved atomically"); }
             } finally { if (output != null) marker.failWrite(output); }
             report("PASS: saved release baseline containing only row digests/counts, UID, registry digest, and credential-presence booleans (" + databases.length() + " histories, " + messages + " messages, " + memories + " memories)");
+        }
+    }
+
+    private void inspectMemory(Context app) throws Exception {
+        File root = app.getFilesDir().getCanonicalFile();
+        JSONObject registry = new JSONObject(new String(Files.readAllBytes(new File(root, "people-registry.json").toPath()), StandardCharsets.UTF_8));
+        String id = registry.getString("active_id");
+        check(UUID.fromString(id).toString().equals(id), "Valid active person ID");
+        File people = new File(root, "people").getCanonicalFile();
+        File directory = new File(people, id).getCanonicalFile();
+        check(directory.getParentFile().equals(people), "Memory inspection stays under people");
+        File file = new File(directory, "conversation.sqlite3");
+        check(file.isFile() && !Files.isSymbolicLink(file.toPath()), "Memory database is an ordinary file");
+        try (SQLiteDatabase database = SQLiteDatabase.openDatabase(file.getPath(), null, SQLiteDatabase.OPEN_READONLY | SQLiteDatabase.NO_LOCALIZED_COLLATORS)) {
+            try (Cursor counts = database.rawQuery("SELECT (SELECT count(*) FROM messages),(SELECT coalesce(max(id),0) FROM messages),(SELECT count(*) FROM jobs WHERE processed=0),(SELECT coalesce(min(first_id),0) FROM jobs WHERE processed=0),(SELECT coalesce(max(end_id),0) FROM jobs WHERE processed=1),(SELECT count(*) FROM memories WHERE subject='episode' AND actor='conversation')", null)) {
+                check(counts.moveToFirst(), "Memory counts are readable");
+                report("MEMORY_STATUS " + new JSONObject().put("messages", counts.getLong(0)).put("latest_message_id", counts.getLong(1))
+                        .put("pending_jobs", counts.getLong(2)).put("first_pending_message", counts.getLong(3))
+                        .put("processed_through", counts.getLong(4)).put("indexed_scene_revisions", counts.getLong(5)));
+            }
+            try (Cursor rows = database.rawQuery("SELECT id,through_id,created_at,state FROM continuity_revisions ORDER BY id DESC LIMIT 10", null)) {
+                while (rows.moveToNext()) {
+                    JSONObject state = new JSONObject(rows.getString(3));
+                    report("MEMORY_REVISION " + new JSONObject().put("id", rows.getLong(0)).put("through_id", rows.getLong(1))
+                            .put("saved_at", rows.getString(2)).put("episodes", state.getJSONArray("episodes").length())
+                            .put("threads", state.getJSONArray("threads").length()).put("bytes", rows.getString(3).getBytes(StandardCharsets.UTF_8).length));
+                }
+            }
         }
     }
 

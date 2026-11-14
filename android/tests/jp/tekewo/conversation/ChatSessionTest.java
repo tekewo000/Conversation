@@ -48,6 +48,7 @@ public final class ChatSessionTest {
         public void memoryStatus(String error) { warning = error; }
     }
     public static void main(String[] arguments) throws Exception {
+        memoryBatchBoundaryComesFromTheStoreNotTheModel();
         memoryPayloadAcceptsThirtyDetailedScenesAndRejectsOversizedResults();
         cancelledRetrievalDoesNotStartTransport();
         replySavesFeelingWithoutAnotherRequestOrVisibleMetadata();
@@ -541,6 +542,22 @@ public final class ChatSessionTest {
         assert store.personaJob.length() == 0 : "empty changes must advance the review checkpoint";
     }
 
+    private static void memoryBatchBoundaryComesFromTheStoreNotTheModel() throws Exception {
+        Store store = new Store() {
+            @Override public JSONObject pending() throws Exception {
+                return pending ? super.pending().put("id", 8).put("first_job_id", 1) : new JSONObject();
+            }
+            @Override public void apply(long id, String payload) throws Exception {
+                assert id == 8 && new JSONObject(payload).getLong("first_job_id") == 1;
+                applied++; pending = false;
+            }
+        };
+        store.add("user", "まとめて整理する原文");
+        boolean more = new ChatSession(store).processMemories((instructions, input, delta) -> "{\"memories\":[],\"first_job_id\":999}");
+        assert !more : "Completed memory work must stop continuation";
+        assert store.applied == 1;
+    }
+
     private static void reflectionWaitsForThreeMemoryBatches() throws Exception {
         Store store = new Store() {
             @Override public void apply(long id, String payload) { assert id == 1; applied++; }
@@ -548,13 +565,14 @@ public final class ChatSessionTest {
         store.personaJob = reflectionJob();
         store.add("user", "今回の会話");
         int[] extracted = {0}, reflected = {0};
-        new ChatSession(store).processMemories((instructions, input, delta) -> {
+        boolean more = new ChatSession(store).processMemories((instructions, input, delta) -> {
             if (instructions.equals(ChatSession.EXTRACT)) { extracted[0]++; return "{\"memories\":[]}"; }
             assert extracted[0] == 3;
             reflected[0]++;
             return "{\"changes\":[]}";
         });
         assert store.applied == 3 && extracted[0] == 3 && reflected[0] == 1 && store.personaApplied == 1;
+        assert more : "A three-batch pass must report its remaining work for continuation";
     }
 
     private static void reflectionFailurePreservesReplyAndRetry() throws Exception {

@@ -359,7 +359,17 @@ conversation_message_id :: proc "c" (index: i32) -> i64 {
 conversation_pending_job :: proc "c" () -> cstring {
  context = runtime.default_context()
  if !ready { fail("History is not open."); return nil }
- return json_query(`SELECT coalesce((SELECT json_object('id',j.id,'messages',json((SELECT json_group_array(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END))) FROM (SELECT * FROM messages WHERE id BETWEEN j.first_id AND j.end_id ORDER BY id)))) FROM jobs j WHERE processed=0 ORDER BY id LIMIT 1),'{}') WHERE ?1=''`)
+ return json_query(`WITH candidates AS MATERIALIZED (
+ SELECT id,first_id,end_id,lag(end_id) OVER(ORDER BY id) AS previous_end FROM (SELECT * FROM jobs WHERE processed=0 ORDER BY id LIMIT 16)
+), sizes AS (
+ SELECT *, (SELECT count(*) FROM messages WHERE id BETWEEN j.first_id AND j.end_id) AS messages,
+ (SELECT sum(length(CAST(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END)) AS BLOB))+1) FROM messages WHERE id BETWEEN j.first_id AND j.end_id) AS bytes
+ FROM candidates j
+), budget AS (
+ SELECT *,sum(messages) OVER(ORDER BY id) AS message_count,sum(bytes) OVER(ORDER BY id) AS byte_count,
+ sum(CASE WHEN previous_end IS NOT NULL AND previous_end+1!=first_id THEN 1 ELSE 0 END) OVER(ORDER BY id) AS gaps FROM sizes
+), batch AS (SELECT * FROM budget WHERE message_count<=16 AND byte_count<=60001 AND gaps=0)
+SELECT coalesce((SELECT json_object('id',j.id,'first_job_id',(SELECT min(id) FROM batch),'messages',json((SELECT json_group_array(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END))) FROM (SELECT * FROM messages WHERE id BETWEEN (SELECT min(first_id) FROM batch) AND j.end_id ORDER BY id)))) FROM batch j ORDER BY j.id DESC LIMIT 1),'{}') WHERE ?1=''`)
 }
 
 insert_source :: proc(memory_id, message_id: i64) -> bool {
@@ -401,7 +411,13 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
  obj, obj_ok := root.(json.Object)
  items, items_ok := obj["memories"].(json.Array)
  if !obj_ok || !items_ok || len(items)>32 do return fail("Expected at most 32 memory records.")
- for key in obj { if key!="memories" && key!="continuity" do return fail("Unknown extraction result field.") }
+ for key in obj { if key!="memories" && key!="continuity" && key!="first_job_id" do return fail("Unknown extraction result field.") }
+ first_job_id:=job_id
+ if value,exists:=obj["first_job_id"]; exists {
+  first,valid:=value.(json.Integer)
+  if !valid || first<1 || i64(first)>job_id do return fail("Invalid memory batch boundary.")
+  first_job_id=i64(first)
+ }
  if !execute("BEGIN IMMEDIATE") do return false
  committed := false
  defer { archive_group=0; if !committed do execute("ROLLBACK") }
@@ -416,6 +432,30 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
   return committed
  }
  if !archive_begin() do return false
+ effective_job_id:=job_id
+ if first_job_id!=job_id {
+  batch:=prepare(`SELECT min(first_id),max(end_id),sum(end_id-first_id+1),count(*) FROM jobs
+   WHERE processed=0 AND id BETWEEN ?1 AND ?2 AND ?1=(SELECT min(id) FROM jobs WHERE processed=0)`)
+  if batch==nil do return false
+  valid:=bind_int(batch,1,first_job_id) && bind_int(batch,2,job_id) && sqlite3_step(batch)==100
+  first,span,count:i64
+  if valid {
+   first=sqlite3_column_int64(batch,0)
+   span=sqlite3_column_int64(batch,2)
+   count=sqlite3_column_int64(batch,3)
+   valid=sqlite3_column_int64(batch,1)==end_id && count>=2 && count<=16 && span==end_id-first+1 && span<=16
+  }
+  sqlite3_finalize(batch)
+  if !valid do return fail("Memory batches must cover contiguous pending work within sixteen messages.")
+  size:=prepare(`SELECT sum(length(CAST(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END)) AS BLOB))+1) FROM messages WHERE id BETWEEN ?1 AND ?2`)
+  if size==nil do return false
+  valid=bind_int(size,1,first) && bind_int(size,2,end_id) && sqlite3_step(size)==100 && sqlite3_column_int64(size,0)<=60001
+  sqlite3_finalize(size)
+  if !valid do return fail("Memory batch exceeds the source byte budget.")
+  if !insert_job(first,end_id) do return false
+  effective_job_id=scalar("SELECT max(id) FROM jobs")
+  if effective_job_id<1 do return false
+ }
  for value, ordinal in items {
   record, is_record := value.(json.Object)
   if !is_record do return fail("Every memory must be an object.")
@@ -471,7 +511,7 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
   }
   stmt := prepare("INSERT INTO memories(job_id,ordinal,kind,actor,subject,key,text,scope,certainty,supersedes_id,valid_from,status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,nullif(?10,0),coalesce(nullif(?11,''),(SELECT created_at FROM messages WHERE id=?12)),?13)")
   if stmt == nil do return false
-  valid := bind_int(stmt,1,job_id) && bind_int(stmt,2,i64(ordinal)) && bind_text(stmt,3,kind) && bind_text(stmt,4,actor) && bind_text(stmt,5,subject) && bind_text(stmt,6,key) && bind_text(stmt,7,text) && bind_text(stmt,8,scope) && bind_text(stmt,9,certainty) && bind_int(stmt,10,previous) && bind_text(stmt,11,date) && bind_int(stmt,12,i64(sources[0].(json.Integer))) && bind_text(stmt,13,status) && sqlite3_step(stmt)==101
+  valid := bind_int(stmt,1,effective_job_id) && bind_int(stmt,2,i64(ordinal)) && bind_text(stmt,3,kind) && bind_text(stmt,4,actor) && bind_text(stmt,5,subject) && bind_text(stmt,6,key) && bind_text(stmt,7,text) && bind_text(stmt,8,scope) && bind_text(stmt,9,certainty) && bind_int(stmt,10,previous) && bind_text(stmt,11,date) && bind_int(stmt,12,i64(sources[0].(json.Integer))) && bind_text(stmt,13,status) && sqlite3_step(stmt)==101
   sqlite3_finalize(stmt)
   if !valid do return fail("Could not save extracted memory.")
   memory_id := sqlite3_last_insert_rowid(db)
@@ -479,11 +519,18 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
   for src in sources { if !insert_source(memory_id, i64(src.(json.Integer))) do return false }
  }
  if state,exists:=obj["continuity"]; exists { if !continuity_save(end_id,state) do return false }
- done := prepare("UPDATE jobs SET processed=1 WHERE id=?1")
+ done := prepare("UPDATE jobs SET processed=1 WHERE processed=0 AND (id=?1 OR id BETWEEN ?2 AND ?3) RETURNING id")
  if done == nil do return false
- success := bind_int(done,1,job_id) && sqlite3_step(done)==101
+ success := bind_int(done,1,effective_job_id) && bind_int(done,2,first_job_id) && bind_int(done,3,job_id)
+ if success {
+  for {
+   step:=sqlite3_step(done)
+   if step==101 do break
+   if step!=100 || !archive_capture("jobs",sqlite3_column_int64(done,0),"update") { success=false; break }
+  }
+ }
  sqlite3_finalize(done)
- if !success || !archive_capture("jobs",job_id,"update") || !archive_finish() || !execute("COMMIT") do return false
+ if !success || !archive_finish() || !execute("COMMIT") do return false
  committed = true
  last_error = ""
  return true
@@ -546,6 +593,7 @@ conversation_memories :: proc "c" (query: cstring) -> cstring {
 }
 // Serialize only selected hits/recent rows, with explicit escaped-byte budgets.
 // shortcut: evidence is excerpted to 2048 characters; add range reads if long-message evaluations need omitted sections.
+MEMORY_PROGRESS_JSON :: `json_object('processed_messages',(SELECT count(*) FROM messages WHERE id<=coalesce((SELECT min(first_id)-1 FROM jobs WHERE processed=0),(SELECT max(end_id) FROM jobs WHERE processed=1),0)),'total_messages',(SELECT count(*) FROM messages),'pending_jobs',(SELECT count(*) FROM jobs WHERE processed=0))`
 CONTEXT_JSON :: `WITH RECURSIVE query_grams(i,token) AS (
  SELECT 1,substr(?1,1,3) UNION ALL SELECT i+1,substr(?1,i+1,3) FROM query_grams WHERE i<min(length(?1)-1,64)
 ), fts_hits AS MATERIALIZED (
@@ -613,7 +661,7 @@ CONTEXT_JSON :: `WITH RECURSIVE query_grams(i,token) AS (
 ), message_budget AS (
  SELECT id,category,row,sum(length(CAST(row AS BLOB))+1) OVER(PARTITION BY category ORDER BY priority,id DESC ROWS UNBOUNDED PRECEDING) AS bytes FROM message_rows
 )
-SELECT json_object('person',json(` + PERSON_JSON + `),'persona',json(` + PERSONA_JSON + `),'continuity',json(` + CONTINUITY_JSON + `),'messages',json((SELECT json_group_array(json(row)) FROM (SELECT row FROM message_budget WHERE bytes<=CASE category WHEN 0 THEN 786432 ELSE 20000 END ORDER BY id))),'memories',json((SELECT json_group_array(json(row)) FROM memory_budget WHERE bytes<=10000)))`
+SELECT json_object('person',json(` + PERSON_JSON + `),'persona',json(` + PERSONA_JSON + `),'continuity',json(` + CONTINUITY_JSON + `),'memory_progress',`+MEMORY_PROGRESS_JSON+`,'messages',json((SELECT json_group_array(json(row)) FROM (SELECT row FROM message_budget WHERE bytes<=CASE category WHEN 0 THEN 786432 ELSE 20000 END ORDER BY id))),'memories',json((SELECT json_group_array(json(row)) FROM memory_budget WHERE bytes<=10000)))`
 
 @(export)
 conversation_context :: proc "c" (query: cstring) -> cstring {

@@ -39,7 +39,7 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
  threads,threads_ok:=obj["threads"].(json.Array)
  episodes,episodes_ok:=obj["episodes"].(json.Array)
  if !threads_ok || !episodes_ok || len(threads)>6 || len(episodes)>30 do return fail("Expected at most six threads and thirty episodes.")
- boundary:=prepare(`SELECT first_id FROM jobs WHERE end_id=?1 AND end_id>(SELECT coalesce(max(through_id),0) FROM continuity_revisions)`)
+ boundary:=prepare(`SELECT min(first_id) FROM jobs WHERE end_id=?1 AND end_id>(SELECT coalesce(max(through_id),0) FROM continuity_revisions) HAVING count(*)>0`)
  if boundary==nil do return false
  valid:=bind_int(boundary,1,through_id) && sqlite3_step(boundary)==100
  first,job_first:i64
@@ -163,7 +163,7 @@ continuity_index_episode :: proc(through_id:i64, episode:json.Object) -> bool {
  sqlite3_finalize(current)
  if step!=100 && step!=101 do return fail("Could not read the previous scene memory.")
  if unchanged do return true
- stmt:=prepare("INSERT INTO memories(job_id,kind,actor,subject,key,text,scope,certainty,supersedes_id,valid_from) VALUES((SELECT id FROM jobs WHERE end_id=?1),'event','conversation','episode',?2,?3,?4,'explicit',nullif(?5,0),'')")
+ stmt:=prepare("INSERT INTO memories(job_id,kind,actor,subject,key,text,scope,certainty,supersedes_id,valid_from) VALUES((SELECT id FROM jobs WHERE end_id=?1 ORDER BY first_id LIMIT 1),'event','conversation','episode',?2,?3,?4,'explicit',nullif(?5,0),'')")
  if stmt==nil do return false
  saved:=bind_int(stmt,1,through_id) && bind_text(stmt,2,key) && bind_text(stmt,3,text) && bind_text(stmt,4,scope) && bind_int(stmt,5,previous) && sqlite3_step(stmt)==101
  sqlite3_finalize(stmt)
