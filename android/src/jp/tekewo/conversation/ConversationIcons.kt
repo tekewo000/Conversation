@@ -10,6 +10,12 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.dp
 
 internal object ConversationIcons {
+    val Back = strokeVector("ConversationBack", 1.8f) {
+        moveTo(14f, 5f); lineTo(7f, 12f); lineTo(14f, 19f)
+    }
+    val Chevron = strokeVector("ConversationChevron", 1.65f) {
+        moveTo(9f, 6f); lineTo(15f, 12f); lineTo(9f, 18f)
+    }
     val Add = strokeVector("ConversationAdd", 1.8f) {
         moveTo(5f, 12f); lineTo(19f, 12f)
         moveTo(12f, 5f); lineTo(12f, 19f)

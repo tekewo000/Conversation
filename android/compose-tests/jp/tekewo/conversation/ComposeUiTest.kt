@@ -21,6 +21,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performKeyInput
@@ -50,6 +51,42 @@ class ComposeUiTest {
 
     private fun install() {
         ui = ComposeUi(compose.activity, { menus++ }, { sends++ }, { pages.add(it) })
+    }
+
+    @Test fun returningFromPagePreservesParentScrollAndTheChatDraft() {
+        compose.runOnUiThread {
+            install(); ui.enabled = true; ui.draft = "保存しておく下書き"
+            val root = ComposeUi.Panel("管理")
+            root.key = "management"
+            repeat(40) { index -> root.rows.add(ComposeUi.Row("項目$index", {})) }
+            root.rows.add(ComposeUi.Row("体験を開く", {
+                ui.showPage(ComposeUi.Panel("体験の詳細").apply { key = "detail"; message = "体験の本文" })
+            }))
+            ui.showRoot(root)
+        }
+        compose.onNodeWithContentDescription("メッセージ入力").assertDoesNotExist()
+        compose.onNodeWithText("体験を開く").performScrollTo().performClick()
+        compose.onNodeWithText("体験の本文").assertIsDisplayed()
+        compose.onNodeWithContentDescription("戻る").performClick()
+        compose.onNodeWithText("体験を開く").assertIsDisplayed()
+        compose.onNodeWithContentDescription("戻る").performClick()
+        compose.onNodeWithContentDescription("メッセージ入力").assertTextEquals("保存しておく下書き")
+    }
+
+    @Test fun cancelledSecretPanelClearsItsDraftAndKeepsTheParentPage() {
+        lateinit var token: ComposeUi.Field
+        compose.runOnUiThread {
+            install()
+            ui.showRoot(ComposeUi.Panel("設定").apply { key = "settings" })
+            val secret = ComposeUi.Panel("秘密の入力").apply { secure = true }
+            token = ComposeUi.Field("トークン", true)
+            secret.fields.add(token)
+            ui.show(secret)
+        }
+        compose.onNodeWithContentDescription("トークン").performTextInput("synthetic-secret")
+        compose.onNodeWithText("閉じる").performClick()
+        compose.onNodeWithText("設定").assertIsDisplayed()
+        compose.runOnIdle { assertEquals("", token.value) }
     }
 
     @Test fun longPressOffersContextNotesWithoutSendingAnOrdinaryMessage() {

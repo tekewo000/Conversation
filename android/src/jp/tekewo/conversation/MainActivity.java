@@ -104,6 +104,11 @@ public final class MainActivity extends ComponentActivity {
         compose = new ComposeUi(this, this::showHistoryMenu, this::sendMessage, first -> {
             pageFirst = first; refreshMessages();
         });
+        compose.setOnPageChanged(key -> {
+            memoryView = key.equals("memory") ? 1 : key.equals("recent") ? 2 : key.equals("episodes") ? 3
+                    : key.startsWith("episode:") ? 4 : 0;
+            episodeRequest++;
+        });
         applyTypography();
         compose.setOnAttach(this::showAttachments);
         try {
@@ -199,6 +204,7 @@ public final class MainActivity extends ComponentActivity {
             refreshMessages();
             if (semanticMemory != null) semanticMemory.refresh();
             if (memoryView != 0) refreshMemoryView();
+            else if (compose.isPageVisible("management", compose.getPageVersion())) showHistoryMenu();
         });
         queueMemories(null);
         scheduleGitSync();
@@ -289,6 +295,7 @@ public final class MainActivity extends ComponentActivity {
         busy = value;
         compose.setEnabled(ready && activePerson != null && !changingPerson);
         compose.setSending(value);
+        if (compose.isPageVisible("management", compose.getPageVersion())) showHistoryMenu();
     }
 
     private ChatRequest selectedRequest() throws Exception {
@@ -471,46 +478,116 @@ public final class MainActivity extends ComponentActivity {
 
     private void showHistoryMenu() {
         if (!ready) return;
-        ComposeUi.Panel menu = new ComposeUi.Panel("メニュー");
-        menu.sheet = true;
-        menu.rows.add(new ComposeUi.Row("会話", () -> { pageFirst = -1; scrollOnRefresh = true; refreshMessages(); }, 0));
-        menu.rows.add(new ComposeUi.Row("人物", this::showPeople, 2));
-        menu.rows.add(new ComposeUi.Row("表示設定", this::showDisplaySettings, 4));
-        menu.rows.add(new ComposeUi.Row("ChatGPT", this::showConnection, 5));
-        menu.rows.add(new ComposeUi.Row("画像生成API", this::showImageApiSettings, 5));
-        if (activePerson != null) menu.rows.add(new ComposeUi.Row("Gitバックアップ", this::showGitBackup, 1));
+        ComposeUi.Panel menu = page("管理", "management", true);
+        menu.message = "会話の相手と記憶、アプリの設定を管理します。";
+        menu.onResume = this::showHistoryMenu;
+        menu.rows.add(entry("人物", activePerson == null ? "名前だけでも始められます" : "切り替え・アイコン・追加と読み込み", 2, this::showPeople));
+        menu.rows.add(entry("記憶", MemoryWork.isRunning() ? "会話を整理しています" : "今の状態・最近の会話・体験の記憶", 3, this::showMemory));
+        menu.rows.add(entry("設定", connection.hasSession() ? "ChatGPT接続済み · 応答・表示・画像生成" : "ChatGPTの接続・応答・表示・画像生成", 4, this::showSettings));
+        menu.rows.add(entry("バックアップ", activePerson == null || activePerson.repository == null ? "端末の保存データ・ZIP書き出し" : "GitHubへの保存・ZIP書き出し", 1, this::showGitBackup));
+        menu.rows.add(entry("最新の会話へ", "チャットの最新の発言を表示", 0, () -> {
+            compose.closePages(); pageFirst = -1; scrollOnRefresh = true; refreshMessages();
+        }));
         if (busy) menu.rows.add(new ComposeUi.Row("応答を停止", () -> {
             session.cancel(); connection.cancelReply(); imageApi.cancel(); compose.cancelReply(); refreshMessages();
         }, 6));
-        compose.show(menu);
+        compose.showRoot(menu);
+    }
+
+    private ComposeUi.Panel page(String title, String key, boolean person) {
+        ComposeUi.Panel panel = new ComposeUi.Panel(title);
+        panel.key = key;
+        panel.subtitle = person ? activePerson == null ? "人物が選択されていません" : activePerson.name : "アプリ共通";
+        return panel;
+    }
+
+    private static ComposeUi.Row entry(String label, String description, int icon, Runnable action) {
+        ComposeUi.Row row = new ComposeUi.Row(label, action, icon);
+        row.description = description;
+        return row;
+    }
+
+    private void refreshManagementStatus() {
+        String key = compose.getPageKey();
+        if (!compose.isPageVisible(key, compose.getPageVersion())) return;
+        if (key.equals("backup")) showGitBackup();
+        else if (key.equals("management")) showHistoryMenu();
+    }
+
+    private void showSettings() {
+        ComposeUi.Panel panel = page("設定", "settings", false);
+        panel.onResume = this::showSettings;
+        panel.rows.add(entry("ChatGPT", connection.hasSession() ? "接続済み · アカウントと利用状況" : "未接続 · ログインして会話を始める", 5, this::showConnection));
+        panel.rows.add(entry("モデルと応答", "モデル・Effort・Fast", 0, this::showResponseSettings));
+        panel.rows.add(entry("画像生成API", "画像生成だけに使う、有料APIの接続", 3, this::showImageApiSettings));
+        panel.rows.add(entry("表示設定", "文字サイズ・メッセージの間隔", 4, this::showDisplaySettings));
+        compose.showPage(panel);
+    }
+
+    private void showResponseSettings() {
+        ComposeUi.Panel panel = page("モデルと応答", "response", false);
+        panel.onResume = this::showResponseSettings;
+        panel.message = "会話と記憶の整理に使うモデルを選びます。変更できる項目はモデルによって異なります。";
+        if (connection.hasSession()) addRequestSettings(panel);
+        else panel.rows.add(entry("ChatGPTに接続", "ログイン後にモデルを選べます", 5, this::showConnection));
+        compose.showPage(panel);
+    }
+
+    private void refreshResponseSettings() {
+        if (compose.getPageKey().equals("response")) showResponseSettings();
+        else if (compose.getPageKey().equals("connection")) showConnection();
     }
 
     private void showConnection() {
-        ComposeUi.Panel panel = new ComposeUi.Panel("ChatGPT");
-        panel.sheet = true;
+        ComposeUi.Panel panel = page("ChatGPT", "connection", false);
+        panel.onResume = this::showConnection;
         panel.message = connection.hasSession()
                 ? connection.accountLabel() + "\nChatGPTの利用枠を使用します。\n" + connectionStatus
-                        + "\n" + (MemoryWork.isRunning() ? "記憶をバックグラウンドで整理しています。会話は続けられます。" : memoryStatus)
-                        + "\n" + semanticStatus
-                : "ChatGPTにログインして、このアプリでサブスクの利用枠を使います。\n" + connectionStatus + "\n" + semanticStatus;
+                : "ChatGPTにログインして、このアプリでサブスクの利用枠を使います。\n" + connectionStatus;
         if (!connection.hasSession()) {
             panel.rows.add(new ComposeUi.Row("Continue with ChatGPT", () -> {
                 if (busy) return;
                 connectionStatus = "ブラウザでの認証を待っています";
-                connection.signIn(error -> ui(() -> {
-                    availableModels = null;
-                    connectionStatus = error == null ? "ChatGPTに接続しました" : error;
-                    if (error != null) showError(error);
-                    else if (!getPreferences(MODE_PRIVATE).getBoolean("plan_welcome", false)) {
-                        getPreferences(MODE_PRIVATE).edit().putBoolean("plan_welcome", true).apply();
-                        ComposeUi.Panel welcome = new ComposeUi.Panel("ChatGPTに接続しました");
-                        welcome.message = "会話と記憶の整理にChatGPTの利用枠を使います。利用状況はメニューのChatGPTから確認できます。";
-                        welcome.rows.add(new ComposeUi.Row("会話を始める", this::retryMemories));
-                        compose.show(welcome);
-                    } else retryMemories();
-                }));
+                final int version = compose.getPageVersion();
+                connection.signIn(error -> ui(() -> finishSignIn(error, version)));
             }, 5));
-        } else {
+        } else addRequestSettings(panel);
+        ComposeUi.Row signOut = new ComposeUi.Row(connection.hasSession() ? "ログアウト" : "保存した接続情報をリセット", () -> {
+            if (busy) return;
+            MemoryWork.cancel(this);
+            final int version = compose.getPageVersion();
+            worker.execute(() -> {
+                connection.signOut(); availableModels = null;
+                ui(() -> { connectionStatus = connection.signOutStatus();
+                    if (compose.isPageVisible("connection", version)) showConnection(); });
+            });
+        }, 6);
+        signOut.destructive = true;
+        signOut.section = "接続の管理";
+        panel.rows.add(new ComposeUi.Row("利用状況を確認", this::openUsage, 1));
+        panel.rows.add(signOut);
+        compose.showPage(panel);
+    }
+
+    private void finishSignIn(String error, int version) {
+        availableModels = null;
+        connectionStatus = error == null ? "ChatGPTに接続しました" : error;
+        if (!compose.isPageVisible("connection", version)) {
+            if (error == null) retryMemories();
+            return;
+        }
+        if (error != null) { showError(error); return; }
+        showConnection();
+        if (!getPreferences(MODE_PRIVATE).getBoolean("plan_welcome", false)) {
+            getPreferences(MODE_PRIVATE).edit().putBoolean("plan_welcome", true).apply();
+            ComposeUi.Panel welcome = new ComposeUi.Panel("ChatGPTに接続しました");
+            welcome.message = "会話と記憶の整理にChatGPTの利用枠を使います。利用状況は設定のChatGPTから確認できます。";
+            welcome.rows.add(new ComposeUi.Row("会話を始める", () -> { compose.closePages(); retryMemories(); }));
+            compose.show(welcome);
+        } else retryMemories();
+    }
+
+    private void addRequestSettings(ComposeUi.Panel panel) {
             String slug = getPreferences(MODE_PRIVATE).getString("model_slug", "");
             String name = slug.isEmpty() ? "既定" : slug;
             String effort = getPreferences(MODE_PRIVATE).getString("reasoning_effort:" + slug, "");
@@ -523,17 +600,6 @@ public final class MainActivity extends ComponentActivity {
             panel.rows.add(new ComposeUi.Row("モデル · " + name, this::showModels, 4));
             panel.rows.add(new ComposeUi.Row("Effort · " + (effort.isEmpty() ? "既定" : effort), () -> showRequestOption(false), 4));
             panel.rows.add(new ComposeUi.Row("Fast · " + (fast ? "On" : "Off"), () -> showRequestOption(true), 4));
-        }
-        panel.rows.add(new ComposeUi.Row(connection.hasSession() ? "ログアウト" : "保存した接続情報をリセット", () -> {
-            if (busy) return;
-            MemoryWork.cancel(this);
-            worker.execute(() -> {
-                connection.signOut(); availableModels = null;
-                ui(() -> { connectionStatus = connection.signOutStatus(); showConnection(); });
-            });
-        }, 6));
-        panel.rows.add(new ComposeUi.Row("利用状況を確認", this::openUsage, 1));
-        compose.show(panel);
     }
 
     private void showImageApiSettings() {
@@ -573,6 +639,7 @@ public final class MainActivity extends ComponentActivity {
 
     private void showModels() {
         if (busy) return;
+        final int version = compose.getPageVersion();
         worker.execute(() -> {
             try {
                 List<ChatRequest.Model> models = connection.listModels();
@@ -584,37 +651,38 @@ public final class MainActivity extends ComponentActivity {
                 for (int i = 0; i < models.size(); i++) if (models.get(i).slug.equals(selected)) checked = i;
                 final int selectedIndex = checked;
                 ui(() -> {
-                    if (busy || !connection.hasSession()) return;
+                    if (busy || !connection.hasSession() || version != compose.getPageVersion()) return;
                     ComposeUi.Panel panel = new ComposeUi.Panel("モデル · ChatGPTの利用枠");
                     panel.choices = true;
-                    panel.onDismiss = this::showConnection;
+                    panel.onDismiss = this::refreshResponseSettings;
                     for (int i = 0; i < models.size(); i++) {
                         final int index = i;
                         ComposeUi.Row row = new ComposeUi.Row(names[i], () -> {
                             if (busy) return;
                             getPreferences(MODE_PRIVATE).edit().putString("model_slug", models.get(index).slug).apply();
-                            showConnection();
+                            refreshResponseSettings();
                         });
                         row.checked = i == selectedIndex; panel.rows.add(row);
                     }
                     compose.show(panel);
                 });
 
-            } catch (Exception error) { ui(() -> showError(safeError(error))); }
+            } catch (Exception error) { ui(() -> { if (version == compose.getPageVersion()) showError(safeError(error)); }); }
         });
     }
 
     private void showRequestOption(boolean fast) {
         if (busy) return;
+        final int version = compose.getPageVersion();
         worker.execute(() -> {
             try {
                 ChatRequest request = selectedRequest();
                 ChatRequest.Model model = request.model;
                 ui(() -> {
-                    if (busy || !connection.hasSession()) return;
+                    if (busy || !connection.hasSession() || version != compose.getPageVersion()) return;
                     ComposeUi.Panel panel = new ComposeUi.Panel((fast ? "Fast" : "Effort") + " · " + model.displayName);
                     panel.choices = true;
-                    panel.onDismiss = this::showConnection;
+                    panel.onDismiss = this::refreshResponseSettings;
                     if (fast ? !model.supportsFast : model.efforts.isEmpty()) {
                         panel.message = model.displayName + (fast ? "ではFastを利用できません。" : "ではEffortを変更できません。");
                     } else {
@@ -628,7 +696,7 @@ public final class MainActivity extends ComponentActivity {
                                 if (busy) return;
                                 if (fast) getPreferences(MODE_PRIVATE).edit().putBoolean("fast_mode:" + model.slug, index == 1).apply();
                                 else getPreferences(MODE_PRIVATE).edit().putString("reasoning_effort:" + model.slug, values.get(index)).apply();
-                                showConnection();
+                                refreshResponseSettings();
                             });
                             row.checked = fast ? (request.fast ? i == 1 : i == 0) : values.get(i).equals(request.effort);
                             panel.rows.add(row);
@@ -636,7 +704,7 @@ public final class MainActivity extends ComponentActivity {
                     }
                     compose.show(panel);
                 });
-            } catch (Exception error) { ui(() -> showError(safeError(error))); }
+            } catch (Exception error) { ui(() -> { if (version == compose.getPageVersion()) showError(safeError(error)); }); }
         });
     }
 
@@ -648,8 +716,9 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void showPeople() {
-        ComposeUi.Panel panel = new ComposeUi.Panel("人物");
-        panel.sheet = true;
+        ComposeUi.Panel panel = page("人物", "people", true);
+        panel.onResume = this::showPeople;
+        panel.message = "話す相手を選ぶと、その人物の会話と下書きに切り替わります。";
         if (activePerson != null) panel.rows.add(new ComposeUi.Row("人物アイコンを設定", this::showPersonIcon, 2));
         panel.rows.add(new ComposeUi.Row("人物を追加", () -> {
             if (busy || MemoryWork.isRunning()) { showError("応答と記憶の整理が終わってから追加してください。"); return; }
@@ -670,7 +739,8 @@ public final class MainActivity extends ComponentActivity {
             if (busy || MemoryWork.isRunning()) { showError("応答と記憶の整理が終わってから削除してください。"); return; }
             showDeletePeople();
         }, 6));
-        compose.show(panel);
+        panel.rows.get(panel.rows.size() - 1).destructive = !people.list().isEmpty();
+        compose.showPage(panel);
     }
 
     private void refreshPersonIcon() {
@@ -687,6 +757,13 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void showMemory() {
+        ComposeUi.Panel loading = page("記憶", "memory", true);
+        loading.onResume = this::refreshMemoryView;
+        if (activePerson == null) {
+            loading.message = "人物を追加すると、会話と記憶を確認できます。";
+            loading.rows.add(entry("人物を追加・読み込む", "人物の管理へ", 2, this::showPeople));
+        } else loading.loading = true;
+        compose.showPage(loading);
         memoryView = 1;
         refreshMemoryView();
     }
@@ -696,6 +773,8 @@ public final class MainActivity extends ComponentActivity {
         if (requestedView == 0 || requestedView == 4) return;
         final PersonRegistry.Person person = activePerson;
         if (person == null || changingPerson) return;
+        final int version = compose.getPageVersion();
+        final String key = compose.getPageKey();
         reader.execute(() -> {
             try {
                 final JSONObject snapshot;
@@ -709,32 +788,42 @@ public final class MainActivity extends ComponentActivity {
                 final boolean rebuilding = MemoryRebuild.pending(person.directory);
                 final String rebuildStatus = rebuilding ? new MemoryRebuild(person.directory).status() : "";
                 ui(() -> {
-                    if (requestedView != memoryView || changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
+                    if (!compose.isPageVisible(key, version) || requestedView != memoryView || changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
                     if (requestedView != 1) { showMemoryHistory(person, snapshot, requestedView == 3); return; }
                     JSONObject continuity = snapshot.optJSONObject("continuity");
                     JSONObject current = continuity == null ? null : continuity.optJSONObject("assistant_state");
                     JSONObject state = current == null ? new JSONObject() : current;
                     org.json.JSONArray episodes = continuity == null ? null : continuity.optJSONArray("episodes");
-                    ComposeUi.Panel panel = new ComposeUi.Panel("記憶"); panel.sheet = true;
-                    panel.onDismiss = () -> memoryView = 0;
-                    panel.message = "感情\n" + state.optString("emotion", "未記録")
+                    ComposeUi.Panel panel = page("記憶", "memory", true);
+                    panel.onResume = this::refreshMemoryView;
+                    panel.blocks.add(new ComposeUi.Block("現在の状態", "感情\n" + state.optString("emotion", "未記録")
                             + "\n\n理由\n" + state.optString("reason", "未記録")
-                            + "\n\n状況\n" + state.optString("event", "未記録");
+                            + "\n\n状況\n" + state.optString("event", "未記録")));
                     JSONObject progress = snapshot.optJSONObject("memory_progress");
                     if (progress != null) {
                         long processed = progress.optLong("processed_messages"), total = progress.optLong("total_messages");
-                        panel.message += "\n\n会話の記憶整理\n" + processed + " / " + total + " 発言（残り" + Math.max(0, total - processed) + "発言）";
+                        panel.blocks.add(new ComposeUi.Block("会話の記憶整理", processed + " / " + total + " 発言（残り" + Math.max(0, total - processed) + "発言）"));
                     }
-                    if (rebuilding) panel.message += "\n\n" + rebuildStatus;
-                    if (!memoryStatus.isEmpty()) panel.message += "\n\n" + memoryStatus;
-                    panel.rows.add(new ComposeUi.Row("短期記憶（直近30往復）", () -> showMemoryHistory(person, snapshot, false)));
-                    panel.rows.add(new ComposeUi.Row("中期記憶（" + (episodes == null ? 0 : episodes.length()) + "件）",
-                            () -> showMemoryHistory(person, snapshot, true)));
-                    if (!rebuilding) panel.rows.add(new ComposeUi.Row("過去の記憶を階層に整理", this::requestMemoryRebuild));
-                    panel.rows.add(new ComposeUi.Row("人物アイコンを設定", () -> { memoryView = 0; showPersonIcon(); }, 2));
-                    compose.show(panel);
+                    if (rebuilding) panel.blocks.add(new ComposeUi.Block("過去の会話の再整理", rebuildStatus));
+                    if (!memoryStatus.isEmpty()) panel.blocks.add(new ComposeUi.Block("処理状況", memoryStatus));
+                    panel.rows.add(entry("短期記憶（直近30往復）", "最近の会話を原文で読む", 0, () -> showMemoryHistory(person, snapshot, false)));
+                    panel.rows.add(entry("中期記憶（" + (episodes == null ? 0 : episodes.length()) + "件）",
+                            "体験の一覧から日・場面・出来事へ", 3, () -> showMemoryHistory(person, snapshot, true)));
+                    if (!rebuilding) {
+                        ComposeUi.Row rebuild = entry("過去の記憶を階層に整理", "ChatGPTの利用枠を使い、過去の会話を読み直します", 4, this::requestMemoryRebuild);
+                        rebuild.section = "整理の操作"; panel.rows.add(rebuild);
+                    }
+                    if (!semanticStatus.isEmpty()) panel.blocks.add(new ComposeUi.Block("端末内の検索", semanticStatus));
+                    compose.showPage(panel);
                 });
-            } catch (Exception error) { ui(() -> showError(safeError(error))); }
+            } catch (Exception error) { ui(() -> {
+                if (!compose.isPageVisible(key, version)) return;
+                ComposeUi.Panel failed = page(requestedView == 1 ? "記憶" : requestedView == 2 ? "短期記憶" : "中期記憶", key, true);
+                failed.message = safeError(error);
+                failed.rows.add(entry("再読み込み", "保存済みの記憶をもう一度読みます", 4, this::refreshMemoryView));
+                failed.onResume = this::refreshMemoryView;
+                compose.showPage(failed);
+            }); }
         });
     }
 
@@ -749,6 +838,8 @@ public final class MainActivity extends ComponentActivity {
         panel.onDismiss = this::showMemory;
         panel.confirm = () -> {
             compose.hide();
+            final int version = compose.getPageVersion();
+            final String origin = compose.getPageKey();
             worker.execute(() -> {
                 try {
                     synchronized (storeGate) {
@@ -759,8 +850,13 @@ public final class MainActivity extends ComponentActivity {
                         new MemoryRebuild(person.directory).request(total);
                     }
                     MemoryWork.resume(getApplicationContext());
-                    ui(this::showMemory);
-                } catch (Exception error) { ui(() -> showError(safeError(error))); }
+                    ui(() -> {
+                        if (activePerson != null && person.id.equals(activePerson.id) && compose.isPageVisible(origin, version)) showMemory();
+                        else refreshManagementStatus();
+                    });
+                } catch (Exception error) { ui(() -> {
+                    if (compose.isPageVisible(origin, version)) showError(safeError(error));
+                }); }
             });
         };
         compose.show(panel);
@@ -769,7 +865,8 @@ public final class MainActivity extends ComponentActivity {
     private void showMemoryHistory(PersonRegistry.Person person, JSONObject snapshot, boolean middleTerm) {
         memoryView = middleTerm ? 3 : 2;
         if (changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
-        ComposeUi.Panel panel = new ComposeUi.Panel(middleTerm ? "中期記憶" : "短期記憶"); panel.sheet = true;
+        ComposeUi.Panel panel = page(middleTerm ? "中期記憶" : "短期記憶", middleTerm ? "episodes" : "recent", true);
+        panel.onResume = this::refreshMemoryView;
         JSONObject continuity = snapshot.optJSONObject("continuity");
         org.json.JSONArray entries = middleTerm
                 ? (continuity == null ? null : continuity.optJSONArray("episodes")) : snapshot.optJSONArray("messages");
@@ -785,22 +882,23 @@ public final class MainActivity extends ComponentActivity {
                 JSONObject entry = entries.optJSONObject(i);
                 if (entry == null) continue;
                 if (middleTerm) {
-                    panel.rows.add(new ComposeUi.Row(episodeDescription(entry), () -> showEpisodeNode(person,
-                            entry.optString("key"), entry, () -> { memoryView = 3; refreshMemoryView(); }, 0)));
+                    String description = episodeDescription(entry);
+                    int split = description.indexOf('\n');
+                    panel.rows.add(entry(description.substring(0, split), description.substring(split + 1), 3,
+                            () -> showEpisodeNode(person, entry.optString("key"), entry, 0)));
                 } else {
-                    text.append("\n\n");
                     boolean user = entry.optString("role").equals("user");
                     String annotation = entry.optString("annotation");
-                    text.append(annotation.equals("scene") ? "情景（返信なし）" : annotation.equals("meta") ? "メタ（返信なし）" : user ? "あなた" : person.name).append("\n");
+                    String speaker = annotation.equals("scene") ? "情景（返信なし）" : annotation.equals("meta") ? "メタ（返信なし）" : user ? "あなた" : person.name;
                     String content = entry.optString("content");
-                    text.append(user ? content : ReplyText.visible(content, true));
-                    if (entry.optBoolean("truncated")) text.append("\n（長文のため一部を表示）");
+                    String body = user ? content : ReplyText.visible(content, true);
+                    if (entry.optBoolean("truncated")) body += "\n（長文のため一部を表示）";
+                    panel.blocks.add(new ComposeUi.Block(speaker, body));
                 }
             }
         }
         panel.message = text.toString();
-        panel.onDismiss = this::showMemory;
-        compose.show(panel);
+        compose.showPage(panel);
     }
 
     private static String episodeDescription(JSONObject entry) {
@@ -811,8 +909,14 @@ public final class MainActivity extends ComponentActivity {
         return text + "\n" + (scope.equals("fiction") ? "創作の場面" : scope.equals("real") ? "現実の出来事" : "会話内の体験");
     }
 
-    private void showEpisodeNode(PersonRegistry.Person person, String rootKey, JSONObject node, Runnable back, long afterId) {
-        memoryView = 4;
+    private void showEpisodeNode(PersonRegistry.Person person, String rootKey, JSONObject node, long afterId) {
+        String key = "episode:" + new org.json.JSONArray().put(rootKey).put(node.optString("key")).put(afterId);
+        Runnable reload = () -> showEpisodeNode(person, rootKey, node, afterId);
+        if (!compose.getPageKey().equals(key)) {
+            ComposeUi.Panel loading = page(node.optString("scene", "体験の詳細"), key, true);
+            loading.loading = true; loading.onResume = reload; compose.showPage(loading);
+        }
+        final int version = compose.getPageVersion();
         int requested = ++episodeRequest;
         reader.execute(() -> {
             try {
@@ -827,29 +931,36 @@ public final class MainActivity extends ComponentActivity {
                     page = new JSONObject(result);
                 }
                 ui(() -> {
-                    if (memoryView != 4 || requested != episodeRequest || changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
-                    ComposeUi.Panel panel = new ComposeUi.Panel(node.optString("scene", "体験の詳細")); panel.sheet = true;
+                    if (!compose.isPageVisible(key, version) || memoryView != 4 || requested != episodeRequest || changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
+                    ComposeUi.Panel panel = page(node.optString("scene", "体験の詳細"), key, true);
+                    panel.onResume = reload;
                     panel.message = episodeDescription(node);
                     org.json.JSONArray children = page.optJSONArray("episodes");
                     if (children != null) for (int i = 0; i < children.length(); i++) {
                         JSONObject child = children.optJSONObject(i);
                         if (child == null) continue;
                         String label = child.optString("scene");
-                        panel.rows.add(new ComposeUi.Row((label.isEmpty() ? "出来事" : label) + "\n" + child.optString("text"),
-                                () -> showEpisodeNode(person, rootKey, child, () -> showEpisodeNode(person, rootKey, node, back, 0), 0)));
+                        panel.rows.add(entry(label.isEmpty() ? "出来事" : label, child.optString("text"), 3,
+                                () -> showEpisodeNode(person, rootKey, child, 0)));
                     }
                     if (page.optBoolean("has_more")) panel.rows.add(new ComposeUi.Row("次の詳細を表示",
-                            () -> showEpisodeNode(person, rootKey, node, back, page.optLong("after_id"))));
-                    panel.onDismiss = back;
-                    compose.show(panel);
+                            () -> showEpisodeNode(person, rootKey, node, page.optLong("after_id"))));
+                    compose.showPage(panel);
                 });
-            } catch (Exception error) { ui(() -> { if (requested == episodeRequest) { back.run(); showError(safeError(error)); } }); }
+            } catch (Exception error) { ui(() -> {
+                if (!compose.isPageVisible(key, version) || requested != episodeRequest) return;
+                ComposeUi.Panel failed = page("体験を読み込めませんでした", key, true);
+                failed.message = safeError(error); failed.onResume = reload;
+                failed.rows.add(entry("再読み込み", "体験の詳細をもう一度読みます", 4, reload));
+                compose.showPage(failed);
+            }); }
         });
     }
 
     private void showPersonIcon() {
         if (activePerson == null) return;
-        ComposeUi.Panel panel = new ComposeUi.Panel("人物アイコン"); panel.sheet = true;
+        ComposeUi.Panel panel = page("人物アイコン", "person-icon", true);
+        panel.message = "この人物の会話に表示するアイコンを選びます。";
         panel.rows.add(new ComposeUi.Row("写真・画像から選ぶ", () -> {
             pendingIconPersonId = activePerson.id;
             startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*")
@@ -862,7 +973,7 @@ public final class MainActivity extends ComponentActivity {
                 catch (Exception error) { ui(() -> showError(safeError(error))); }
             });
         }, 6));
-        compose.show(panel);
+        compose.showPage(panel);
     }
 
     private void showNewPerson() {
@@ -880,7 +991,8 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void showDeletePeople() {
-        ComposeUi.Panel panel = new ComposeUi.Panel("削除する人物");
+        ComposeUi.Panel panel = page("削除する人物", "delete-people", false);
+        panel.message = "削除する人物を選ぶと、削除内容を確認できます。";
         for (PersonRegistry.Person person : people.list()) panel.rows.add(new ComposeUi.Row(person.name, () -> {
             ComposeUi.Panel confirm = new ComposeUi.Panel(person.name + "を削除しますか？");
             confirm.message = "この端末の人物・会話・記憶・下書きを削除します。元には戻せません。\nGitHub上のバックアップと、書き出したZIPは残ります。";
@@ -889,7 +1001,7 @@ public final class MainActivity extends ComponentActivity {
             confirm.confirm = () -> { compose.hide(); deletePerson(person); };
             compose.show(confirm);
         }, 5));
-        compose.show(panel);
+        compose.showPage(panel);
     }
 
     private void deletePerson(PersonRegistry.Person person) {
@@ -1036,19 +1148,23 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void showGitBackup() {
-        if (activePerson == null) return;
-        ComposeUi.Panel panel = new ComposeUi.Panel("Gitバックアップ");
-        panel.sheet = true;
-        panel.message = activePerson.repository == null
-                ? activePerson.name + "\n会話と記憶はこの端末に保存しています。ZIPに書き出して保管できます。"
-                : activePerson.name + "\n" + activePerson.repository + "\n" + gitStatus
-                  + "\n会話の原文・人物ファイル・出来事と記憶の更新履歴を非公開リポジトリへ保存します。";
+        ComposeUi.Panel panel = page("バックアップ", "backup", true);
+        panel.onResume = this::showGitBackup;
+        if (activePerson == null) {
+            panel.message = "人物を追加すると、その人物の会話と記憶を書き出せます。";
+            panel.rows.add(entry("人物を追加・読み込む", "人物の管理へ", 2, this::showPeople));
+            compose.showPage(panel); return;
+        }
+        panel.blocks.add(new ComposeUi.Block("この端末", "会話と記憶は、この人物の端末内データに保存されています。"));
+        panel.blocks.add(new ComposeUi.Block("GitHubへの保存", activePerson.repository == null
+                ? "この人物はGitHubに接続していません。ZIPに書き出して保管できます。"
+                : activePerson.repository + "\n" + (gitStatus.isEmpty() ? "保存状況は、次回のGit保存時に更新されます。" : gitStatus)));
         if (activePerson.repository != null) {
             panel.rows.add(new ComposeUi.Row("今すぐ保存", () -> queueGitSync(true), 1));
             panel.rows.add(new ComposeUi.Row("GitHubトークンを設定", this::editGitToken, 4));
         }
-        panel.rows.add(new ComposeUi.Row("端末からZIPを書き出す", this::exportArchive, 1));
-        compose.show(panel);
+        panel.rows.add(entry("端末からZIPを書き出す", "会話・記憶・人物のデータをまとめて保管", 1, this::exportArchive));
+        compose.showPage(panel);
     }
 
     private void editGitToken() {
@@ -1066,7 +1182,7 @@ public final class MainActivity extends ComponentActivity {
             });
         };
         panel.rows.add(new ComposeUi.Row("接続情報を削除", () -> worker.execute(() -> {
-            try { tokens.clear(); ui(() -> gitStatus = "自動保存は接続情報の設定待ちです"); }
+            try { tokens.clear(); ui(() -> { gitStatus = "自動保存は接続情報の設定待ちです"; refreshManagementStatus(); }); }
             catch (Exception error) { ui(() -> showError(safeError(error))); }
         })));
         compose.show(panel);
@@ -1081,6 +1197,7 @@ public final class MainActivity extends ComponentActivity {
         if (!ready || closed || changingPerson || activePerson == null || activePerson.repository == null || isDestroyed()) return;
         final PersonRegistry.Person person = activePerson;
         gitStatus = "Gitに保存しています";
+        refreshManagementStatus();
         // Capture on the chat worker; network work must never read the subsequently active database.
         worker.execute(() -> {
             synchronized (syncingPeople) {
@@ -1116,25 +1233,31 @@ public final class MainActivity extends ComponentActivity {
                         Files.move(pending.toPath(), stateFile.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
                         more = delta.optBoolean("has_more") || result.cursor < delta.optLong("through_cursor");
                         final boolean remaining = more;
-                        ui(() -> { gitStatus = remaining ? "続きの履歴を保存しています" : "Gitへの保存が完了しました";
-                            if (report && !remaining) showError("Gitへの保存が完了しました。"); });
-                    } catch (Exception error) { syncFailed(error, report); }
+                        ui(() -> {
+                            if (activePerson == null || !activePerson.id.equals(person.id)) return;
+                            gitStatus = remaining ? "続きの履歴を保存しています" : "Gitへの保存が完了しました";
+                            refreshManagementStatus();
+                            if (report && !remaining && compose.getPageKey().equals("backup")) showError("Gitへの保存が完了しました。"); });
+                    } catch (Exception error) { syncFailed(person, error, report); }
                     finally {
                         synchronized (syncingPeople) { syncingPeople.remove(person.id); }
-                        if (more) ui(() -> { if (activePerson.id.equals(person.id)) queueGitSync(report); });
+                        if (more) ui(() -> { if (activePerson != null && activePerson.id.equals(person.id)) queueGitSync(report); });
                     }
                 });
             } catch (Exception error) {
                 synchronized (syncingPeople) { syncingPeople.remove(person.id); }
-                syncFailed(error, report);
+                syncFailed(person, error, report);
             }
         });
     }
 
-    private void syncFailed(Exception error, boolean report) {
+    private void syncFailed(PersonRegistry.Person person, Exception error, boolean report) {
         String detail = safeError(error);
-        ui(() -> { gitStatus = detail + "\n会話は端末に保存されています。";
-            if (report) showError(gitStatus); scheduleGitSync(); });
+        ui(() -> {
+            if (activePerson == null || !activePerson.id.equals(person.id)) return;
+            gitStatus = detail + "\n会話は端末に保存されています。";
+            refreshManagementStatus();
+            if (report && compose.getPageKey().equals("backup")) showError(gitStatus); scheduleGitSync(); });
     }
 
     private void exportArchive() {
@@ -1259,8 +1382,8 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void showDisplaySettings() {
-        ComposeUi.Panel panel = new ComposeUi.Panel("表示設定");
-        panel.sheet = true;
+        ComposeUi.Panel panel = page("表示設定", "display", false);
+        panel.message = "チャットの読みやすさを調整します。変更は自動で保存されます。";
         panel.preview = true;
         ComposeUi.Setting font = new ComposeUi.Setting("文字サイズ", 16, 28, textSize, value -> {
             textSize = value; applyTypography(); saveDisplaySettings();
@@ -1273,7 +1396,7 @@ public final class MainActivity extends ComponentActivity {
             textSize = DEFAULT_TEXT_SIZE; messageGap = 12;
             font.setValue(textSize); gap.setValue(messageGap); applyTypography(); saveDisplaySettings();
         }, 4);
-        reset.dismiss = false; panel.rows.add(reset); compose.show(panel);
+        reset.dismiss = false; panel.rows.add(reset); compose.showPage(panel);
     }
 
     @Override public void onPause() {
