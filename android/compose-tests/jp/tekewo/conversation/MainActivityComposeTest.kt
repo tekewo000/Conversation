@@ -96,7 +96,11 @@ class MainActivityComposeTest {
         compose.waitUntil(10_000) { compose.onAllNodes(hasContentDescription("送信") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithContentDescription("送信").performTouchInput { longClick() }
         compose.onNodeWithText("メタ発言として送る").performClick()
-        compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("メタ · 返信なし")).fetchSemanticsNodes().isNotEmpty() }
+        try {
+            compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("メタ · 返信なし")).fetchSemanticsNodes().isNotEmpty() }
+        } catch (failure: Exception) {
+            throw AssertionError("Meta snapshot: ${snapshot.invoke(null, -1)}\nUI: ${compose.onRoot().printToString()}", failure)
+        }
         val page = org.json.JSONObject(snapshot.invoke(null, -1) as String)
         assertEquals(2, page.getInt("total"))
         assertEquals("scene", page.getJSONArray("messages").getJSONObject(0).getString("annotation"))

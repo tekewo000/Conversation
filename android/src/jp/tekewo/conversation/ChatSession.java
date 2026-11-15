@@ -19,6 +19,7 @@ final class ChatSession {
         JSONObject pending() throws Exception;
         void apply(long job, String payload) throws Exception;
         JSONObject pendingPersona() throws Exception;
+        default boolean rebuildPending() throws Exception { return false; }
         void applyPersona(long throughId, String payload) throws Exception;
     }
     interface Transport {
@@ -188,12 +189,22 @@ final class ChatSession {
           + "情景は明示された現実の説明でない限りsharedまたはfictionにし、メタ指定だけを本人の体験・好み・感情・信頼の変化の証拠にしません。"
           + "evidenceは補助原文で、memoriesの新規抽出はjob.messagesの差分だけを対象にします。";
 
-    static final String REBUILD = EXTRACT
-          + "今回は過去の会話を先頭から順に再整理しています。memoriesは必ず空配列にし、体験の階層だけをcontinuityへ出力してください。"
-          + "入力のcontinuity.episodesは作業中の概要、known_nodesは保存済みの枝です。同じ体験・日・出来事のkeyと親を保ちます。"
-          + "大項目もkeyはUTF-8で96バイト以下。今回変わる枝だけchildrenで返し、以前の子の省略を削除と扱いません。"
-          + "source_idsは今回のjob.messages、evidence、以前の概要とknown_nodesに含まれる実際の出典だけを使います。"
-          + "現在の関係や気持ち、人物像は再生成せず、continuityはthreads:[]とepisodesだけを返してください。";
+    static final String REBUILD =
+            "過去の会話を先頭から順に読み、旅行や一連の相談など大きな体験の階層を差分更新してください。出力はJSONのみ。"
+          + "形式:{\"memories\":[],\"continuity\":{\"threads\":[],\"episodes\":[{\"key\":\"体験の安定キー\",\"text\":\"概要\","
+          + "\"emotion\":\"本人が明言した当時の感情。不明なら空文字\",\"scene\":\"体験や場面の短い名前\",\"scope\":\"real|fiction|shared\","
+          + "\"source_ids\":[根拠発言ID],\"children\":[同じ形式の子]}]}}。他の項目は出力しません。"
+          + "今回追加・変更する体験と枝だけをepisodesへ返します。変わらない概要や子は再出力せず、何もなければepisodes:[]。"
+          + "省略した体験と子はアプリが保持します。大項目の直近30概要はアプリが選び、外れた体験の詳細も保存します。"
+          + "入力continuity.episodesは作業済みの概要、known_nodesは既存の枝です。同じ体験・日・出来事は同じkeyと親で更新し、既存の親を変更しません。"
+          + "京都旅行→1日目→夜のホテル→悩みを打ち明けた出来事など最大4階層。日や時間が不明なら階層を飛ばし、別の旅行は同じ場所でも別keyにします。"
+          + "親は全体の要約、子は具体的な経緯や出来事を保存します。体験の開始順に古いものから返します。"
+          + "親子合計128件までの差分、JSON全体128KiB以下。各keyはUTF-8で96バイト以下、text1536バイト以下、emotion768バイト以下。"
+          + "sceneは大項目768バイト以下、子256バイト以下。scopeは親子で同じで、体験内のkeyは全階層を通して一意にします。childrenは省略できます。"
+          + "source_idsは重複なし1〜8件、今回のjob.messages・evidence・以前の概要・known_nodesにある実際の発言IDだけを使います。IDを作りません。"
+          + "知らない日時・場所・感情を補わず、記録時刻を体験日時にしません。現実real、創作fiction、会話上の共有体験sharedを区別します。"
+          + "annotationのscene/metaは会話外の補足で、人物のセリフや現実の体験と混同しません。省略truncatedの原文は見えていない内容を補いません。"
+          + "personはプロフィールの参照だけで新しい体験の根拠にしません。関係・気持ち・人物像・一般の長期記憶は再生成せず、memoriesとthreadsは必ず空配列です。";
 
     static final String REFLECT =
             "実際の会話から、応答する人物自身の人物像に持続的な変化があるかを慎重に振り返ってください。"
@@ -296,7 +307,7 @@ final class ChatSession {
         return processMemories(backend, 3);
     }
 
-    boolean processMemories(Transport backend, int maxBatches) throws Exception {
+    void extractMemories(Transport backend, int maxBatches) throws Exception {
         for (int batch = 0; batch < maxBatches; ++batch) {
             checkCancelled();
             JSONObject job = store.pending();
@@ -359,16 +370,31 @@ final class ChatSession {
             store.apply(id, extraction.toString());
         }
         checkCancelled();
+    }
+
+    boolean processMemories(Transport backend, int maxBatches) throws Exception {
+        try { extractMemories(backend, maxBatches); }
+        catch (Exception error) {
+            if (isCancelled() || !store.rebuildPending()) throw error;
+            return true;
+        }
+        if (store.rebuildPending()) return true;
         JSONObject reflection = store.pendingPersona();
         long throughId = reflection.optLong("through_id", 0);
         if (throughId > 0) {
-            String payload = backend.request(REFLECT,
-                    new JSONArray().put(new JSONObject().put("role", "user").put("content", reflection.toString())), ignored -> {});
-            checkCancelled();
-            store.applyPersona(throughId, jsonPayload(payload));
+            try {
+                String payload = backend.request(REFLECT,
+                        new JSONArray().put(new JSONObject().put("role", "user").put("content", reflection.toString())), ignored -> {});
+                checkCancelled();
+                if (store.rebuildPending()) return true;
+                store.applyPersona(throughId, jsonPayload(payload));
+            } catch (Exception error) {
+                if (isCancelled() || !store.rebuildPending()) throw error;
+                return true;
+            }
         }
         checkCancelled();
-        return store.pending().optLong("id", 0) > 0;
+        return store.pending().optLong("id", 0) > 0 || store.pendingPersona().optLong("through_id", 0) > 0;
     }
 
     static String jsonPayload(String value) throws IOException {

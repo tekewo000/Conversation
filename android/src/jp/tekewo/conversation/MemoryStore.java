@@ -58,6 +58,9 @@ final class MemoryStore implements ChatSession.Store {
     public JSONObject pendingPersona() throws Exception {
         synchronized (MainActivity.storeGate) { current(); return read(MainActivity.nativePendingPersona()); }
     }
+    public boolean rebuildPending() throws Exception {
+        synchronized (MainActivity.storeGate) { return MemoryRebuild.pending(current().directory); }
+    }
     public void applyPersona(long throughId, String payload) throws Exception {
         synchronized (MainActivity.storeGate) {
             current(); String error = MainActivity.nativeApplyPersona(throughId, bytes(payload));

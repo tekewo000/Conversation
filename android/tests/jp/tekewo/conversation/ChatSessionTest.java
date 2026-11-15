@@ -48,6 +48,10 @@ public final class ChatSessionTest {
         public void memoryStatus(String error) { warning = error; }
     }
     public static void main(String[] arguments) throws Exception {
+        failedExtractionHandsOffWhenRebuildingWasRequestedMidFlight();
+        rebuildRequestedDuringExtractionDefersReflectionBeforeItsRequest();
+        rebuildRequestedDuringReflectionHandsOffWithoutLosingTheReview();
+        extractionCanContinueWhileAnUnsupportedPersonaReviewStaysPending();
         nonReplyNotesStayOutOfSpokenDialogueAndReachTheNextReply();
         hierarchySourcesReachExtractionAndIdleWorkMakesNoRequests();
         memoryBatchBoundaryComesFromTheStoreNotTheModel();
@@ -215,6 +219,61 @@ public final class ChatSessionTest {
         cancelledReflectionDoesNotCommit();
         rejectedReflectionStaysPending();
         System.out.println("PASS: chat completion, cancellation, raw evidence, memory retry, query bounds, persona context and reflection retry");
+    }
+
+    static void failedExtractionHandsOffWhenRebuildingWasRequestedMidFlight() throws Exception {
+        boolean[] rebuilding = {false};
+        Store store = new Store() { @Override public boolean rebuildPending() { return rebuilding[0]; } };
+        store.add("user", "原文"); store.add("assistant", "返答");
+        boolean more = new ChatSession(store).processMemories((instructions, input, delta) -> {
+            rebuilding[0] = true;
+            throw new IOException("Expected at most six threads and thirty episodes.");
+        }, 1);
+        assert more && store.pending && store.applied == 0;
+    }
+
+    static void rebuildRequestedDuringExtractionDefersReflectionBeforeItsRequest() throws Exception {
+        boolean[] rebuilding = {false};
+        Store store = new Store() { @Override public boolean rebuildPending() { return rebuilding[0]; } };
+        store.personaJob = reflectionJob(); store.add("user", "原文"); store.add("assistant", "返答");
+        boolean more = new ChatSession(store).processMemories((instructions, input, delta) -> {
+            if (!instructions.equals(ChatSession.EXTRACT)) throw new AssertionError("A newly requested rebuild must precede optional reflection");
+            rebuilding[0] = true;
+            return "{\"memories\":[]}";
+        }, 1);
+        assert more && store.applied == 1 && store.personaApplied == 0 && store.personaJob.getLong("through_id") == 36;
+    }
+
+    static void rebuildRequestedDuringReflectionHandsOffWithoutLosingTheReview() throws Exception {
+        boolean[] rebuilding = {false};
+        Store store = new Store() {
+            @Override public boolean rebuildPending() { return rebuilding[0]; }
+        };
+        store.pending = false; store.personaJob = reflectionJob();
+        ChatSession session = new ChatSession(store);
+        boolean more = session.processMemories((instructions, input, delta) -> {
+            rebuilding[0] = true;
+            throw new IOException("Persona review is stale or unsupported.");
+        }, 1);
+        assert more && store.personaApplied == 0 && store.personaJob.getLong("through_id") == 36;
+        rebuilding[0] = false;
+        session.processMemories((instructions, input, delta) -> "{\"changes\":[]}", 1);
+        assert store.personaApplied == 1;
+    }
+
+    static void extractionCanContinueWhileAnUnsupportedPersonaReviewStaysPending() throws Exception {
+        Store store = new Store() {
+            @Override public JSONObject pendingPersona() { throw new AssertionError("Optional reflection must not block explicit historical rebuilding"); }
+        };
+        store.personaJob = reflectionJob();
+        store.add("user", "新しい会話の原文");
+        store.add("assistant", "会話の返答");
+        new ChatSession(store).extractMemories((instructions, input, delta) -> {
+            if (!instructions.equals(ChatSession.EXTRACT)) throw new AssertionError("Unexpected persona request");
+            return "{\"memories\":[]}";
+        }, 1);
+        assert store.applied == 1 && !store.pending;
+        assert store.personaJob.getLong("through_id") == 36 : "Deferring reflection must preserve its pending work";
     }
 
     static void nonReplyNotesStayOutOfSpokenDialogueAndReachTheNextReply() throws Exception {

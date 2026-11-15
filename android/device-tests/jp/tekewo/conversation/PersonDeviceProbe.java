@@ -135,6 +135,26 @@ public final class PersonDeviceProbe extends Instrumentation {
         File people = new File(root, "people").getCanonicalFile();
         File directory = new File(people, id).getCanonicalFile();
         check(directory.getParentFile().equals(people), "Memory inspection stays under people");
+        File stage = new File(directory, ".memory-rebuild.sqlite3");
+        if (stage.isFile() && !Files.isSymbolicLink(stage.toPath())) {
+            try (SQLiteDatabase cache = SQLiteDatabase.openDatabase(stage.getPath(), null, SQLiteDatabase.OPEN_READONLY | SQLiteDatabase.NO_LOCALIZED_COLLATORS)) {
+                JSONObject progress = new JSONObject();
+                try (Cursor rows = cache.rawQuery("SELECT key,value FROM meta WHERE key IN ('cursor','boundary','phase','error')", null)) {
+                    while (rows.moveToNext()) progress.put(rows.getString(0), rows.getString(1));
+                }
+                try (Cursor rows = cache.rawQuery("SELECT count(*) FROM nodes", null)) { if (rows.moveToFirst()) progress.put("nodes", rows.getLong(0)); }
+                report("REBUILD_STATUS " + progress);
+            }
+        } else report("REBUILD_STATUS absent");
+        File work = new File(app.getNoBackupFilesDir(), "androidx.work.workdb");
+        if (!work.isFile()) work = app.getDatabasePath("androidx.work.workdb");
+        if (work.isFile() && !Files.isSymbolicLink(work.toPath())) {
+            try (SQLiteDatabase jobs = SQLiteDatabase.openDatabase(work.getPath(), null, SQLiteDatabase.OPEN_READONLY | SQLiteDatabase.NO_LOCALIZED_COLLATORS);
+                    Cursor rows = jobs.rawQuery("SELECT w.state,w.run_attempt_count,w.last_enqueue_time,w.stop_reason FROM WorkSpec w JOIN WorkName n ON n.work_spec_id=w.id WHERE n.name='conversation-memory' ORDER BY w.last_enqueue_time DESC LIMIT 8", null)) {
+                while (rows.moveToNext()) report("WORK_STATUS " + new JSONObject().put("state", rows.getInt(0)).put("attempts", rows.getInt(1))
+                        .put("enqueued_at_ms", rows.getLong(2)).put("stop_reason", rows.getInt(3)));
+            }
+        }
         File file = new File(directory, "conversation.sqlite3");
         check(file.isFile() && !Files.isSymbolicLink(file.toPath()), "Memory database is an ordinary file");
         try (SQLiteDatabase database = SQLiteDatabase.openDatabase(file.getPath(), null, SQLiteDatabase.OPEN_READONLY | SQLiteDatabase.NO_LOCALIZED_COLLATORS)) {

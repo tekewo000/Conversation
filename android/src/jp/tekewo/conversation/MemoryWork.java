@@ -22,16 +22,25 @@ public final class MemoryWork extends Worker {
     private static final AtomicBoolean running = new AtomicBoolean();
     private volatile ChatGptConnection connection;
     private volatile ChatSession session;
+    private volatile MemoryRebuild rebuild;
+    private boolean rebuilding;
+    private String operation = "記憶の整理";
 
     public MemoryWork(Context context, WorkerParameters parameters) { super(context, parameters); }
     private static SharedPreferences settings(Context context) { return context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE); }
     static boolean isRunning() { return running.get(); }
     static String status(Context context) { return settings(context).getString("memory_status", ""); }
     static void enqueue(Context context) {
+        enqueue(context, ExistingWorkPolicy.APPEND_OR_REPLACE);
+    }
+    static void resume(Context context) {
+        enqueue(context, isRunning() ? ExistingWorkPolicy.APPEND_OR_REPLACE : ExistingWorkPolicy.REPLACE);
+    }
+    private static void enqueue(Context context, ExistingWorkPolicy policy) {
         OneTimeWorkRequest request = new OneTimeWorkRequest.Builder(MemoryWork.class)
                 .setConstraints(new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS).build();
-        WorkManager.getInstance(context).enqueueUniqueWork(NAME, ExistingWorkPolicy.APPEND_OR_REPLACE, request);
+        WorkManager.getInstance(context).enqueueUniqueWork(NAME, policy, request);
     }
 
     @Override public Result doWork() {
@@ -44,13 +53,15 @@ public final class MemoryWork extends Worker {
             synchronized (MainActivity.storeGate) { person = new PersonRegistry(context.getFilesDir()).active(); }
             if (person == null) return Result.success();
             MemoryStore store = new MemoryStore(context, person.id);
-            MemoryRebuild rebuild = new MemoryRebuild(person.directory);
-            JSONObject batch = store.pending();
-            boolean normal = batch.optLong("id", 0) > 0 || store.pendingPersona().optLong("through_id", 0) > 0;
-            if (!normal && !MemoryRebuild.pending(person.directory)) return Result.success();
+            rebuild = new MemoryRebuild(person.directory, () -> setProgressAsync(new Data.Builder().putLong("updated", System.currentTimeMillis()).build()));
+            rebuilding = MemoryRebuild.pending(person.directory);
+            JSONObject batch = rebuilding ? new JSONObject() : store.pending();
+            boolean normal = !rebuilding && (batch.optLong("id", 0) > 0 || store.pendingPersona().optLong("through_id", 0) > 0);
+            if (!normal && !rebuilding) return Result.success();
             int batchMessages = batch.optJSONArray("messages") == null ? 0 : batch.getJSONArray("messages").length();
             long started = android.os.SystemClock.elapsedRealtime();
-            android.util.Log.i("ConversationMemory", "Starting batch messages=" + batchMessages);
+            android.util.Log.i("ConversationMemory", rebuilding ? "Starting historical rebuild" : "Starting batch messages=" + batchMessages);
+            if (rebuilding) rebuild.phase("AIへの接続を確認しています");
             List<ChatRequest.Model> models = connection.listModels();
             if (models.isEmpty()) throw new IOException("利用できるモデルがありません。");
             SharedPreferences preferences = settings(context);
@@ -64,12 +75,13 @@ public final class MemoryWork extends Worker {
             // One extraction plus reflection stays inside WorkManager's execution deadline.
             ChatSession.Transport backend = (instructions, input, delta) -> {
                 if (isStopped()) throw new IOException("記憶の整理が中断されました。");
+                operation = instructions.equals(ChatSession.REFLECT) ? "人物像の振り返り" : instructions.equals(ChatSession.REBUILD) ? "過去の記憶の再整理" : "会話の記憶整理";
                 if (instructions.equals(ChatSession.REFLECT)) publishProgress(store);
                 return connection.request(request, instructions, input, delta, true,
                         instructions.equals(ChatSession.REFLECT) ? 120 : 300);
             };
             boolean more;
-            if (normal) more = session.processMemories(backend, 1) || MemoryRebuild.pending(person.directory);
+            if (normal) more = session.processMemories(backend, 1);
             else more = rebuild.step(new MemoryRebuild.Native() {
                 public JSONObject context() throws Exception { return store.context(""); }
                 public JSONObject batch(long afterId, long throughId) throws Exception {
@@ -78,7 +90,7 @@ public final class MemoryWork extends Worker {
                 public boolean publish() throws Exception {
                     return store.publishRebuild();
                 }
-            }, backend);
+            }, backend) || store.pending().optLong("id", 0) > 0 || store.pendingPersona().optLong("through_id", 0) > 0;
             preferences.edit().putString("memory_status", "").apply();
             JSONObject progress = store.context("").getJSONObject("memory_progress");
             android.util.Log.i("ConversationMemory", "Completed batch messages=" + batchMessages
@@ -89,8 +101,14 @@ public final class MemoryWork extends Worker {
             if (more && !isStopped()) enqueue(context);
             return Result.success();
         } catch (Exception error) {
-            String message = "記憶の整理は自動で再試行します。" + (error instanceof IOException ? error.getMessage() : "");
+            if (!rebuilding && rebuild != null && rebuild.isPending() && !isStopped()) {
+                rebuild.phase("一括整理を先に進めます");
+                enqueue(context);
+                return Result.success();
+            }
+            String message = operation + "は自動で再試行します。" + (error instanceof IOException ? error.getMessage() : error instanceof org.json.JSONException ? "AIの応答が必要な記憶形式になっていません。" : "");
             settings(context).edit().putString("memory_status", message).apply();
+            if (rebuild != null) rebuild.failed(message);
             return Result.retry();
         } finally { running.set(false); }
     }

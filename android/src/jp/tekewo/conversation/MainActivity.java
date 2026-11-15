@@ -643,7 +643,7 @@ public final class MainActivity extends ComponentActivity {
 
     private void queueMemories(ChatRequest selected) {
         if (closed || changingPerson || activePerson == null || !connection.hasSession()) return;
-        MemoryWork.enqueue(this);
+        if (MemoryRebuild.pending(activePerson.directory)) MemoryWork.resume(this); else MemoryWork.enqueue(this);
     }
 
     private void showPeople() {
@@ -725,6 +725,7 @@ public final class MainActivity extends ComponentActivity {
                         panel.message += "\n\n会話の記憶整理\n" + processed + " / " + total + " 発言（残り" + Math.max(0, total - processed) + "発言）";
                     }
                     if (rebuilding) panel.message += "\n\n" + rebuildStatus;
+                    else if (!memoryStatus.isEmpty()) panel.message += "\n\n" + memoryStatus;
                     panel.rows.add(new ComposeUi.Row("短期記憶（直近30往復）", () -> showMemoryHistory(person, snapshot, false)));
                     panel.rows.add(new ComposeUi.Row("中期記憶（" + (episodes == null ? 0 : episodes.length()) + "件）",
                             () -> showMemoryHistory(person, snapshot, true)));
@@ -756,7 +757,7 @@ public final class MainActivity extends ComponentActivity {
                         long total = snapshot.getJSONObject("memory_progress").getLong("total_messages");
                         new MemoryRebuild(person.directory).request(total);
                     }
-                    MemoryWork.enqueue(getApplicationContext());
+                    MemoryWork.resume(getApplicationContext());
                     ui(this::showMemory);
                 } catch (Exception error) { ui(() -> showError(safeError(error))); }
             });
