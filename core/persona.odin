@@ -29,7 +29,7 @@ PERSONA_EVIDENCE_CTE :: `WITH recent AS (
  UNION ALL SELECT CAST(value AS INTEGER),0 FROM json_each(`+PERSONA_RELATIONSHIP_JSON+`,'$.source_ids')
  ) GROUP BY id
 ), evidence AS (
- SELECT m.id,m.role,pick.priority,json_object('id',m.id,'role',m.role,'content',substr(m.content,1,512),'created_at',m.created_at,'truncated',json(CASE WHEN length(m.content)>512 THEN 'true' ELSE 'false' END)) AS row
+ SELECT m.id,m.role,pick.priority,json_patch(json_object('id',m.id,'role',m.role,'content',substr(m.content,1,512),'created_at',m.created_at,'truncated',json(CASE WHEN length(m.content)>512 THEN 'true' ELSE 'false' END)),coalesce((SELECT json_object('annotation',kind) FROM message_annotations WHERE message_id=m.id),'{}')) AS row
  FROM evidence_ids pick JOIN messages m ON m.id=pick.id WHERE m.id<=?1
 ), budget AS (
  SELECT id,role,row,sum(length(CAST(row AS BLOB))+1) OVER(ORDER BY priority,id DESC ROWS UNBOUNDED PRECEDING) AS bytes FROM evidence
@@ -113,7 +113,7 @@ persona_revision_valid :: proc(through_id: i64, changes_text: string) -> bool {
    message:=prepare(PERSONA_EVIDENCE_CTE+"SELECT role FROM budget WHERE bytes<=40000 AND id=?2")
    if message==nil do return false
    found:=bind_int(message,1,through_id) && bind_int(message,2,i64(id)) && sqlite3_step(message)==100
-   if found {
+   if found && !message_is_annotation(i64(id)) {
     if string(sqlite3_column_text(message,0))=="user" { users+=1; if i64(id)>after do new_users+=1 }
     else { assistants+=1; if i64(id)>after do new_assistants+=1 }
    }

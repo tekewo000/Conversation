@@ -17,6 +17,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -104,6 +105,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     var generateImages by mutableStateOf(false)
     var mediaDirectory by mutableStateOf<File?>(null)
     var onAttach by mutableStateOf<Runnable?>(null)
+    var onSendNote by mutableStateOf<Runnable?>(null)
     var streaming by mutableStateOf("")
     private var replying by mutableStateOf(false)
     private var replyKey = 0L
@@ -153,7 +155,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                   value: Int, @JvmField val change: IntConsumer) {
         var value by mutableIntStateOf(value)
     }
-    private data class Message(val id: Long, val role: String, val text: String, val key: Long = id)
+    private data class Message(val id: Long, val role: String, val text: String, val key: Long = id, val annotation: String = "")
 
     init {
         activity.setContent {
@@ -183,7 +185,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
             val id = item.getLong("id")
             val role = item.getString("role")
             val key = if (replySaved && replying && latest && index == array.length() - 1 && role == "assistant") replyKey else keys[id] ?: id
-            Message(id, role, item.getString("text"), key)
+            Message(id, role, item.getString("text"), key, item.optString("annotation"))
         }
         first = page.getInt("first")
         total = page.getInt("total")
@@ -252,7 +254,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                     items(visible, key = { it.key }) { message ->
                         MessageText(message.text, message.role == "user", bubbleWidth,
                             if (latest && (message.id == -1L || !pending && message.id == latestAssistant)) feeling else "",
-                            typing = message.id == -1L && message.text.isEmpty())
+                            typing = message.id == -1L && message.text.isEmpty(), annotation = message.annotation)
                     }
                     if (first > 0) item("older") {
                         TextButton(onClick = {
@@ -287,9 +289,11 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                         cursorBrush = SolidColor(Color(0xFFA6C4BC)), maxLines = 5,
                         decorationBox = { inner -> Box(contentAlignment = Alignment.CenterStart) { inner() } })
                     Spacer(Modifier.width(8.dp))
-                    IconButton(onClick = { onSend.run() }, enabled = enabled && !sending && (draft.isNotBlank() || attachments.isNotBlank()),
-                        modifier = Modifier.size(48.dp).alpha(if (sending) 0.45f else 1f)
-                            .background(Color(0xFF36594B), RoundedCornerShape(24.dp))) {
+                    Box(Modifier.size(48.dp).alpha(if (sending) 0.45f else 1f)
+                            .background(Color(0xFF36594B), RoundedCornerShape(24.dp))
+                            .combinedClickable(enabled = enabled && !sending && (draft.isNotBlank() || attachments.isNotBlank()),
+                                role = Role.Button, onClick = { onSend.run() }, onLongClickLabel = "情景・メタ発言として送る",
+                                onLongClick = { onSendNote?.run() }), contentAlignment = Alignment.Center) {
                         Icon(ConversationIcons.Send, contentDescription = "送信", tint = Color(0xFFDEE8EF))
                     }
                 }
@@ -326,7 +330,15 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         }
     }
 
-    @Composable private fun MessageText(text: String, user: Boolean, bubbleWidth: Dp, emotion: String = "", typing: Boolean = false) {
+    @Composable private fun MessageText(text: String, user: Boolean, bubbleWidth: Dp, emotion: String = "", typing: Boolean = false, annotation: String = "") {
+        if (annotation.isNotEmpty()) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(if (annotation == "scene") "情景 · 返信なし" else "メタ · 返信なし", fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(bottom = 4.dp))
+                SelectionContainer { MessageBody(text) }
+            }
+            return
+        }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start,
             verticalAlignment = Alignment.Top) {
             if (!user) {

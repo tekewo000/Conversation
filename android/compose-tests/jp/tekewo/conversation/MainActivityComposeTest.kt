@@ -10,7 +10,13 @@ import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.printToString
+import androidx.compose.ui.test.isEnabled
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -37,6 +43,43 @@ class MainActivityComposeTest {
         compose.waitUntil(10_000) {
             compose.onAllNodes(androidx.compose.ui.test.hasText("記憶")).fetchSemanticsNodes().isNotEmpty()
         }
+    }
+
+    @Test fun longPressSavesSceneAndMetaWithoutReplyAndRebuildProgressKeepsHistory() {
+        val people = PersonRegistry(context.filesDir)
+        previousPerson = people.active()?.id
+        val person = people.stage(PersonDocument.named(name), null); people.commit(person)
+        compose.activityRule.scenario.recreate()
+        val snapshot = MainActivity::class.java.getDeclaredMethod("nativeMessages", Int::class.javaPrimitiveType).apply { isAccessible = true }
+        compose.onNodeWithContentDescription("メッセージ入力").performTextInput("雨が降り始め、二人は軒下にいる")
+        compose.waitUntil(10_000) { compose.onAllNodes(hasContentDescription("送信") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithContentDescription("送信").performTouchInput { longClick() }
+        compose.onNodeWithText("情景として送る").performClick()
+        try {
+            compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("情景 · 返信なし")).fetchSemanticsNodes().isNotEmpty() }
+        } catch (failure: Exception) {
+            throw AssertionError("Note snapshot: ${snapshot.invoke(null, -1)}\nUI: ${compose.onRoot().printToString()}", failure)
+        }
+        compose.onNodeWithContentDescription("返答を入力中").assertDoesNotExist()
+        compose.onNodeWithContentDescription("メッセージ入力").performTextInput("次は静かな雰囲気で進める")
+        compose.waitUntil(10_000) { compose.onAllNodes(hasContentDescription("送信") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithContentDescription("送信").performTouchInput { longClick() }
+        compose.onNodeWithText("メタ発言として送る").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("メタ · 返信なし")).fetchSemanticsNodes().isNotEmpty() }
+        val page = org.json.JSONObject(snapshot.invoke(null, -1) as String)
+        assertEquals(2, page.getInt("total"))
+        assertEquals("scene", page.getJSONArray("messages").getJSONObject(0).getString("annotation"))
+        assertEquals("meta", page.getJSONArray("messages").getJSONObject(1).getString("annotation"))
+        val add = MainActivity::class.java.getDeclaredMethod("nativeAddMessage", ByteArray::class.java, ByteArray::class.java).apply { isAccessible = true }
+        add.invoke(null, "assistant".toByteArray(), "過去の合成返答".toByteArray())
+        compose.activityRule.scenario.recreate()
+        openShortTermMemory()
+        compose.onNodeWithText("過去の記憶を階層に整理").assertExists()
+        compose.onNodeWithContentDescription("閉じる").performClick()
+        MemoryRebuild(person.directory).request(3)
+        openShortTermMemory()
+        compose.onNodeWithText("過去の記憶を階層に整理中", substring = true).assertTextContains("0 / 3 発言", substring = true)
+        assertEquals(3, org.json.JSONObject(snapshot.invoke(null, -1) as String).getInt("total"))
     }
 
     @Test fun paidImageApiHasItsOwnSettingsAndMaskedKeyField() {
@@ -334,8 +377,7 @@ class MainActivityComposeTest {
         openShortTermMemory()
         compose.onNodeWithText("記憶の整理を続ける").assertDoesNotExist()
         compose.onNodeWithText("この整理のあと一時停止").assertDoesNotExist()
-        assertTrue(androidx.work.WorkManager.getInstance(context)
-            .getWorkInfosForUniqueWork(MemoryWork.NAME).get(5, java.util.concurrent.TimeUnit.SECONDS).isNotEmpty())
+        assertTrue(org.json.JSONObject(MainActivity.nativePendingJob()).getLong("id") > 0)
         compose.onNodeWithContentDescription("閉じる").performClick()
         openShortTermMemory()
         compose.onNodeWithText("人物アイコンを設定").performClick()

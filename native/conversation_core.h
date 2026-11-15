@@ -9,12 +9,16 @@ extern "C" {
 bool conversation_init(const char* storage_dir);
 bool conversation_send(const char* utf8);
 int64_t conversation_add_message(const char* role, const char* utf8);
+int64_t conversation_add_note(const char* kind, const char* utf8);
+const char* conversation_rebuild_batch(int64_t after_id, int64_t through_id);
+bool conversation_publish_rebuild(void);
 int64_t conversation_add_reply(const char* utf8, const char* state_json);
 int32_t conversation_message_count(void);
 // Absolute zero-based indexes; load at most 80 rows before using getters.
 bool conversation_load_window(int32_t first, int32_t limit);
 const char* conversation_message_text(int32_t index);
 const char* conversation_message_role(int32_t index);
+const char* conversation_message_annotation(int32_t index);
 int64_t conversation_message_id(int32_t index);
 // Bounded UTF-8 JSON. Queries are literal keywords (at most 256 bytes).
 const char* conversation_context(const char* query);

@@ -12,13 +12,16 @@ CREATE TRIGGER IF NOT EXISTS continuity_no_update BEFORE UPDATE ON continuity_re
 CREATE TRIGGER IF NOT EXISTS continuity_no_delete BEFORE DELETE ON continuity_revisions BEGIN SELECT RAISE(ABORT,'immutable'); END;
 `
 
-EXTRACTED_CONTINUITY_JSON :: `coalesce((SELECT json_set(state,'$.through_id',through_id) FROM continuity_revisions ORDER BY id DESC LIMIT 1),'{}')`
+BASE_CONTINUITY_JSON :: `coalesce((SELECT json_set(state,'$.through_id',through_id) FROM continuity_revisions ORDER BY id DESC LIMIT 1),'{}')`
+EXTRACTED_CONTINUITY_JSON :: `(CASE WHEN coalesce((SELECT through_id FROM episode_rebuilds ORDER BY id DESC LIMIT 1),-1)>=(SELECT coalesce(max(through_id),0) FROM continuity_revisions) THEN json_set(`+BASE_CONTINUITY_JSON+`,'$.episodes',json((SELECT roots FROM episode_rebuilds ORDER BY id DESC LIMIT 1))) ELSE `+BASE_CONTINUITY_JSON+` END)`
+
 CONTINUITY_JSON :: `(CASE WHEN EXISTS(SELECT 1 FROM assistant_states) THEN json_set(`+EXTRACTED_CONTINUITY_JSON+`,'$.assistant_state',json(`+CURRENT_ASSISTANT_STATE_JSON+`),'$.assistant_state_through_id',(SELECT through_id FROM assistant_states ORDER BY id DESC LIMIT 1)) ELSE `+EXTRACTED_CONTINUITY_JSON+` END)`
 
 CONTINUITY_REFERENCES_SQL :: `SELECT CAST(s.value AS INTEGER) AS id,CASE WHEN CAST(s.key AS INTEGER)>0 THEN 4 WHEN json_extract(item.value,'$.status')='active' THEN 0 WHEN json_extract(item.value,'$.status')='paused' THEN 1 ELSE 3 END AS priority FROM continuity_revisions r,json_each(r.state,'$.threads') item,json_each(item.value,'$.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)
 UNION ALL SELECT CAST(s.value AS INTEGER),CASE WHEN CAST(s.key AS INTEGER)=0 THEN 2 ELSE 4 END FROM continuity_revisions r,json_each(r.state,'$.episodes') item,json_each(item.value,'$.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)
 UNION ALL SELECT CAST(s.value AS INTEGER),2 FROM continuity_revisions r,json_each(r.state,'$.assistant_state.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)
 UNION ALL SELECT CAST(s.value AS INTEGER),2 FROM continuity_revisions r,json_each(r.state,'$.relationship.source_ids') s WHERE r.id=(SELECT max(id) FROM continuity_revisions)
+UNION ALL SELECT CAST(s.value AS INTEGER),CASE WHEN CAST(s.key AS INTEGER)=0 THEN 2 ELSE 4 END FROM json_each(`+EXTRACTED_CONTINUITY_JSON+`,'$.episodes') item,json_each(item.value,'$.source_ids') s
 UNION ALL SELECT CAST(s.value AS INTEGER),2 FROM json_each((SELECT state FROM assistant_states ORDER BY id DESC LIMIT 1),'$.source_ids') s`
 CONTINUITY_SOURCES_SQL :: "SELECT id FROM ("+CONTINUITY_REFERENCES_SQL+")"
 
@@ -127,7 +130,7 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
     check:=prepare("SELECT role FROM messages WHERE id=?1 AND (id>=?2 OR id IN ("+CONTINUITY_SOURCES_SQL+") OR id IN ("+EPISODE_SOURCES_SQL+"))")
     if check==nil do return false
     found:=bind_int(check,1,i64(id)) && bind_int(check,2,first) && sqlite3_step(check)==100
-    if found && group==3 {
+    if found && group==3 && !message_is_annotation(i64(id)) {
      if string(sqlite3_column_text(check,0))=="user" { users+=1; if i64(id)>=job_first do new_users+=1 }
      else { assistants+=1; if i64(id)>=job_first do new_assistants+=1 }
     }

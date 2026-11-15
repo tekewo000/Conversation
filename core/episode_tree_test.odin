@@ -148,7 +148,7 @@ hierarchical_experience_keeps_children_across_updates_eviction_and_archive :: pr
  testing.expect_value(t,scalar("SELECT count(*) FROM episode_nodes n JOIN memory_current c ON c.id=n.memory_id"),5)
  testing.expect(t,strings.contains(string(conversation_context("青葉珈琲")),"京都旅行"))
  assert(conversation_export(destination))
- testing.expect_value(t,scalar("PRAGMA user_version"),6)
+ testing.expect_value(t,scalar("PRAGMA user_version"),7)
 }
 
 @(test)

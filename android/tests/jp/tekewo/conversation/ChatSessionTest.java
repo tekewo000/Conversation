@@ -48,6 +48,7 @@ public final class ChatSessionTest {
         public void memoryStatus(String error) { warning = error; }
     }
     public static void main(String[] arguments) throws Exception {
+        nonReplyNotesStayOutOfSpokenDialogueAndReachTheNextReply();
         hierarchySourcesReachExtractionAndIdleWorkMakesNoRequests();
         memoryBatchBoundaryComesFromTheStoreNotTheModel();
         memoryPayloadAcceptsThirtyDetailedScenesAndRejectsOversizedResults();
@@ -214,6 +215,38 @@ public final class ChatSessionTest {
         cancelledReflectionDoesNotCommit();
         rejectedReflectionStaysPending();
         System.out.println("PASS: chat completion, cancellation, raw evidence, memory retry, query bounds, persona context and reflection retry");
+    }
+
+    static void nonReplyNotesStayOutOfSpokenDialogueAndReachTheNextReply() throws Exception {
+        Store store = new Store() {
+            @Override public long addNote(String kind, String text) { return add("user", text); }
+            @Override public JSONObject context(String query) throws Exception {
+                JSONObject context = super.context(query);
+                JSONArray messages = context.getJSONArray("messages");
+                for (int i = 0; i < messages.length(); i++) {
+                    JSONObject message = messages.getJSONObject(i);
+                    if (message.getString("content").equals("雨が降り始め、二人は軒下にいる")) message.put("annotation", "scene");
+                    if (message.getString("content").equals("次は少し静かな雰囲気で")) message.put("annotation", "meta");
+                }
+                return context;
+            }
+        };
+        ChatSession session = new ChatSession(store);
+        session.note("scene", "雨が降り始め、二人は軒下にいる");
+        session.note("meta", "次は少し静かな雰囲気で");
+        assert store.roles.size() == 2 && !store.roles.contains("assistant") : "Saving context notes must not invent an assistant reply";
+        session.reply("雨宿りしようか", true, (instructions, input, delta) -> {
+            JSONObject reference = new JSONObject(input.getJSONObject(0).getString("content").split("\\n", 2)[1]);
+            JSONArray notes = reference.getJSONArray("context_notes");
+            assert notes.length() == 2 && notes.getJSONObject(0).getString("kind").equals("scene");
+            assert notes.getJSONObject(1).getString("kind").equals("meta");
+            assert notes.getJSONObject(0).getString("text").contains("軒下");
+            assert input.length() == 2 && input.getJSONObject(1).getString("content").equals("雨宿りしようか") : "Scene/meta notes are reference context, not spoken user turns";
+            assert reference.getJSONArray("history").getJSONObject(0).getInt("input_index") == 1;
+            assert reference.getJSONArray("history").getJSONObject(0).getLong("id") == 3;
+            return "うん、ここで待とう。";
+        }, new Listener());
+        assert store.roles.size() == 4;
     }
 
     static void hierarchySourcesReachExtractionAndIdleWorkMakesNoRequests() throws Exception {

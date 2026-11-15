@@ -38,6 +38,17 @@ final class MemoryStore implements ChatSession.Store {
     public JSONObject pending() throws Exception {
         synchronized (MainActivity.storeGate) { current(); return read(MainActivity.nativePendingJob()); }
     }
+    JSONObject rebuildBatch(long afterId, long throughId) throws Exception {
+        synchronized (MainActivity.storeGate) { current(); return read(MainActivity.nativeRebuildBatch(afterId, throughId)); }
+    }
+    boolean publishRebuild() throws Exception {
+        synchronized (MainActivity.storeGate) {
+            current(); String error = MainActivity.nativePublishRebuild();
+            if (error.startsWith("New messages arrived during rebuild;")) return false;
+            if (!error.isEmpty()) throw new IOException(error);
+            return true;
+        }
+    }
     public void apply(long id, String payload) throws Exception {
         synchronized (MainActivity.storeGate) {
             current(); String error = MainActivity.nativeApplyJob(id, bytes(payload));

@@ -26,6 +26,9 @@ public final class MainActivity extends ComponentActivity {
     private static native String nativeInit(byte[] storageDir, byte[] font, byte[] emojiFont);
     private static native long nativeAddMessage(byte[] role, byte[] text);
     private static native long nativeAddReply(byte[] text, byte[] state);
+    private static native long nativeAddNote(byte[] kind, byte[] text);
+    static native String nativeRebuildBatch(long afterId, long throughId);
+    static native String nativePublishRebuild();
     static native String nativeLastError();
     static native String nativeContext(byte[] query);
     private static native String nativeContextHybrid(byte[] query, long[] candidates);
@@ -124,10 +127,19 @@ public final class MainActivity extends ComponentActivity {
         if (activePerson != null) compose.setGenerateImages(getPreferences(MODE_PRIVATE).getBoolean("image_mode_" + activePerson.id, false));
         compose.setPersonName(activePerson == null ? "" : activePerson.name);
         compose.setOnIcon(this::showMemory);
+        compose.setOnSendNote(this::showNoteMenu);
         refreshPersonIcon();
         connection = new ChatGptConnection(this);
         imageCredentials = new ConnectionStore(this, "image-api");
         ChatSession.Store store = new ChatSession.Store() {
+            public long addNote(String kind, String text) throws Exception {
+                synchronized (storeGate) {
+                    requireCurrentPerson();
+                    long id = nativeAddNote(bytes(kind), bytes(text));
+                    if (id <= 0) throw new java.io.IOException(nativeLastError());
+                    return id;
+                }
+            }
             public long add(String role, String text) throws Exception {
                 synchronized (storeGate) {
                     requireCurrentPerson();
@@ -334,6 +346,40 @@ public final class MainActivity extends ComponentActivity {
         String text = draftMessage();
         if (text.trim().isEmpty()) return;
         runReply(text, true, compose.getGenerateImages());
+    }
+
+    private void showNoteMenu() {
+        if (busy || activePerson == null) return;
+        if (compose.getDraft().trim().isEmpty()) { showError("情景やメタ発言を入力してください。"); return; }
+        if (!compose.getAttachments().isEmpty()) { showError("情景・メタ発言は文章だけで送れます。添付を取り外してください。"); return; }
+        ComposeUi.Panel panel = new ComposeUi.Panel("返信なしで送る"); panel.sheet = true;
+        panel.message = "人物のセリフとは別の補足として保存し、次の返答と記憶の整理に反映します。";
+        panel.rows.add(new ComposeUi.Row("情景として送る", () -> sendNote("scene")));
+        panel.rows.add(new ComposeUi.Row("メタ発言として送る", () -> sendNote("meta")));
+        compose.show(panel);
+    }
+
+    private void sendNote(String kind) {
+        if (busy || activePerson == null) return;
+        final String text = compose.getDraft();
+        if (text.trim().isEmpty() || !compose.getAttachments().isEmpty()) return;
+        final PersonRegistry.Person person = activePerson;
+        setBusy(true); session.begin();
+        worker.execute(() -> {
+            try {
+                session.note(kind, text);
+                MemoryWork.enqueue(getApplicationContext());
+                ui(() -> {
+                    if (compose.getDraft().equals(text)) {
+                        compose.setDraft("");
+                        getPreferences(MODE_PRIVATE).edit().remove(draftKey()).apply();
+                    }
+                    pageFirst = -1; scrollOnRefresh = true;
+                    refreshMessages(); scheduleGitSync();
+                });
+            } catch (Exception error) { ui(() -> showError(safeError(error))); }
+            finally { ui(() -> { if (activePerson != null && person.id.equals(activePerson.id)) setBusy(false); }); }
+        });
     }
 
     private void runReply(String text, boolean persistUser, boolean images) {
@@ -659,6 +705,8 @@ public final class MainActivity extends ComponentActivity {
                     if (result.isEmpty()) throw new java.io.IOException(nativeLastError());
                     snapshot = new JSONObject(result);
                 }
+                final boolean rebuilding = MemoryRebuild.pending(person.directory);
+                final String rebuildStatus = rebuilding ? new MemoryRebuild(person.directory).status() : "";
                 ui(() -> {
                     if (requestedView != memoryView || changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
                     if (requestedView != 1) { showMemoryHistory(person, snapshot, requestedView == 3); return; }
@@ -676,14 +724,44 @@ public final class MainActivity extends ComponentActivity {
                         long processed = progress.optLong("processed_messages"), total = progress.optLong("total_messages");
                         panel.message += "\n\n会話の記憶整理\n" + processed + " / " + total + " 発言（残り" + Math.max(0, total - processed) + "発言）";
                     }
+                    if (rebuilding) panel.message += "\n\n" + rebuildStatus;
                     panel.rows.add(new ComposeUi.Row("短期記憶（直近30往復）", () -> showMemoryHistory(person, snapshot, false)));
                     panel.rows.add(new ComposeUi.Row("中期記憶（" + (episodes == null ? 0 : episodes.length()) + "件）",
                             () -> showMemoryHistory(person, snapshot, true)));
+                    if (!rebuilding) panel.rows.add(new ComposeUi.Row("過去の記憶を階層に整理", this::requestMemoryRebuild));
                     panel.rows.add(new ComposeUi.Row("人物アイコンを設定", () -> { memoryView = 0; showPersonIcon(); }, 2));
                     compose.show(panel);
                 });
             } catch (Exception error) { ui(() -> showError(safeError(error))); }
         });
+    }
+
+    private void requestMemoryRebuild() {
+        if (activePerson == null) return;
+        if (!connection.hasSession()) { showConnection(); return; }
+        final PersonRegistry.Person person = activePerson;
+        memoryView = 0;
+        ComposeUi.Panel panel = new ComposeUi.Panel("過去の記憶を階層に整理"); panel.sheet = true;
+        panel.message = "過去の会話を順に読み直し、旅行・日・場面などの階層にまとめます。\n原文と現在の記憶は保持し、完了後に新しい概要へ切り替えます。\nChatGPTの利用枠を使い、会話量に応じて時間がかかります。";
+        panel.confirmLabel = "整理する";
+        panel.onDismiss = this::showMemory;
+        panel.confirm = () -> {
+            compose.hide();
+            worker.execute(() -> {
+                try {
+                    synchronized (storeGate) {
+                        requireCurrentPerson();
+                        if (!person.id.equals(activePerson.id)) return;
+                        JSONObject snapshot = new JSONObject(nativeContext(bytes("")));
+                        long total = snapshot.getJSONObject("memory_progress").getLong("total_messages");
+                        new MemoryRebuild(person.directory).request(total);
+                    }
+                    MemoryWork.enqueue(getApplicationContext());
+                    ui(this::showMemory);
+                } catch (Exception error) { ui(() -> showError(safeError(error))); }
+            });
+        };
+        compose.show(panel);
     }
 
     private void showMemoryHistory(PersonRegistry.Person person, JSONObject snapshot, boolean middleTerm) {
@@ -710,7 +788,8 @@ public final class MainActivity extends ComponentActivity {
                 } else {
                     text.append("\n\n");
                     boolean user = entry.optString("role").equals("user");
-                    text.append(user ? "あなた" : person.name).append("\n");
+                    String annotation = entry.optString("annotation");
+                    text.append(annotation.equals("scene") ? "情景（返信なし）" : annotation.equals("meta") ? "メタ（返信なし）" : user ? "あなた" : person.name).append("\n");
                     String content = entry.optString("content");
                     text.append(user ? content : ReplyText.visible(content, true));
                     if (entry.optBoolean("truncated")) text.append("\n（長文のため一部を表示）");

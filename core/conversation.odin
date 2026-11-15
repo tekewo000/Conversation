@@ -12,7 +12,7 @@ MAX_MESSAGE_BYTES :: 65536
 MAX_WINDOW :: 80
 MEMORY_BATCH_MESSAGES :: 4096
 MEMORY_BATCH_BYTES :: 262144
-Cached_Message :: struct { id: i64, text, role: cstring }
+Cached_Message :: struct { id: i64, text, role, annotation: cstring }
 Allocation_Check :: struct { backing: mem.Allocator, failed: bool }
 parsing_check: Allocation_Check
 checked_allocation :: proc(data: rawptr, mode: mem.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, location := #caller_location) -> ([]byte, mem.Allocator_Error) {
@@ -56,7 +56,7 @@ make_storage_directories :: proc(path: string) -> os.Error {
  return os.make_directory(path)
 }
 clear_cache :: proc() {
- for row in cache { delete(row.text); delete(row.role) }
+ for row in cache { delete(row.text); delete(row.role); delete(row.annotation) }
  delete(cache)
  cache = nil
 }
@@ -156,7 +156,7 @@ insert_message :: proc(role, text: string) -> i64 {
 }
 // Jobs are bounded before enqueueing, including JSON escaping. Long source text stays intact in messages.
 enqueue_uncovered :: proc() -> bool {
- stmt := prepare("SELECT id,length(CAST(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END)) AS BLOB)) FROM messages WHERE id>coalesce((SELECT max(end_id) FROM jobs),0) ORDER BY id")
+ stmt := prepare("SELECT id,length(CAST(json_patch(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END)),coalesce((SELECT json_object('annotation',kind) FROM message_annotations WHERE message_id=id),'{}')) AS BLOB)) FROM messages WHERE id>coalesce((SELECT max(end_id) FROM jobs),0) ORDER BY id")
  if stmt == nil do return false
  defer sqlite3_finalize(stmt)
  first, end: i64
@@ -252,7 +252,7 @@ conversation_init :: proc "c" (storage_dir: cstring) -> bool {
  if path_e != nil || sqlite3_open_v2(cpath, &db, 6, nil) != 0 { release_state(); return fail("Could not open SQLite database.") }
  sqlite3_busy_timeout(db, 5000)
  version:=scalar("PRAGMA user_version")
- if version<0 || version>6 { release_state(); return fail("Unsupported database version; database was preserved.") }
+ if version<0 || version>7 { release_state(); return fail("Unsupported database version; database was preserved.") }
  tables:=scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
  if tables<0 { release_state(); return fail("Could not inspect database schema.") }
  if tables>0 {
@@ -265,11 +265,11 @@ conversation_init :: proc "c" (storage_dir: cstring) -> bool {
   }
  }
  if !execute(SCHEMA) || !execute("BEGIN IMMEDIATE") { release_state(); return false }
- if !execute(PERSON_SCHEMA) || !execute(PERSONA_SCHEMA) || !execute(CONTINUITY_SCHEMA) || !execute(ASSISTANT_STATE_SCHEMA) || !execute(EPISODE_SCHEMA) || !execute(ARCHIVE_SCHEMA) { execute("ROLLBACK"); release_state(); return false }
+ if !execute(PERSON_SCHEMA) || !execute(PERSONA_SCHEMA) || !execute(CONTINUITY_SCHEMA) || !execute(ASSISTANT_STATE_SCHEMA) || !execute(EPISODE_SCHEMA) || !execute(REBUILD_SCHEMA) || !execute(ARCHIVE_SCHEMA) { execute("ROLLBACK"); release_state(); return false }
  initialized := scalar("SELECT count(*) FROM meta WHERE key='initialized' AND value='1'")
  search_ready:=scalar("SELECT count(*) FROM meta WHERE key='search_version' AND value='1'")
  if initialized < 0 || search_ready<0 || (initialized == 0 && !migrate_legacy()) ||
-  (search_ready==0 && !execute(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild'); INSERT INTO memories_fts(memories_fts) VALUES('rebuild'); DELETE FROM memory_current; INSERT INTO memory_current SELECT id,kind,status FROM memories m WHERE NOT EXISTS(SELECT 1 FROM memories n WHERE n.supersedes_id=m.id); INSERT OR REPLACE INTO meta VALUES('search_version','1');`)) || !archive_backfill() || !execute("PRAGMA user_version=6") || !execute("COMMIT") {
+  (search_ready==0 && !execute(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild'); INSERT INTO memories_fts(memories_fts) VALUES('rebuild'); DELETE FROM memory_current; INSERT INTO memory_current SELECT id,kind,status FROM memories m WHERE NOT EXISTS(SELECT 1 FROM memories n WHERE n.supersedes_id=m.id); INSERT OR REPLACE INTO meta VALUES('search_version','1');`)) || !archive_backfill() || !execute("PRAGMA user_version=7") || !execute("COMMIT") {
   execute("ROLLBACK")
   release_state()
   return false
@@ -297,7 +297,7 @@ conversation_add_reply :: proc "c" (text, state: cstring) -> i64 {
  return add_message("assistant",text,state)
 }
 
-add_message :: proc(role, text: cstring, state: cstring = nil) -> i64 {
+add_message :: proc(role, text: cstring, state: cstring = nil, annotation: cstring = nil) -> i64 {
  if !ready { fail("History is not open."); return 0 }
  if role == nil || (string(role) != "user" && string(role) != "assistant") || text == nil || !valid_text(string(text)) { fail("A user/assistant role and nonempty UTF-8 text of at most 64KiB are required."); return 0 }
  if message_count == 0x7fffffff || !execute("BEGIN IMMEDIATE") do return 0
@@ -305,7 +305,7 @@ add_message :: proc(role, text: cstring, state: cstring = nil) -> i64 {
  defer { archive_group=0; if !committed do execute("ROLLBACK") }
  if !archive_begin() do return 0
  id := insert_message(string(role), string(text))
- if id == 0 || (state!=nil && !assistant_state_save(id,string(state))) || (string(role) == "assistant" && !enqueue_uncovered()) || !archive_finish() || !execute("COMMIT") do return 0
+ if id == 0 || (annotation!=nil && !insert_annotation(id,string(annotation))) || (state!=nil && !assistant_state_save(id,string(state))) || ((string(role) == "assistant" || annotation!=nil) && !enqueue_uncovered()) || !archive_finish() || !execute("COMMIT") do return 0
  committed = true
  message_count += 1
  clear_cache()
@@ -322,8 +322,8 @@ conversation_load_window :: proc "c" (first, limit: i32) -> bool {
  if !ready || first < 0 || first > message_count || limit < 0 || limit > MAX_WINDOW do return fail("Invalid message window (maximum 80).")
  next := make([dynamic]Cached_Message)
  success := false
- defer if !success { for row in next { delete(row.text); delete(row.role) }; delete(next) }
- stmt := prepare("SELECT id,role,content FROM messages WHERE id>?2 ORDER BY id LIMIT ?1")
+ defer if !success { for row in next { delete(row.text); delete(row.role); delete(row.annotation) }; delete(next) }
+ stmt := prepare("SELECT id,role,content,coalesce((SELECT kind FROM message_annotations WHERE message_id=id),'') FROM messages WHERE id>?2 ORDER BY id LIMIT ?1")
  if stmt == nil do return false
  defer sqlite3_finalize(stmt)
  if !bind_int(stmt, 1, i64(limit)) || !bind_int(stmt, 2, i64(first)) do return false
@@ -333,9 +333,10 @@ conversation_load_window :: proc "c" (first, limit: i32) -> bool {
   if code != 100 do return fail("Could not load messages.")
   role, er := strings.clone_to_cstring(string(sqlite3_column_text(stmt, 1)))
   text, et := strings.clone_to_cstring(string(sqlite3_column_text(stmt, 2)))
-  if er != nil || et != nil { delete(role); delete(text); return fail("Not enough memory to display history.") }
-  if reserve(&next,len(next)+1) != nil { delete(role); delete(text); return fail("Not enough memory to display history.") }
-  append(&next,Cached_Message{sqlite3_column_int64(stmt,0),text,role})
+  annotation, ea := strings.clone_to_cstring(string(sqlite3_column_text(stmt, 3)))
+  if er != nil || et != nil || ea != nil { delete(role); delete(text); delete(annotation); return fail("Not enough memory to display history.") }
+  if reserve(&next,len(next)+1) != nil { delete(role); delete(text); delete(annotation); return fail("Not enough memory to display history.") }
+  append(&next,Cached_Message{sqlite3_column_int64(stmt,0),text,role,annotation})
  }
  clear_cache()
  cache, cache_first, success = next, first, true
@@ -361,7 +362,7 @@ conversation_message_id :: proc "c" (index: i32) -> i64 {
 conversation_pending_job :: proc "c" () -> cstring {
  context = runtime.default_context()
  if !ready { fail("History is not open."); return nil }
- pending:=prepare(`SELECT j.id,j.first_id,j.end_id,(SELECT sum(length(CAST(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END)) AS BLOB))+1) FROM messages WHERE id BETWEEN j.first_id AND j.end_id) FROM jobs j WHERE processed=0 ORDER BY j.id LIMIT 4096`)
+ pending:=prepare(`SELECT j.id,j.first_id,j.end_id,(SELECT sum(length(CAST(json_patch(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END)),coalesce((SELECT json_object('annotation',kind) FROM message_annotations WHERE message_id=id),'{}')) AS BLOB))+1) FROM messages WHERE id BETWEEN j.first_id AND j.end_id) FROM jobs j WHERE processed=0 ORDER BY j.id LIMIT 4096`)
  if pending==nil do return nil
  first_job,last_job,first_id,end_id,total_bytes:i64
  valid:=true
@@ -382,7 +383,7 @@ conversation_pending_job :: proc "c" () -> cstring {
  sqlite3_finalize(pending)
  if !valid { fail("Could not read pending memory work."); return nil }
  if first_job==0 do return result_text("{}")
- output:=prepare(`SELECT json_object('id',?1,'first_job_id',?2,'messages',json((SELECT json_group_array(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END))) FROM (SELECT * FROM messages WHERE id BETWEEN ?3 AND ?4 ORDER BY id))))`)
+ output:=prepare(`SELECT json_object('id',?1,'first_job_id',?2,'messages',json((SELECT json_group_array(json_patch(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END)),coalesce((SELECT json_object('annotation',kind) FROM message_annotations WHERE message_id=id),'{}'))) FROM (SELECT * FROM messages WHERE id BETWEEN ?3 AND ?4 ORDER BY id))))`)
  if output==nil do return nil
  defer sqlite3_finalize(output)
  if !bind_int(output,1,last_job) || !bind_int(output,2,first_job) || !bind_int(output,3,first_id) || !bind_int(output,4,end_id) || sqlite3_step(output)!=100 { fail("Could not serialize pending memory work."); return nil }
@@ -464,7 +465,7 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
   }
   sqlite3_finalize(batch)
   if !valid do return fail("Memory batches must cover contiguous pending work within the message budget.")
-  size:=prepare(`SELECT sum(length(CAST(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END)) AS BLOB))+1) FROM messages WHERE id BETWEEN ?1 AND ?2`)
+  size:=prepare(`SELECT sum(length(CAST(json_patch(json_object('id',id,'role',role,'content',substr(content,1,4000),'created_at',created_at,'truncated',json(CASE WHEN length(content)>4000 THEN 'true' ELSE 'false' END)),coalesce((SELECT json_object('annotation',kind) FROM message_annotations WHERE message_id=id),'{}')) AS BLOB))+1) FROM messages WHERE id BETWEEN ?1 AND ?2`)
   if size==nil do return false
   valid=bind_int(size,1,first) && bind_int(size,2,end_id) && sqlite3_step(size)==100 && sqlite3_column_int64(size,0)<=MEMORY_BATCH_BYTES
   sqlite3_finalize(size)
@@ -676,7 +677,7 @@ CONTEXT_JSON :: `WITH RECURSIVE query_grams(i,token) AS (
  FROM message_ids pick CROSS JOIN messages m ON m.id=pick.id
  LEFT JOIN recent_messages recent ON recent.id=m.id LEFT JOIN past_messages past ON past.id=m.id
 ), message_rows AS (
- SELECT id,category,priority,json_object('id',id,'role',role,'content',excerpt,'created_at',created_at,'truncated',json(CASE WHEN excerpt!=content THEN 'true' ELSE 'false' END)) AS row FROM message_text
+ SELECT id,category,priority,json_patch(json_object('id',id,'role',role,'content',excerpt,'created_at',created_at,'truncated',json(CASE WHEN excerpt!=content THEN 'true' ELSE 'false' END)),coalesce((SELECT json_object('annotation',kind) FROM message_annotations WHERE message_id=message_text.id),'{}')) AS row FROM message_text
 ), message_budget AS (
  SELECT id,category,row,sum(length(CAST(row AS BLOB))+1) OVER(PARTITION BY category ORDER BY priority,id DESC ROWS UNBOUNDED PRECEDING) AS bytes FROM message_rows
 )
@@ -735,9 +736,9 @@ conversation_export :: proc "c" (output_dir: cstring) -> bool {
  folder:=strings.concatenate({base,"/",name})
  defer delete(folder)
  if os.make_directory(folder)!=nil do return fail("Could not create export snapshot directory.")
- counts:[11]i64
- chunks:[11]int
- for table,i in ([]string{"messages","memories","memory_sources","jobs","person_profiles","source_documents","memory_document_sources","persona_revisions","continuity_revisions","assistant_states","episode_nodes"}) {
+ counts:[13]i64
+ chunks:[13]int
+ for table,i in ([]string{"messages","memories","memory_sources","jobs","person_profiles","source_documents","memory_document_sources","persona_revisions","continuity_revisions","assistant_states","episode_nodes","message_annotations","episode_rebuilds"}) {
   row_sql:=archive_table(table).row_json
   sql:=fmt.aprintf("SELECT %s FROM %s ORDER BY rowid",row_sql,table)
   csql,e:=strings.clone_to_cstring(sql)
@@ -789,7 +790,7 @@ conversation_export :: proc "c" (output_dir: cstring) -> bool {
  person:=json_query(person_sql)
  delete(person_sql)
  if person==nil do return false
- metadata:=fmt.aprintf(`{{"format":2,"snapshot":"%s","person":%s,"messages":%d,"memories":%d,"sources":%d,"jobs":%d,"profiles":%d,"documents":%d,"document_sources":%d,"persona_revisions":%d,"continuity_revisions":%d,"assistant_states":%d,"episode_nodes":%d,"chunks":{{"messages":%d,"memories":%d,"memory_sources":%d,"jobs":%d,"person_profiles":%d,"source_documents":%d,"memory_document_sources":%d,"persona_revisions":%d,"continuity_revisions":%d,"assistant_states":%d,"episode_nodes":%d}},"chunk_bytes_target":1048576,"chunk_bytes_max":16777216}}`,name,string(person),counts[0],counts[1],counts[2],counts[3],counts[4],counts[5],counts[6],counts[7],counts[8],counts[9],counts[10],chunks[0],chunks[1],chunks[2],chunks[3],chunks[4],chunks[5],chunks[6],chunks[7],chunks[8],chunks[9],chunks[10])
+ metadata:=fmt.aprintf(`{{"format":2,"snapshot":"%s","person":%s,"messages":%d,"memories":%d,"sources":%d,"jobs":%d,"profiles":%d,"documents":%d,"document_sources":%d,"persona_revisions":%d,"continuity_revisions":%d,"assistant_states":%d,"episode_nodes":%d,"message_annotations":%d,"episode_rebuilds":%d,"chunks":{{"messages":%d,"memories":%d,"memory_sources":%d,"jobs":%d,"person_profiles":%d,"source_documents":%d,"memory_document_sources":%d,"persona_revisions":%d,"continuity_revisions":%d,"assistant_states":%d,"episode_nodes":%d,"message_annotations":%d,"episode_rebuilds":%d}},"chunk_bytes_target":1048576,"chunk_bytes_max":16777216}}`,name,string(person),counts[0],counts[1],counts[2],counts[3],counts[4],counts[5],counts[6],counts[7],counts[8],counts[9],counts[10],counts[11],counts[12],chunks[0],chunks[1],chunks[2],chunks[3],chunks[4],chunks[5],chunks[6],chunks[7],chunks[8],chunks[9],chunks[10],chunks[11],chunks[12])
  defer delete(metadata)
  temporary:=strings.concatenate({base,"/metadata.json.tmp"})
  defer delete(temporary)

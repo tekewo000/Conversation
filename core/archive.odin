@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS archive_events(transaction_id INTEGER NOT NULL REFERE
 Archive_Table :: struct { name, columns, row_json: string }
 ARCHIVE_TABLES := [?]Archive_Table{
  {"messages","id,role,content,created_at",`json_object('id',id,'role',role,'content',content,'created_at',created_at)`},
+ {"message_annotations","message_id,kind",`json_object('message_id',message_id,'kind',kind)`},
  {"jobs","id,first_id,end_id,processed",`json_object('id',id,'first_id',first_id,'end_id',end_id,'processed',processed)`},
  {"memories","id,job_id,ordinal,kind,actor,subject,key,text,scope,certainty,status,supersedes_id,valid_from,created_at",`json_object('id',id,'job_id',job_id,'ordinal',ordinal,'kind',kind,'actor',actor,'subject',subject,'key',key,'text',text,'scope',scope,'certainty',certainty,'status',status,'supersedes_id',supersedes_id,'valid_from',valid_from,'created_at',created_at)`},
  {"memory_sources","memory_id,message_id",`json_object('memory_id',memory_id,'message_id',message_id)`},
@@ -23,6 +24,7 @@ ARCHIVE_TABLES := [?]Archive_Table{
  {"continuity_revisions","id,through_id,state,created_at",`json_object('id',id,'through_id',through_id,'state',state,'created_at',created_at)`},
  {"assistant_states","id,through_id,state,created_at",`json_object('id',id,'through_id',through_id,'state',state,'created_at',created_at)`},
  {"episode_nodes","memory_id,root_key,parent_key,node_key,node",`json_object('memory_id',memory_id,'root_key',root_key,'parent_key',parent_key,'node_key',node_key,'node',node)`},
+ {"episode_rebuilds","id,through_id,request_id,roots,created_at",`json_object('id',id,'through_id',through_id,'request_id',request_id,'roots',roots,'created_at',created_at)`},
 }
 archive_group:i64
 ARCHIVE_GROUP_MAX :: 16*1048576
@@ -81,6 +83,7 @@ archive_backfill :: proc() -> bool {
  if scalar("SELECT count(*) FROM meta WHERE key='archive_version' AND value='1'")==1 do return true
  defer archive_group=0
  for table in ARCHIVE_TABLES {
+  if table.name=="message_annotations" do continue
   sql:=fmt.aprintf("SELECT rowid FROM %s ORDER BY rowid",table.name)
   csql:=strings.clone_to_cstring(sql)
   delete(sql)
@@ -95,6 +98,9 @@ archive_backfill :: proc() -> bool {
    if code!=100 { success=false; break }
    if archive_group==0 && !archive_begin() { success=false; break }
    if !archive_capture(table.name,sqlite3_column_int64(rows,0)) { success=false; break }
+   if table.name=="messages" && message_is_annotation(sqlite3_column_int64(rows,0)) {
+    if !archive_capture("message_annotations",sqlite3_column_int64(rows,0)) { success=false; break }
+   }
    count+=1
    if count==128 || archive_bytes()>=524288 {
     if !archive_finish() { success=false; break }
@@ -166,7 +172,7 @@ archive_row_valid :: proc(table: ^Archive_Table, row: json.Object) -> bool {
   integer:=column=="id" || column=="slot" || column=="version" || column=="job_id" || column=="ordinal" || column=="first_id" || column=="end_id" || column=="processed" || column=="memory_id" || column=="message_id" || column=="document_id" || column=="supersedes_id" || column=="through_id"
   if integer {
    number,ok:=value.(json.Integer)
-   if !ok || number<0 || (number==0 && column!="ordinal" && column!="processed") || (column=="processed" && number>1) do return false
+   if !ok || number<0 || (number==0 && column!="ordinal" && column!="processed" && !(table.name=="episode_rebuilds" && column=="through_id")) || (column=="processed" && number>1) do return false
    continue
   }
   text_value,ok:=value.(json.String)
@@ -185,11 +191,12 @@ archive_row_valid :: proc(table: ^Archive_Table, row: json.Object) -> bool {
   case "section":maximum=512
   case "changes":maximum=32768
   case "node":maximum=32768
+  case "roots":maximum=CONTINUITY_MAX_BYTES
   case "state":maximum=ASSISTANT_STATE_MAX_BYTES if table.name=="assistant_states" else CONTINUITY_MAX_BYTES
   }
   if !ok || len(text)>maximum || !utf8.valid_string(text) || strings.contains_rune(text,0) || (column!="valid_from" && column!="parent_key" && len(strings.trim_space(text))==0) do return false
   if (column=="created_at" || column=="occurred_at" || (column=="valid_from" && text!="")) && !valid_date(text) do return false
-  if column=="person_id" && !person_uuid_valid(text) do return false
+  if (column=="person_id" || column=="request_id") && !person_uuid_valid(text) do return false
  }
  if table.name=="memories" {
   kind:=string(row["kind"].(json.String))
@@ -220,6 +227,13 @@ archive_restore_event :: proc(event: json.Object, encoded: string) -> bool {
  }
  if table.name=="assistant_states" {
   if i64(row["id"].(json.Integer))!=scalar("SELECT coalesce(max(id),0)+1 FROM assistant_states") || !assistant_state_valid(i64(row["through_id"].(json.Integer)),string(row["state"].(json.String))) do return fail("Invalid archived assistant state; nothing was restored.")
+ }
+ if table.name=="message_annotations" {
+  kind:=string(row["kind"].(json.String))
+  if (kind!="scene" && kind!="meta") || scalar("SELECT coalesce(max(id),0) FROM messages WHERE role='user'")!=i64(row["message_id"].(json.Integer)) || scalar("SELECT count(*) FROM messages")!=i64(row["message_id"].(json.Integer)) do return fail("Invalid archived note annotation.")
+ }
+ if table.name=="episode_rebuilds" {
+  if i64(row["id"].(json.Integer))!=scalar("SELECT coalesce(max(id),0)+1 FROM episode_rebuilds") || !rebuild_roots_valid(i64(row["through_id"].(json.Integer)),string(row["roots"].(json.String)),true) || !rebuild_roots_namespace_valid(string(row["request_id"].(json.String)),string(row["roots"].(json.String))) do return fail("Invalid archived rebuilt hierarchy.")
  }
  if table.name=="episode_nodes" {
   if !episode_archive_link_valid(row) do return fail("Invalid archived episode hierarchy; nothing was restored.")
@@ -286,7 +300,7 @@ conversation_apply_archive :: proc "c" (payload: cstring) -> bool {
   record,record_ok:=record_value.(json.Object)
   cursor,cursor_ok:=record["cursor"].(json.Integer)
   events,events_ok:=record["events"].(json.Array)
-  if !record_ok || len(record)!=2 || !cursor_ok || i64(cursor)!=i64(from)+i64(i)+1 || !events_ok || len(events)==0 || len(events)>32768 do return fail("Invalid archive transaction.")
+  if !record_ok || len(record)!=2 || !cursor_ok || i64(cursor)!=i64(from)+i64(i)+1 || !events_ok || len(events)==0 || len(events)>ARCHIVE_GROUP_MAX/64 do return fail("Invalid archive transaction.")
   if i64(cursor)<=latest {
    sql:=fmt.aprintf("SELECT (SELECT json_group_array(json(event_json)) FROM (SELECT event_json FROM archive_events WHERE transaction_id=?1 ORDER BY ordinal))=json_extract(?2,'$.records[%d].events')",i)
    csql:=strings.clone_to_cstring(sql)

@@ -44,8 +44,10 @@ public final class MemoryWork extends Worker {
             synchronized (MainActivity.storeGate) { person = new PersonRegistry(context.getFilesDir()).active(); }
             if (person == null) return Result.success();
             MemoryStore store = new MemoryStore(context, person.id);
+            MemoryRebuild rebuild = new MemoryRebuild(person.directory);
             JSONObject batch = store.pending();
-            if (batch.optLong("id", 0) == 0 && store.pendingPersona().optLong("through_id", 0) == 0) return Result.success();
+            boolean normal = batch.optLong("id", 0) > 0 || store.pendingPersona().optLong("through_id", 0) > 0;
+            if (!normal && !MemoryRebuild.pending(person.directory)) return Result.success();
             int batchMessages = batch.optJSONArray("messages") == null ? 0 : batch.getJSONArray("messages").length();
             long started = android.os.SystemClock.elapsedRealtime();
             android.util.Log.i("ConversationMemory", "Starting batch messages=" + batchMessages);
@@ -60,12 +62,23 @@ public final class MemoryWork extends Worker {
             session = new ChatSession(store);
             setProgressAsync(new Data.Builder().putLong("updated", System.currentTimeMillis()).build()).get();
             // One extraction plus reflection stays inside WorkManager's execution deadline.
-            boolean more = session.processMemories((instructions, input, delta) -> {
+            ChatSession.Transport backend = (instructions, input, delta) -> {
                 if (isStopped()) throw new IOException("記憶の整理が中断されました。");
                 if (instructions.equals(ChatSession.REFLECT)) publishProgress(store);
                 return connection.request(request, instructions, input, delta, true,
-                        instructions.equals(ChatSession.EXTRACT) ? 300 : 120);
-            }, 1);
+                        instructions.equals(ChatSession.REFLECT) ? 120 : 300);
+            };
+            boolean more;
+            if (normal) more = session.processMemories(backend, 1) || MemoryRebuild.pending(person.directory);
+            else more = rebuild.step(new MemoryRebuild.Native() {
+                public JSONObject context() throws Exception { return store.context(""); }
+                public JSONObject batch(long afterId, long throughId) throws Exception {
+                    return store.rebuildBatch(afterId, throughId);
+                }
+                public boolean publish() throws Exception {
+                    return store.publishRebuild();
+                }
+            }, backend);
             preferences.edit().putString("memory_status", "").apply();
             JSONObject progress = store.context("").getJSONObject("memory_progress");
             android.util.Log.i("ConversationMemory", "Completed batch messages=" + batchMessages

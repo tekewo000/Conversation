@@ -317,6 +317,7 @@ public final class PersonDeviceProbe extends Instrumentation {
             report("PASS: native export metadata JSON and BackupArchive ZIP preserve Unicode and original source");
             if (!"hierarchy".equals(arguments.getString("mode"))) probeExpandedPerson(root);
             probeHierarchicalMemory(root);
+            probeContextNotesAndHistoricalRebuild(root);
             probeDigestRules(root);
         } finally {
             cleanupOwned(app, probeId);
@@ -340,6 +341,48 @@ public final class PersonDeviceProbe extends Instrumentation {
         try { databaseDigests(file, baseline); throw new IOException("Changed old rows were not detected"); }
         catch (AssertionError expected) { check(expected.getMessage().equals("Existing SQLite rows changed: jobs"), "Changed-row failure identifies only its table"); }
         report("PASS: release row-prefix digests permit appended rows and detect changed old rows");
+    }
+
+    private void probeContextNotesAndHistoricalRebuild(File root) throws Exception {
+        File directory = new File(root, UUID.randomUUID().toString());
+        switchPerson(directory, person(directory.getName(), "Rebuild Probe", "再整理と返信なし補足の合成試験").toString());
+        check(add("京都旅行の初日は喫茶店で過ごした。") == 1, "Rebuild original user message");
+        check((Long)call("nativeAddMessage", new Class<?>[]{byte[].class, byte[].class}, bytes("assistant"), bytes("旅の話を聞いた。")) == 2, "Rebuild original assistant message");
+        check((Long)call("nativeAddNote", new Class<?>[]{byte[].class, byte[].class}, bytes("scene"), bytes("雨が降り始め、二人は軒下にいる")) == 3, "Saved scene without a reply");
+        check((Long)call("nativeAddNote", new Class<?>[]{byte[].class, byte[].class}, bytes("meta"), bytes("静かな雰囲気で進める")) == 4, "Saved meta without a reply");
+        JSONObject before = context();
+        check(before.getJSONArray("messages").length() == 4, "Notes do not generate assistant messages");
+        check(before.getJSONArray("messages").getJSONObject(2).getString("annotation").equals("scene")
+                && before.getJSONArray("messages").getJSONObject(3).getString("annotation").equals("meta"), "Context preserves annotation kinds");
+        long pending = before.getJSONObject("memory_progress").getLong("pending_jobs");
+        Class<?> rebuild = Class.forName(PACKAGE + ".MemoryRebuild");
+        java.lang.reflect.Constructor<?> constructor = rebuild.getDeclaredConstructor(File.class); constructor.setAccessible(true);
+        Object cache = constructor.newInstance(directory);
+        Method request = rebuild.getDeclaredMethod("request", long.class); request.setAccessible(true); request.invoke(cache, 4L);
+        JSONObject trip = episode("trip", "京都旅行", "京都旅行全体の概要", "");
+        JSONObject day = episode("day1", "1日目", "喫茶店で過ごした", "");
+        try (SQLiteDatabase stage = SQLiteDatabase.openDatabase(new File(directory, ".memory-rebuild.sqlite3").getPath(), null, SQLiteDatabase.OPEN_READWRITE)) {
+            stage.execSQL("INSERT INTO nodes(root_key,key,parent_key,depth,node,path) VALUES(?,?,?,?,?,?)", new Object[]{"trip", "trip", "", 0, trip.toString(), "京都旅行"});
+            stage.execSQL("INSERT INTO nodes(root_key,key,parent_key,depth,node,path) VALUES(?,?,?,?,?,?)", new Object[]{"trip", "day1", "trip", 1, day.toString(), "京都旅行 / 1日目"});
+            stage.execSQL("UPDATE meta SET value=? WHERE key='roots'", new Object[]{new JSONArray().put(trip).toString()});
+            stage.execSQL("UPDATE meta SET value='4' WHERE key='cursor'");
+        }
+        success(call("nativePublishRebuild", new Class<?>[]{}));
+        long cursor = archive().getLong("through_cursor");
+        success(call("nativePublishRebuild", new Class<?>[]{}));
+        check(archive().getLong("through_cursor") == cursor, "Rebuild publication retry is idempotent");
+        JSONObject after = context();
+        check(after.getJSONArray("messages").length() == 4 && after.getJSONObject("memory_progress").getLong("pending_jobs") == pending,
+                "Publishing preserves original messages and normal extraction jobs");
+        JSONObject summary = after.getJSONObject("continuity").getJSONArray("episodes").getJSONObject(0);
+        check(summary.getString("scene").equals("京都旅行"), "Published root summaries replace the overview");
+        JSONObject query = new JSONObject().put("root_key", summary.getString("key")).put("parent_key", summary.getString("key")).put("scope", "shared").put("after_id", 0);
+        JSONObject children = new JSONObject((String)call("nativeEpisodeChildren", new Class<?>[]{byte[].class}, bytes(query.toString())));
+        check(children.getJSONArray("episodes").getJSONObject(0).getString("scene").equals("1日目"), "Published rebuilt children are browsable");
+        success(call("nativeExport", new Class<?>[]{}));
+        JSONObject metadata = new JSONObject(new String(Files.readAllBytes(new File(directory, "export/metadata.json").toPath()), StandardCharsets.UTF_8));
+        check(metadata.getInt("message_annotations") == 2 && metadata.getInt("episode_rebuilds") == 1, "Snapshot includes notes and completed rebuild");
+        report("CONTEXT_REBUILD_RELEASE_PASS: no-reply scene/meta, Android stage, native publication, retry, hierarchy, job preservation and snapshot");
     }
 
     private void probeHierarchicalMemory(File root) throws Exception {

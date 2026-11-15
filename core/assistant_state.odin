@@ -26,7 +26,7 @@ assistant_state_valid :: proc(through_id: i64, encoded: string) -> bool {
  root,parsed:=parse_json(transmute([]byte)encoded)
  if !parsed do return false
  defer json.destroy_value(root)
- boundary:=prepare("SELECT coalesce((SELECT max(id) FROM messages WHERE role='user' AND id<?1),0) WHERE EXISTS(SELECT 1 FROM messages WHERE id=?1 AND role='assistant') AND ?1>(SELECT coalesce(max(through_id),0) FROM assistant_states)")
+ boundary:=prepare("SELECT coalesce((SELECT max(id) FROM messages WHERE role='user' AND id NOT IN (SELECT message_id FROM message_annotations) AND id<?1),0) WHERE EXISTS(SELECT 1 FROM messages WHERE id=?1 AND role='assistant') AND ?1>(SELECT coalesce(max(through_id),0) FROM assistant_states)")
  if boundary==nil do return false
  valid:=bind_int(boundary,1,through_id) && sqlite3_step(boundary)==100
  user_id:i64
@@ -55,9 +55,9 @@ assistant_state_save :: proc(through_id: i64, payload: string) -> bool {
   if !ok do return fail("Expected an assistant state object or null.")
   if !assistant_state_fields_valid(entry,false) do return false
  }
- if scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE role='user')")!=1 do return fail("Assistant state needs a user source.")
+ if scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE role='user' AND id NOT IN (SELECT message_id FROM message_annotations))")!=1 do return fail("Assistant state needs a user source.")
  // Evidence comes from the saved exchange, never model-generated IDs.
- stmt:=prepare("INSERT INTO assistant_states(through_id,state) VALUES(?1,CASE WHEN json_type(?2)='null' THEN 'null' ELSE json_set(?2,'$.source_ids',json_array((SELECT max(id) FROM messages WHERE role='user'),?1)) END)")
+ stmt:=prepare("INSERT INTO assistant_states(through_id,state) VALUES(?1,CASE WHEN json_type(?2)='null' THEN 'null' ELSE json_set(?2,'$.source_ids',json_array((SELECT max(id) FROM messages WHERE role='user' AND id NOT IN (SELECT message_id FROM message_annotations)),?1)) END)")
  if stmt==nil do return false
  saved:=bind_int(stmt,1,through_id) && bind_text(stmt,2,payload) && sqlite3_step(stmt)==101
  sqlite3_finalize(stmt)

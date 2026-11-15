@@ -15,6 +15,7 @@ int import_calls = 0;
 int64_t archive_cursor = -1;
 bool archive_fails = false;
 bool window_fails = false;
+bool annotated = false;
 
 void check_person_switching() {
     assert(switch_person("previous-person", ""));
@@ -48,6 +49,9 @@ void check_person_switching() {
 void check_snapshots() {
     messages = {"日本語 😀\n\"quote\"\\\t\r\x01"};
     assert(message_snapshot(-1) == "{\"first\":0,\"total\":1,\"messages\":[{\"id\":1,\"role\":\"user\",\"text\":\"日本語 😀\\u000a\\\"quote\\\"\\\\\\u0009\\u000d\\u0001\"}]}");
+    annotated = true;
+    assert(message_snapshot(-1).find("\"annotation\":\"scene\"") != std::string::npos);
+    annotated = false;
     messages.clear();
     for (int i = 0; i < 20000; ++i) messages.push_back("message-" + std::to_string(i));
     text_requests = 0;
@@ -92,6 +96,7 @@ void check_transcript() {
 } // namespace
 
 extern "C" {
+const char* conversation_message_annotation(int32_t) { return annotated ? "scene" : ""; }
 bool conversation_init(const char* path) {
     ++init_calls; cache_first = -1; cache_count = 0;
     if (std::string(path) == "bad-path") { mock_error = "cannot open requested path"; return false; }

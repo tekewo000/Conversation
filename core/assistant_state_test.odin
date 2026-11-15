@@ -133,7 +133,7 @@ schema_four_upgrade_retains_legacy_feeling_until_a_new_reply :: proc(t: ^testing
  assert(execute("DROP TABLE assistant_states; PRAGMA user_version=4"))
  conversation_close()
  assert(conversation_init(c))
- testing.expect_value(t,scalar("PRAGMA user_version"),6)
+ testing.expect_value(t,scalar("PRAGMA user_version"),7)
  testing.expect_value(t,string(conversation_assistant_emotion()),"ほっとして嬉しい")
  assert(conversation_add_message("user","勝ったよ")>0)
  assert(conversation_add_reply("やったね",REPLY_STATE_FIXTURE)>0)

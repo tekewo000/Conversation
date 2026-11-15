@@ -18,6 +18,8 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTextInput
@@ -48,6 +50,30 @@ class ComposeUiTest {
 
     private fun install() {
         ui = ComposeUi(compose.activity, { menus++ }, { sends++ }, { pages.add(it) })
+    }
+
+    @Test fun longPressOffersContextNotesWithoutSendingAnOrdinaryMessage() {
+        var notes = 0
+        compose.runOnUiThread {
+            install(); ui.enabled = true; ui.draft = "雨が降り始めた"
+            ui.onSendNote = Runnable { notes++ }
+        }
+        compose.onNodeWithContentDescription("送信").performTouchInput { longClick() }
+        compose.runOnIdle { assertEquals(0, sends); assertEquals(1, notes) }
+        compose.onNodeWithContentDescription("送信").performClick()
+        compose.runOnIdle { assertEquals(1, sends); ui.sending = true }
+        compose.onNodeWithContentDescription("送信").assertIsNotEnabled()
+    }
+
+    @Test fun sceneAndMetaNotesAreShownWithoutAnAssistantBubbleOrTyping() {
+        compose.runOnUiThread {
+            install()
+            ui.setMessages("""{"first":0,"total":2,"messages":[{"id":1,"role":"user","text":"雨が降り始めた","annotation":"scene"},{"id":2,"role":"user","text":"静かな雰囲気で進める","annotation":"meta"}]}""")
+        }
+        compose.onNodeWithText("情景 · 返信なし").assertIsDisplayed()
+        compose.onNodeWithText("メタ · 返信なし").assertIsDisplayed()
+        compose.onNodeWithText("雨が降り始めた").assertIsDisplayed()
+        compose.onNodeWithContentDescription("返答を入力中").assertDoesNotExist()
     }
 
     @Test fun typingShowsThePersonBeforeTextAndKeepsTheBubbleThroughSaveAndEmotionUpdate() {

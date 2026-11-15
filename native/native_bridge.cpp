@@ -131,6 +131,8 @@ std::string message_snapshot(int requested_first) {
         append_json_string(result, role);
         result += ",\"text\":";
         append_json_string(result, text);
+        const char* annotation = conversation_message_annotation(i);
+        if (annotation && *annotation) { result += ",\"annotation\":"; append_json_string(result, annotation); }
         result += '}';
     }
     result += "]}";
@@ -231,6 +233,39 @@ Java_jp_tekewo_conversation_MainActivity_nativeAddMessage(JNIEnv* env, jclass, j
         error = "保存に必要なメモリを確保できませんでした。";
         return 0;
     }
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeAddNote(JNIEnv* env, jclass, jbyteArray kind, jbyteArray text) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        std::string note_kind, note;
+        if (!core_ready || !read_text(env, kind, note_kind) || !read_text(env, text, note)) { error = "入力が無効です。"; return 0; }
+        const int64_t id = conversation_add_note(note_kind.c_str(), note.c_str());
+        if (!id) { core_error(); return 0; }
+        error.clear(); return id;
+    } catch (const std::exception&) { error = "メモを保存できませんでした。"; return 0; }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeRebuildBatch(JNIEnv* env, jclass, jlong after, jlong through) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        if (!core_ready) { error = "保存先が無効です。"; return java_string(env, ""); }
+        const char* result = conversation_rebuild_batch(after, through);
+        if (!result) { core_error(); return java_string(env, ""); }
+        error.clear(); return java_string(env, result);
+    } catch (const std::exception&) { error = "過去の会話を読み込めませんでした。"; return java_string(env, ""); }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativePublishRebuild(JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        if (!core_ready) return java_string(env, "保存先が無効です。");
+        if (!conversation_publish_rebuild()) { core_error(); return java_string(env, error); }
+        error.clear(); return java_string(env, "");
+    } catch (const std::exception&) { return java_string(env, "体験の再構築を公開できませんでした。"); }
 }
 
 extern "C" JNIEXPORT jstring JNICALL
