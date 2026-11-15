@@ -19,7 +19,9 @@ import org.json.JSONObject;
 
 public final class MemoryWork extends Worker {
     static final String NAME = "conversation-memory";
-    private static final AtomicBoolean running = new AtomicBoolean();
+    static final String RECORD_NAME = "conversation-records";
+    private static final AtomicBoolean maintenanceRunning = new AtomicBoolean();
+    private static final AtomicBoolean recordsRunning = new AtomicBoolean();
     private volatile ChatGptConnection connection;
     private volatile ChatSession session;
     private volatile MemoryRebuild rebuild;
@@ -28,23 +30,41 @@ public final class MemoryWork extends Worker {
 
     public MemoryWork(Context context, WorkerParameters parameters) { super(context, parameters); }
     private static SharedPreferences settings(Context context) { return context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE); }
-    static boolean isRunning() { return running.get(); }
-    static String status(Context context) { return settings(context).getString("memory_status", ""); }
+    static boolean isRunning() { return recordsRunning.get() || maintenanceRunning.get(); }
+    static String status(Context context) {
+        SharedPreferences preferences = settings(context);
+        String records = preferences.getString("memory_status", "");
+        if (records.isEmpty()) records = preferences.getString("memory_phase", "");
+        String persona = preferences.getString("persona_status", "");
+        return records.isEmpty() ? persona : persona.isEmpty() ? records : records + "\n" + persona;
+    }
     static void enqueue(Context context) {
-        enqueue(context, ExistingWorkPolicy.APPEND_OR_REPLACE);
+        schedule(context, true, recordsRunning.get() ? ExistingWorkPolicy.APPEND_OR_REPLACE : ExistingWorkPolicy.REPLACE);
+        schedule(context, false, ExistingWorkPolicy.KEEP);
     }
     static void resume(Context context) {
-        enqueue(context, isRunning() ? ExistingWorkPolicy.APPEND_OR_REPLACE : ExistingWorkPolicy.REPLACE);
+        schedule(context, true, recordsRunning.get() ? ExistingWorkPolicy.APPEND_OR_REPLACE : ExistingWorkPolicy.REPLACE);
+        schedule(context, false, maintenanceRunning.get() ? ExistingWorkPolicy.APPEND_OR_REPLACE : ExistingWorkPolicy.REPLACE);
     }
-    private static void enqueue(Context context, ExistingWorkPolicy policy) {
+    static void cancel(Context context) {
+        WorkManager manager = WorkManager.getInstance(context);
+        manager.cancelUniqueWork(NAME);
+        manager.cancelUniqueWork(RECORD_NAME);
+        settings(context).edit().putString("memory_phase", "").apply();
+    }
+    private static void schedule(Context context, boolean records, ExistingWorkPolicy policy) {
         OneTimeWorkRequest request = new OneTimeWorkRequest.Builder(MemoryWork.class)
+                .setInputData(new Data.Builder().putBoolean("records", records).build())
                 .setConstraints(new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS).build();
-        WorkManager.getInstance(context).enqueueUniqueWork(NAME, policy, request);
+        WorkManager.getInstance(context).enqueueUniqueWork(records ? RECORD_NAME : NAME, policy, request);
     }
 
     @Override public Result doWork() {
         Context context = getApplicationContext();
+        boolean records = getInputData().getBoolean("records", false);
+        operation = records ? "会話の記憶整理" : "人物像の振り返り";
+        AtomicBoolean running = records ? recordsRunning : maintenanceRunning;
         if (!running.compareAndSet(false, true)) return Result.retry();
         try {
             connection = new ChatGptConnection(context);
@@ -53,15 +73,19 @@ public final class MemoryWork extends Worker {
             synchronized (MainActivity.storeGate) { person = new PersonRegistry(context.getFilesDir()).active(); }
             if (person == null) return Result.success();
             MemoryStore store = new MemoryStore(context, person.id);
-            rebuild = new MemoryRebuild(person.directory, () -> setProgressAsync(new Data.Builder().putLong("updated", System.currentTimeMillis()).build()));
-            rebuilding = MemoryRebuild.pending(person.directory);
-            JSONObject batch = rebuilding ? new JSONObject() : store.pending();
-            boolean normal = !rebuilding && (batch.optLong("id", 0) > 0 || store.pendingPersona().optLong("through_id", 0) > 0);
-            if (!normal && !rebuilding) return Result.success();
+            rebuild = new MemoryRebuild(person.directory, this::updated);
+            rebuilding = !records && MemoryRebuild.pending(person.directory);
+            if (rebuilding) operation = "過去の記憶の再整理";
+            JSONObject batch = records ? store.pending() : new JSONObject();
+            if (records ? batch.optLong("id", 0) <= 0 : !rebuilding && store.pendingPersona().optLong("through_id", 0) <= 0) {
+                preferencesClear(context, records);
+                return Result.success();
+            }
             int batchMessages = batch.optJSONArray("messages") == null ? 0 : batch.getJSONArray("messages").length();
             long started = android.os.SystemClock.elapsedRealtime();
-            android.util.Log.i("ConversationMemory", rebuilding ? "Starting historical rebuild" : "Starting batch messages=" + batchMessages);
+            android.util.Log.i("ConversationMemory", rebuilding ? "Starting historical rebuild" : records ? "Starting records messages=" + batchMessages : "Starting persona review");
             if (rebuilding) rebuild.phase("AIへの接続を確認しています");
+            else if (records) recordPhase("会話の記憶整理：AIへの接続を確認しています");
             List<ChatRequest.Model> models = connection.listModels();
             if (models.isEmpty()) throw new IOException("利用できるモデルがありません。");
             SharedPreferences preferences = settings(context);
@@ -71,54 +95,76 @@ public final class MemoryWork extends Worker {
             if (!model.efforts.contains(effort)) effort = "";
             ChatRequest request = new ChatRequest(model, effort, model.supportsFast && preferences.getBoolean("fast_mode:" + model.slug, false));
             session = new ChatSession(store);
-            setProgressAsync(new Data.Builder().putLong("updated", System.currentTimeMillis()).build()).get();
-            // One extraction plus reflection stays inside WorkManager's execution deadline.
+            updated();
             ChatSession.Transport backend = (instructions, input, delta) -> {
                 if (isStopped()) throw new IOException("記憶の整理が中断されました。");
                 operation = instructions.equals(ChatSession.REFLECT) ? "人物像の振り返り" : instructions.equals(ChatSession.REBUILD) ? "過去の記憶の再整理" : "会話の記憶整理";
-                if (instructions.equals(ChatSession.REFLECT)) publishProgress(store);
-                return connection.request(request, instructions, input, delta, true,
-                        instructions.equals(ChatSession.REFLECT) ? 120 : 300);
+                if (records) recordPhase(operation + "：" + batchMessages + "発言の差分を整理しています");
+                final long[] lastUpdate = {0};
+                final int[] received = {0};
+                String response = connection.request(request, instructions, input, chunk -> {
+                    delta.accept(chunk);
+                    if (records) {
+                        received[0] += chunk.length();
+                        long now = android.os.SystemClock.elapsedRealtime();
+                        if (now - lastUpdate[0] >= 1000) {
+                            lastUpdate[0] = now;
+                            recordPhase(operation + "：応答を受信しています（" + received[0] + "文字）");
+                        }
+                    }
+                }, true, instructions.equals(ChatSession.REFLECT) ? 120 : 300);
+                if (records) recordPhase(operation + "：出典を確認して保存しています");
+                return response;
             };
             boolean more;
-            if (normal) more = session.processMemories(backend, 1);
-            else more = rebuild.step(new MemoryRebuild.Native() {
-                public JSONObject context() throws Exception { return store.context(""); }
-                public JSONObject batch(long afterId, long throughId) throws Exception {
-                    return store.rebuildBatch(afterId, throughId);
-                }
-                public boolean publish() throws Exception {
-                    return store.publishRebuild();
-                }
-            }, backend) || store.pending().optLong("id", 0) > 0 || store.pendingPersona().optLong("through_id", 0) > 0;
-            preferences.edit().putString("memory_status", "").apply();
+            if (records) {
+                session.extractMemories(backend, 1);
+                more = store.pending().optLong("id", 0) > 0;
+                preferences.edit().putString("memory_status", "").putString("memory_phase", "").apply();
+                schedule(context, false, ExistingWorkPolicy.APPEND_OR_REPLACE);
+            } else if (rebuilding) {
+                more = rebuild.step(new MemoryRebuild.Native() {
+                    public JSONObject context() throws Exception { return store.context(""); }
+                    public JSONObject batch(long afterId, long throughId) throws Exception { return store.rebuildBatch(afterId, throughId); }
+                    public boolean publish() throws Exception { return store.publishRebuild(); }
+                }, backend) || store.pendingPersona().optLong("through_id", 0) > 0;
+            } else {
+                session.processMemories(backend, 0);
+                more = rebuild.isPending() || store.pendingPersona().optLong("through_id", 0) > 0;
+                preferences.edit().putString("persona_status", "").apply();
+            }
             JSONObject progress = store.context("").getJSONObject("memory_progress");
-            android.util.Log.i("ConversationMemory", "Completed batch messages=" + batchMessages
+            android.util.Log.i("ConversationMemory", "Completed " + (records ? "records" : rebuilding ? "rebuild" : "persona")
                     + " processed=" + progress.getLong("processed_messages") + " total=" + progress.getLong("total_messages")
                     + " elapsed_ms=" + (android.os.SystemClock.elapsedRealtime() - started));
-            setProgressAsync(new Data.Builder().putLong("processed", progress.getLong("processed_messages"))
-                    .putLong("updated", System.currentTimeMillis()).build()).get();
-            if (more && !isStopped()) enqueue(context);
+            updated();
+            if (more && !isStopped()) schedule(context, records, ExistingWorkPolicy.APPEND_OR_REPLACE);
             return Result.success();
         } catch (Exception error) {
-            if (!rebuilding && rebuild != null && rebuild.isPending() && !isStopped()) {
+            if (!records && !rebuilding && rebuild != null && rebuild.isPending() && !isStopped()) {
                 rebuild.phase("一括整理を先に進めます");
-                enqueue(context);
+                schedule(context, false, ExistingWorkPolicy.APPEND_OR_REPLACE);
                 return Result.success();
             }
             String message = operation + "は自動で再試行します。" + (error instanceof IOException ? error.getMessage() : error instanceof org.json.JSONException ? "AIの応答が必要な記憶形式になっていません。" : "");
-            settings(context).edit().putString("memory_status", message).apply();
-            if (rebuild != null) rebuild.failed(message);
+            if (rebuilding && rebuild != null) rebuild.failed(message);
+            else settings(context).edit().putString(records ? "memory_status" : "persona_status", message).apply();
             return Result.retry();
         } finally { running.set(false); }
     }
 
-    private void publishProgress(MemoryStore store) throws Exception {
-        JSONObject progress = store.context("").getJSONObject("memory_progress");
-        setProgressAsync(new Data.Builder().putLong("processed", progress.getLong("processed_messages"))
-                .putLong("updated", System.currentTimeMillis()).build()).get();
+    private void updated() {
+        setProgressAsync(new Data.Builder().putLong("updated", System.currentTimeMillis()).build());
     }
-
+    private static void preferencesClear(Context context, boolean records) {
+        SharedPreferences.Editor editor = settings(context).edit().putString(records ? "memory_status" : "persona_status", "");
+        if (records) editor.putString("memory_phase", "");
+        editor.apply();
+    }
+    private void recordPhase(String value) {
+        settings(getApplicationContext()).edit().putString("memory_status", "").putString("memory_phase", value).apply();
+        updated();
+    }
     @Override public void onStopped() {
         if (session != null) session.cancel();
         if (connection != null) connection.cancel();

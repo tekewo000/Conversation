@@ -13,7 +13,9 @@ CREATE TRIGGER IF NOT EXISTS continuity_no_delete BEFORE DELETE ON continuity_re
 `
 
 BASE_CONTINUITY_JSON :: `coalesce((SELECT json_set(state,'$.through_id',through_id) FROM continuity_revisions ORDER BY id DESC LIMIT 1),'{}')`
-EXTRACTED_CONTINUITY_JSON :: `(CASE WHEN coalesce((SELECT through_id FROM episode_rebuilds ORDER BY id DESC LIMIT 1),-1)>=(SELECT coalesce(max(through_id),0) FROM continuity_revisions) THEN json_set(`+BASE_CONTINUITY_JSON+`,'$.episodes',json((SELECT roots FROM episode_rebuilds ORDER BY id DESC LIMIT 1))) ELSE `+BASE_CONTINUITY_JSON+` END)`
+// Publication order must survive table-wise snapshots; exact legacy timestamp ties prefer continuity.
+CONTINUITY_PUBLICATION_TIME :: `strftime('%Y-%m-%dT%H:%M:%fZ',max(julianday('now'),coalesce(julianday((SELECT created_at FROM continuity_revisions ORDER BY id DESC LIMIT 1)),0)+1.0/86400000,coalesce(julianday((SELECT created_at FROM episode_rebuilds ORDER BY id DESC LIMIT 1)),0)+1.0/86400000))`
+EXTRACTED_CONTINUITY_JSON :: `(CASE WHEN EXISTS(SELECT 1 FROM episode_rebuilds WHERE id=(SELECT max(id) FROM episode_rebuilds) AND (through_id>(SELECT coalesce(max(through_id),0) FROM continuity_revisions) OR (through_id=(SELECT coalesce(max(through_id),0) FROM continuity_revisions) AND created_at>coalesce((SELECT created_at FROM continuity_revisions ORDER BY id DESC LIMIT 1),'')))) THEN json_set(`+BASE_CONTINUITY_JSON+`,'$.episodes',json((SELECT roots FROM episode_rebuilds ORDER BY id DESC LIMIT 1))) ELSE `+BASE_CONTINUITY_JSON+` END)`
 
 CONTINUITY_JSON :: `(CASE WHEN EXISTS(SELECT 1 FROM assistant_states) THEN json_set(`+EXTRACTED_CONTINUITY_JSON+`,'$.assistant_state',json(`+CURRENT_ASSISTANT_STATE_JSON+`),'$.assistant_state_through_id',(SELECT through_id FROM assistant_states ORDER BY id DESC LIMIT 1)) ELSE `+EXTRACTED_CONTINUITY_JSON+` END)`
 
@@ -34,7 +36,7 @@ conversation_assistant_emotion :: proc "c" () -> cstring {
  return json_query(`SELECT coalesce(json_extract(`+CURRENT_ASSISTANT_STATE_JSON+`,'$.emotion'),'') WHERE ?1=''`)
 }
 
-continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
+continuity_revision_valid :: proc(through_id: i64, state_text: string, delta:bool=false) -> bool {
  if len(state_text)>131072 do return fail("Conversation state exceeds the extraction budget.")
  root,parsed:=parse_json(transmute([]byte)state_text,12)
  if !parsed do return false
@@ -44,9 +46,11 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
  for key in obj { if key!="threads" && key!="episodes" && key!="assistant_state" && key!="relationship" do return fail("Unknown conversation state field.") }
  threads,threads_ok:=obj["threads"].(json.Array)
  episodes,episodes_ok:=obj["episodes"].(json.Array)
- if !threads_ok || !episodes_ok || len(threads)>6 || len(episodes)>30 do return fail("Expected at most six threads and thirty episodes.")
- compact:=episode_compact(state_text)
- if compact==nil || len(string(compact))>CONTINUITY_MAX_BYTES do return fail("Conversation state exceeds 64 KiB.")
+ if !threads_ok || !episodes_ok || len(threads)>(32 if delta else 6) || len(episodes)>(128 if delta else 30) do return fail("Expected at most six threads and thirty episodes, or 32 threads and 128 roots in a delta.")
+ if !delta {
+  compact:=episode_compact(state_text)
+  if compact==nil || len(string(compact))>CONTINUITY_MAX_BYTES do return fail("Conversation state exceeds 64 KiB.")
+ }
  episode_entries: json.Array
  defer delete(episode_entries)
  seen:=make(map[string]bool)
@@ -143,26 +147,65 @@ continuity_revision_valid :: proc(through_id: i64, state_text: string) -> bool {
  return true
 }
 
-continuity_save :: proc(through_id: i64, value: json.Value) -> bool {
+continuity_delta_merge :: proc(through_id:i64,delta:string) -> cstring {
+ boundary:=fmt.caprintf("%d",through_id)
+ defer delete(boundary)
+ // A completed rebuild may be ahead of ordinary extraction; adopt it only once the job catches up.
+ return json_query(`WITH old AS (SELECT CASE WHEN (SELECT through_id FROM episode_rebuilds ORDER BY id DESC LIMIT 1)<=CAST(?2 AS INTEGER) THEN `+EXTRACTED_CONTINUITY_JSON+` ELSE `+BASE_CONTINUITY_JSON+` END AS state),
+ groups(kind) AS (VALUES('threads'),('episodes')),
+ changes AS (SELECT kind,CAST(item.key AS INTEGER) AS position,item.value AS entry FROM groups,json_each(?1,'$.'||kind) item),
+ previous AS (SELECT kind,CAST(item.key AS INTEGER) AS position,item.value AS entry FROM old,groups,json_each(old.state,'$.'||kind) item),
+ merged AS (
+ SELECT p.kind,p.position,coalesce(c.entry,p.entry) AS entry,c.entry IS NOT NULL AS changed FROM previous p LEFT JOIN changes c ON c.kind=p.kind AND json_extract(c.entry,'$.key')=json_extract(p.entry,'$.key')
+ UNION ALL SELECT c.kind,1000+c.position,c.entry,1 FROM changes c WHERE NOT EXISTS(SELECT 1 FROM previous p WHERE p.kind=c.kind AND json_extract(p.entry,'$.key')=json_extract(c.entry,'$.key'))
+ ), ranked AS (SELECT *,row_number() OVER(PARTITION BY kind ORDER BY
+ CASE WHEN kind='threads' AND json_extract(entry,'$.status')='resolved' THEN 1 ELSE 0 END,
+ CASE WHEN kind='threads' THEN changed ELSE 0 END DESC,
+ CASE WHEN kind='threads' THEN (SELECT max(CAST(value AS INTEGER)) FROM json_each(entry,'$.source_ids')) ELSE 0 END DESC,position DESC) AS rank FROM merged)
+ SELECT json_set(?1,'$.threads',json((SELECT json_group_array(json(entry)) FROM (SELECT entry FROM ranked WHERE kind='threads' AND rank<=6 ORDER BY position))),
+ '$.episodes',json((SELECT json_group_array(json(entry)) FROM (SELECT entry FROM ranked WHERE kind='episodes' AND rank<=30 ORDER BY position))))`,delta,boundary)
+}
+
+continuity_save :: proc(through_id: i64, value: json.Value, delta:bool=false) -> bool {
  encoded,e:=json.marshal(value)
  defer delete(encoded)
  if e!=nil do return false
+ incoming:=string(encoded)
+ normalized,merged_delta:string
+ defer { delete(normalized); delete(merged_delta) }
+ if delta {
+  obj,ok:=value.(json.Object)
+  if !ok do return fail("Expected a conversation delta object.")
+  for key in obj { if key!="threads" && key!="episodes" && key!="relationship" do return fail("Unknown conversation delta field.") }
+  for key in ([2]string{"threads","episodes"}) {
+   if entry,exists:=obj[key]; exists { if _,array_ok:=entry.(json.Array); !array_ok do return fail("Conversation delta entries must be arrays.") }
+  }
+  result:=json_query(`SELECT json_set(?1,'$.threads',json(coalesce(json_extract(?1,'$.threads'),'[]')),'$.episodes',json(coalesce(json_extract(?1,'$.episodes'),'[]')))`,incoming)
+  if result==nil do return false
+  normalized=strings.clone(string(result))
+  if !continuity_revision_valid(through_id,normalized,true) do return false
+  result=continuity_delta_merge(through_id,normalized)
+  if result==nil do return false
+  merged_delta=strings.clone(string(result))
+  incoming=merged_delta
+ }
  // Omitted fields retain state; a topic-only extraction must not erase feelings or trust.
  merged:=json_query(`WITH mood AS (SELECT CASE WHEN json_type(?1,'$.assistant_state') IS NULL AND json_type(`+EXTRACTED_CONTINUITY_JSON+`,'$.assistant_state') IS NOT NULL THEN json_set(?1,'$.assistant_state',json_extract(`+EXTRACTED_CONTINUITY_JSON+`,'$.assistant_state')) ELSE ?1 END AS state)
- SELECT CASE WHEN json_type(state,'$.relationship') IS NULL AND json_type(`+EXTRACTED_CONTINUITY_JSON+`,'$.relationship') IS NOT NULL THEN json_set(state,'$.relationship',json_extract(`+EXTRACTED_CONTINUITY_JSON+`,'$.relationship')) ELSE state END FROM mood`,string(encoded))
+ SELECT CASE WHEN json_type(state,'$.relationship') IS NULL AND json_type(`+EXTRACTED_CONTINUITY_JSON+`,'$.relationship') IS NOT NULL THEN json_set(state,'$.relationship',json_extract(`+EXTRACTED_CONTINUITY_JSON+`,'$.relationship')) ELSE state END FROM mood`,incoming)
  if merged==nil do return false
  state:=strings.clone(string(merged))
  defer delete(state)
  if !continuity_revision_valid(through_id,state) do return false
  compact:=episode_compact(state)
  if compact==nil do return false
- stmt:=prepare("INSERT INTO continuity_revisions(through_id,state) VALUES(?1,?2)")
+ stmt:=prepare("INSERT INTO continuity_revisions(through_id,state,created_at) VALUES(?1,?2,"+CONTINUITY_PUBLICATION_TIME+")")
  if stmt==nil do return false
  saved:=bind_int(stmt,1,through_id) && bind_text(stmt,2,string(compact)) && sqlite3_step(stmt)==101
  sqlite3_finalize(stmt)
  if !saved || !archive_capture("continuity_revisions",sqlite3_last_insert_rowid(db)) do return false
- // Searchable event revisions preserve scenes after they leave the recent window.
- for item in value.(json.Object)["episodes"].(json.Array) {
+ // Index the original changed trees, including roots pruned from a delta's recent window.
+ episodes,_:=value.(json.Object)["episodes"].(json.Array)
+ for item in episodes {
   if !continuity_index_episode(through_id,item.(json.Object)) do return false
  }
  return true

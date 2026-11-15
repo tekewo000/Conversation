@@ -127,7 +127,8 @@ public final class PersonDeviceProbe extends Instrumentation {
         android.content.SharedPreferences preferences = app.getSharedPreferences("MainActivity", Context.MODE_PRIVATE);
         String model = preferences.getString("model_slug", "");
         report("MEMORY_CONFIG " + new JSONObject().put("model", model).put("effort", preferences.getString("reasoning_effort:" + model, ""))
-                .put("automatic", true).put("status", preferences.getString("memory_status", "")));
+                .put("automatic", true).put("status", preferences.getString("memory_status", ""))
+                .put("phase", preferences.getString("memory_phase", "")).put("persona_status", preferences.getString("persona_status", "")));
         File root = app.getFilesDir().getCanonicalFile();
         JSONObject registry = new JSONObject(new String(Files.readAllBytes(new File(root, "people-registry.json").toPath()), StandardCharsets.UTF_8));
         String id = registry.getString("active_id");
@@ -150,9 +151,9 @@ public final class PersonDeviceProbe extends Instrumentation {
         if (!work.isFile()) work = app.getDatabasePath("androidx.work.workdb");
         if (work.isFile() && !Files.isSymbolicLink(work.toPath())) {
             try (SQLiteDatabase jobs = SQLiteDatabase.openDatabase(work.getPath(), null, SQLiteDatabase.OPEN_READONLY | SQLiteDatabase.NO_LOCALIZED_COLLATORS);
-                    Cursor rows = jobs.rawQuery("SELECT w.state,w.run_attempt_count,w.last_enqueue_time,w.stop_reason FROM WorkSpec w JOIN WorkName n ON n.work_spec_id=w.id WHERE n.name='conversation-memory' ORDER BY w.last_enqueue_time DESC LIMIT 8", null)) {
+                    Cursor rows = jobs.rawQuery("SELECT w.state,w.run_attempt_count,w.last_enqueue_time,w.stop_reason,n.name FROM WorkSpec w JOIN WorkName n ON n.work_spec_id=w.id WHERE n.name IN ('conversation-memory','conversation-records') ORDER BY w.last_enqueue_time DESC LIMIT 8", null)) {
                 while (rows.moveToNext()) report("WORK_STATUS " + new JSONObject().put("state", rows.getInt(0)).put("attempts", rows.getInt(1))
-                        .put("enqueued_at_ms", rows.getLong(2)).put("stop_reason", rows.getInt(3)));
+                        .put("enqueued_at_ms", rows.getLong(2)).put("stop_reason", rows.getInt(3)).put("queue", rows.getString(4)));
             }
         }
         File file = new File(directory, "conversation.sqlite3");
@@ -432,6 +433,28 @@ public final class PersonDeviceProbe extends Instrumentation {
         success(call("nativeExport", new Class<?>[]{}));
         JSONObject metadata = new JSONObject(new String(Files.readAllBytes(new File(directory, "export/metadata.json").toPath()), StandardCharsets.UTF_8));
         check(metadata.getInt("episode_nodes") == 4, "Hierarchy links reach the snapshot");
+        check(add("別の旅行と相談の続きも覚える。") == 3, "Delta original user source");
+        check((Long)call("nativeAddMessage", new Class<?>[]{byte[].class, byte[].class}, bytes("assistant"), bytes("続きも聞いた。")) == 4, "Delta assistant source");
+        JSONArray roots = new JSONArray(), threads = new JSONArray();
+        for (int i = 0; i < 31; i++) roots.put(episode("new-trip-" + i, "新しい旅行", "旅行" + i, "")
+                .put("source_ids", new JSONArray().put(3)));
+        for (int i = 0; i < 8; i++) threads.put(new JSONObject().put("key", "topic-" + i).put("text", "相談" + i)
+                .put("status", "active").put("source_ids", new JSONArray().put(3)));
+        JSONObject pending = new JSONObject((String)call("nativePendingJob", new Class<?>[]{}));
+        JSONObject changes = new JSONObject().put("memories", new JSONArray()).put("continuity_delta",
+                new JSONObject().put("threads", threads).put("episodes", roots));
+        success(call("nativeApplyJob", new Class<?>[]{long.class, byte[].class}, pending.getLong("id"), bytes(changes.toString())));
+        JSONObject updated = context();
+        check(updated.getJSONObject("memory_progress").getLong("processed_messages") == 4, "Delta records advance only after saving");
+        check(updated.getJSONObject("continuity").getJSONArray("episodes").length() == 30
+                && updated.getJSONObject("continuity").getJSONArray("threads").length() == 6, "Release app selects bounded active summaries");
+        JSONObject oldChildren = new JSONObject((String)call("nativeEpisodeChildren", new Class<?>[]{byte[].class},
+                bytes(new JSONObject().put("root_key", "trip").put("parent_key", "morning").put("scope", "shared").put("after_id", 0).toString())));
+        check(oldChildren.getJSONArray("episodes").length() == 1, "Evicted overview keeps its saved details");
+        success(call("nativeExport", new Class<?>[]{}));
+        JSONObject updatedMetadata = new JSONObject(new String(Files.readAllBytes(new File(directory, "export/metadata.json").toPath()), StandardCharsets.UTF_8));
+        check(updatedMetadata.getInt("episode_nodes") == 35, "All changed roots and old details reach the snapshot");
+        report("DELTA_RELEASE_PASS: changed records, six threads, thirty summaries, all changed roots and old hierarchy retained");
         report("HIERARCHY_RELEASE_PASS: four levels, one root, leaf retrieval, ancestor context, paged JNI, original evidence, Git and snapshot links");
     }
 

@@ -10,7 +10,7 @@ import "core:unicode/utf8"
 
 MAX_MESSAGE_BYTES :: 65536
 MAX_WINDOW :: 80
-MEMORY_BATCH_MESSAGES :: 4096
+MEMORY_BATCH_MESSAGES :: 64
 MEMORY_BATCH_BYTES :: 262144
 Cached_Message :: struct { id: i64, text, role, annotation: cstring }
 Allocation_Check :: struct { backing: mem.Allocator, failed: bool }
@@ -429,7 +429,8 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
  obj, obj_ok := root.(json.Object)
  items, items_ok := obj["memories"].(json.Array)
  if !obj_ok || !items_ok || len(items)>32 do return fail("Expected at most 32 memory records.")
- for key in obj { if key!="memories" && key!="continuity" && key!="first_job_id" do return fail("Unknown extraction result field.") }
+ for key in obj { if key!="memories" && key!="continuity" && key!="continuity_delta" && key!="first_job_id" do return fail("Unknown extraction result field.") }
+ if _,full:=obj["continuity"]; full { if _,delta:=obj["continuity_delta"]; delta do return fail("Choose either continuity or continuity_delta.") }
  first_job_id:=job_id
  if value,exists:=obj["first_job_id"]; exists {
   first,valid:=value.(json.Integer)
@@ -538,6 +539,7 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
   for src in sources { if !insert_source(memory_id, i64(src.(json.Integer))) do return false }
  }
  if state,exists:=obj["continuity"]; exists { if !continuity_save(end_id,state) do return false }
+ if state,exists:=obj["continuity_delta"]; exists { if !continuity_save(end_id,state,true) do return false }
  done := prepare("UPDATE jobs SET processed=1 WHERE processed=0 AND (id=?1 OR id BETWEEN ?2 AND ?3) RETURNING id")
  if done == nil do return false
  success := bind_int(done,1,effective_job_id) && bind_int(done,2,first_job_id) && bind_int(done,3,job_id)

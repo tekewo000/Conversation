@@ -252,7 +252,7 @@ conversation_publish_rebuild :: proc "c" () -> bool {
   if committed do last_error=""
   return committed
  }
- stmt:=prepare("INSERT INTO episode_rebuilds(through_id,request_id,roots) VALUES(?1,?2,?3)")
+ stmt:=prepare("INSERT INTO episode_rebuilds(through_id,request_id,roots,created_at) VALUES(?1,?2,?3,"+CONTINUITY_PUBLICATION_TIME+")")
  if stmt==nil do return false
  saved:=bind_int(stmt,1,i64(boundary)) && bind_text(stmt,2,request) && bind_text(stmt,3,normalized_roots) && sqlite3_step(stmt)==101
  sqlite3_finalize(stmt)

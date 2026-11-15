@@ -171,7 +171,7 @@ conversation_apply_persona :: proc "c" (through_id: i64, payload: cstring) -> bo
   if committed do last_error=""
   return committed
  }
- if through_id!=persona_pending_through() do return fail("Persona review is stale.")
+ if through_id>persona_pending_through() do return fail("Persona review is ahead of processed evidence.")
  if !persona_revision_valid(through_id,string(encoded)) do return false
  if !archive_begin() do return false
  stmt:=prepare("INSERT INTO persona_revisions(through_id,changes) VALUES(?1,json(?2))")

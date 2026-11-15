@@ -193,7 +193,8 @@ public final class MainActivity extends ComponentActivity {
         setBusy(false);
         refreshMessages();
         startSemanticMemory();
-        androidx.work.WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData(MemoryWork.NAME).observe(this, work -> {
+        for (String name : new String[]{MemoryWork.NAME, MemoryWork.RECORD_NAME})
+        androidx.work.WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData(name).observe(this, work -> {
             memoryStatus = MemoryWork.status(this);
             refreshMessages();
             if (semanticMemory != null) semanticMemory.refresh();
@@ -525,7 +526,7 @@ public final class MainActivity extends ComponentActivity {
         }
         panel.rows.add(new ComposeUi.Row(connection.hasSession() ? "ログアウト" : "保存した接続情報をリセット", () -> {
             if (busy) return;
-            androidx.work.WorkManager.getInstance(this).cancelUniqueWork(MemoryWork.NAME);
+            MemoryWork.cancel(this);
             worker.execute(() -> {
                 connection.signOut(); availableModels = null;
                 ui(() -> { connectionStatus = connection.signOutStatus(); showConnection(); });
@@ -725,7 +726,7 @@ public final class MainActivity extends ComponentActivity {
                         panel.message += "\n\n会話の記憶整理\n" + processed + " / " + total + " 発言（残り" + Math.max(0, total - processed) + "発言）";
                     }
                     if (rebuilding) panel.message += "\n\n" + rebuildStatus;
-                    else if (!memoryStatus.isEmpty()) panel.message += "\n\n" + memoryStatus;
+                    if (!memoryStatus.isEmpty()) panel.message += "\n\n" + memoryStatus;
                     panel.rows.add(new ComposeUi.Row("短期記憶（直近30往復）", () -> showMemoryHistory(person, snapshot, false)));
                     panel.rows.add(new ComposeUi.Row("中期記憶（" + (episodes == null ? 0 : episodes.length()) + "件）",
                             () -> showMemoryHistory(person, snapshot, true)));

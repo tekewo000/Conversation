@@ -120,6 +120,28 @@ class MemoryRebuildTest {
         } finally { manager.cancelUniqueWork(MemoryWork.NAME).result.get(5, TimeUnit.SECONDS) }
     }
 
+    @Test fun newConversationRecordsAreNotBlockedByMaintenanceBackoff() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        assertFalse(ChatGptConnection(context).hasSession())
+        val manager = androidx.work.WorkManager.getInstance(context)
+        val delayed = androidx.work.OneTimeWorkRequest.Builder(MemoryWork::class.java).setInitialDelay(1, TimeUnit.HOURS).build()
+        try {
+            manager.enqueueUniqueWork(MemoryWork.NAME, androidx.work.ExistingWorkPolicy.REPLACE, delayed).result.get(5, TimeUnit.SECONDS)
+            MemoryWork.enqueue(context)
+            val deadline = android.os.SystemClock.uptimeMillis() + 5000
+            var records: List<androidx.work.WorkInfo>
+            do {
+                records = manager.getWorkInfosForUniqueWork("conversation-records").get(5, TimeUnit.SECONDS)
+                if (records.isEmpty()) Thread.sleep(20)
+            } while (records.isEmpty() && android.os.SystemClock.uptimeMillis() < deadline)
+            assertTrue(records.isNotEmpty() && records.none { it.state == androidx.work.WorkInfo.State.BLOCKED })
+            assertEquals(androidx.work.WorkInfo.State.ENQUEUED, manager.getWorkInfoById(delayed.id).get(5, TimeUnit.SECONDS)!!.state)
+        } finally {
+            manager.cancelUniqueWork(MemoryWork.NAME).result.get(5, TimeUnit.SECONDS)
+            manager.cancelUniqueWork("conversation-records").result.get(5, TimeUnit.SECONDS)
+        }
+    }
+
     @Test fun stagedBranchesSurviveRestartAndOmittedChildrenAndInvalidOutputRollsBack() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val directory = File(context.cacheDir, "rebuild-test-${UUID.randomUUID()}").apply { mkdirs() }
