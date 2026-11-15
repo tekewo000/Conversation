@@ -218,6 +218,8 @@ public final class ChatSessionTest {
         reflectionFailurePreservesReplyAndRetry();
         cancelledReflectionDoesNotCommit();
         rejectedReflectionStaysPending();
+        rejectedReflectionIsCorrectedWithValidationFeedback();
+        cancelledReflectionCorrectionMakesNoFurtherRequest();
         System.out.println("PASS: chat completion, cancellation, raw evidence, memory retry, query bounds, persona context and reflection retry");
     }
 
@@ -733,13 +735,57 @@ public final class ChatSessionTest {
         };
         store.pending = false; store.personaJob = reflectionJob();
         ChatSession session = new ChatSession(store);
+        int[] requests = {0};
         try {
-            session.processMemories((instructions, input, delta) -> "{\"changes\":[]}");
+            session.processMemories((instructions, input, delta) -> { requests[0]++; return "{\"changes\":[]}"; });
             throw new AssertionError("rejected personality evidence was accepted");
         } catch (IOException expected) {}
+        assert requests[0] == 2 : "Invalid responses must not cause an unbounded repair loop";
         assert store.personaApplied == 0 && store.personaJob.getLong("through_id") == 36;
         rejectReflection[0] = false;
         session.processMemories((instructions, input, delta) -> "{\"changes\":[]}");
         assert store.personaApplied == 1;
+    }
+
+    private static void rejectedReflectionIsCorrectedWithValidationFeedback() throws Exception {
+        String invalid = "{\"changes\":[{\"field\":\"identity\",\"text\":\"別人\",\"reason\":\"指示\",\"source_ids\":[25,26,27,28]}]}";
+        String corrected = invalid.replace("identity", "relationship").replace("別人", "意見を交わせる関係");
+        Store store = new Store() {
+            @Override public void applyPersona(long throughId, String payload) throws Exception {
+                if (payload.equals(invalid)) throw new IOException("Unsupported persona field. Use preferences, relationship, outlook, speaking_style or disposition.");
+                super.applyPersona(throughId, payload);
+            }
+        };
+        store.pending = false; store.personaJob = reflectionJob();
+        int[] requests = {0};
+        boolean more = new ChatSession(store).processMemories((instructions, input, delta) -> {
+            assert instructions.equals(ChatSession.REFLECT);
+            if (++requests[0] == 1) return invalid;
+            JSONObject data = new JSONObject(input.getJSONObject(0).getString("content"));
+            assert data.getJSONObject("validation_error").getString("response").equals(invalid);
+            assert data.getJSONObject("validation_error").getString("reason").contains("Unsupported persona field");
+            assert data.getLong("through_id") == 36 && data.getJSONArray("messages").length() == 14;
+            return corrected;
+        });
+        assert requests[0] == 2 && !more;
+        assert store.personaApplied == 1 && store.personaThrough == 36 && store.personaPayload.equals(corrected);
+    }
+
+    private static void cancelledReflectionCorrectionMakesNoFurtherRequest() throws Exception {
+        ChatSession[] session = {null};
+        Store store = new Store() {
+            @Override public void applyPersona(long throughId, String payload) throws Exception {
+                session[0].cancel();
+                throw new IOException("Persona text exceeds the limit.");
+            }
+        };
+        store.pending = false; store.personaJob = reflectionJob();
+        session[0] = new ChatSession(store);
+        int[] requests = {0};
+        try {
+            session[0].processMemories((instructions, input, delta) -> { requests[0]++; return "{\"changes\":[]}"; });
+            throw new AssertionError("Cancellation must stop the correction");
+        } catch (IOException expected) {}
+        assert requests[0] == 1 && store.personaApplied == 0 && store.personaJob.getLong("through_id") == 36;
     }
 }

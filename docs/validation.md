@@ -1,5 +1,14 @@
 # Validation record
 
+## 2026-11-16 — v0.9.2 persona reflection recovery
+
+- Reproduced the missing correction path with a rejected persona response: the Java regression failed before the fix, then passed with the rejected output and validation reason supplied to one bounded correction request. Persistent rejection keeps the same review pending; cancellation prevents the correction request. The Core regression verifies that oversized Japanese text/reasons are rejected with the field name and UTF-8 byte limit, without saving a revision, and that a corrected revision can advance the checkpoint.
+- `scripts/test-core.ps1` passed all 71 tests with strict/vetted checks and both standalone C ABI durable write/read processes. The first pre-fix run also exceeded the existing FTS 5-second threshold while the emulator was starting (7.306 s); the final run with the emulator stopped passed at 1.257 s. No FTS implementation or threshold was changed.
+- `scripts/test-connection.ps1` passed the connection/session and archive/person/image suites. The existing symlink test was skipped because symlink creation is unavailable.
+- `scripts/build-android.ps1 -Configuration Release -SkipTests` succeeded after the separate full Core run. Build directory: `build/android-release/run-7f2aa5775cde45dd945e7f32882c0a4f`. Manifest: 0.9.2/code33. R8/lint-vital, `test-release-bindings.ps1`, signature/lineage, debuggable and 16 KiB alignment checks passed. APK: `dist/Conversation-0.9.2-arm64-release.apk`, 15,216,969 bytes, SHA256 `96bc884ea27f9b73174e544c5402121e3a35642ef955dd522c9d6ea6a81a962a`.
+- Updated the task-owned API 36 `Conversation_Release_Check` emulator from signed 0.8.3 to signed 0.9.2 without uninstalling or clearing app data. `scripts/test-release-startup.ps1 -Serial emulator-5554` returned `RELEASE_STARTUP_PASS` using the installed minified Release: real model inference and Activity startup. Existing cached model assets were used.
+- No physical-device update, recovery of the reported person's actual pending review, live ChatGPT reflection, fresh-model download, or longitudinal personality quality was verified. A correction can make one extra model request per rejected review; a second invalid result preserves the pending work for automatic retry.
+
 ## 2026-11-15 — v0.9.0 signed Release publication
 
 - `scripts/build-android.ps1 -Configuration Release` completed from the management-UI working tree with manifest 0.9.0/code31. Build directory: `build/android-release/run-5fa37830b2ec4778b38241d28c74343b`. All 70 Core tests passed. ARM64 native compilation, Gradle/R8/lint-vital, manifest/debuggable checks, signing lineage, and 16 KiB native-library/APK alignment checks completed.

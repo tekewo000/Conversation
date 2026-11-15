@@ -1,6 +1,7 @@
 package conversation
 
 import "core:os"
+import "core:fmt"
 import "core:strings"
 import "core:testing"
 
@@ -10,6 +11,39 @@ persona_test_pairs :: proc(count: int) {
   assert(conversation_add_message("assistant","自分の考えを伝えてみるね")>0)
   assert(conversation_apply_job(scalar("SELECT max(id) FROM jobs"),`{"memories":[]}`))
  }
+}
+
+@(test)
+persona_validation_reports_the_field_and_utf8_limit :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-persona-validation-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ persona_test_pairs(6)
+ keys:=[]string{"text","reason"}
+ for key in keys {
+  limit:=1024
+  if key=="reason" do limit=512
+  long_text:=strings.repeat("あ",limit/3+1)
+  defer delete(long_text)
+  text,reason:="対話を重ねた関係","何度も意見を交わした"
+  if key=="text" do text=long_text
+  else do reason=long_text
+  encoded:=fmt.aprintf(`{{"changes":[{{"field":"relationship","text":"%s","reason":"%s","source_ids":[1,2,3,4]}}]}}`,text,reason)
+  defer delete(encoded)
+  payload:=strings.clone_to_cstring(encoded)
+  defer delete(payload)
+  assert(!conversation_apply_persona(12,payload))
+  testing.expect(t,strings.contains(string(conversation_error()),key),"Name the rejected field so the model can correct it.")
+  testing.expect(t,strings.contains(string(conversation_error()),"UTF-8"),"Japanese limits count bytes, not characters.")
+  testing.expect_value(t,scalar("SELECT count(*) FROM persona_revisions"),0)
+ }
+ assert(conversation_apply_persona(12,`{"changes":[{"field":"relationship","text":"対話を重ねた関係","reason":"何度も意見を交わした","source_ids":[1,2,3,4]}]}`))
+ testing.expect_value(t,string(conversation_pending_persona()),"{}")
 }
 
 @(test)

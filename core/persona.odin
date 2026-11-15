@@ -102,7 +102,10 @@ persona_revision_valid :: proc(through_id: i64, changes_text: string) -> bool {
   sources,s_ok:=record["source_ids"].(json.Array)
   fast:=field=="preferences" || field=="relationship"
   slow:=field=="outlook" || field=="speaking_style" || field=="disposition"
-  if !f_ok || !text_ok || !reason_ok || !s_ok || len(sources)>32 || (!fast && !slow) do return fail("Unsupported persona field, text or evidence.")
+  if !f_ok || (!fast && !slow) do return fail("Unsupported persona field. Use preferences, relationship, outlook, speaking_style or disposition.")
+  if !text_ok do return fail("Persona text must be nonempty valid UTF-8 without NUL, at most 1024 bytes.")
+  if !reason_ok do return fail("Persona reason must be nonempty valid UTF-8 without NUL, at most 512 bytes.")
+  if !s_ok || len(sources)>32 do return fail("Persona source_ids must be an array of at most 32 original-message IDs.")
   for earlier in changes[:i] { if earlier.(json.Object)["field"].(json.String)==record["field"].(json.String) do return fail("Duplicate persona field.") }
   users,assistants,new_users,new_assistants:=0,0,0,0
   oldest,newest:=through_id,i64(0)
