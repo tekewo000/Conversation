@@ -47,6 +47,44 @@ persona_validation_reports_the_field_and_utf8_limit :: proc(t: ^testing.T) {
 }
 
 @(test)
+persona_invalid_text_reports_the_specific_problem_without_advancing :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-persona-text-errors-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ persona_test_pairs(6)
+ cases:=[][2]string{
+  {`null`,"JSON string"},
+  {`123`,"JSON string"},
+  {`""`,"blank"},
+  {`"　 \n"`,"blank"},
+  {`"信頼\u0000関係"`,"NUL"},
+ }
+ for item in cases {
+  encoded:=fmt.aprintf(`{{"changes":[{{"field":"relationship","text":%s,"reason":"何度も意見を交わした","source_ids":[1,2,3,4]}}]}}`,item[0])
+  defer delete(encoded)
+  payload:=strings.clone_to_cstring(encoded)
+  defer delete(payload)
+  assert(!conversation_apply_persona(12,payload))
+  testing.expect(t,strings.contains(string(conversation_error()),item[1]),"Return the specific text error to the correction request.")
+  testing.expect_value(t,scalar("SELECT count(*) FROM persona_revisions"),0)
+  testing.expect(t,strings.contains(string(conversation_pending_persona()),`"through_id":12`))
+ }
+ text:=strings.repeat("あ",341)
+ defer delete(text)
+ encoded:=fmt.aprintf(`{{"changes":[{{"field":"relationship","text":"%sa","reason":"何度も意見を交わした","source_ids":[1,2,3,4]}}]}}`,text)
+ defer delete(encoded)
+ payload:=strings.clone_to_cstring(encoded)
+ defer delete(payload)
+ assert(conversation_apply_persona(12,payload),string(conversation_error()))
+ testing.expect_value(t,string(conversation_pending_persona()),"{}")
+}
+
+@(test)
 persona_state_is_always_available_outside_memory_search :: proc(t: ^testing.T) {
  dir,e:=os.make_directory_temp("","conversation-persona-*",context.allocator)
  assert(e==nil)

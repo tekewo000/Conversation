@@ -2,6 +2,7 @@ package conversation
 
 import "base:runtime"
 import "core:encoding/json"
+import "core:strings"
 
 PERSONA_PAYLOAD_MAX :: 32768
 PERSONA_SCHEMA :: `
@@ -97,13 +98,19 @@ persona_revision_valid :: proc(through_id: i64, changes_text: string) -> bool {
   record,record_ok:=value.(json.Object)
   if !record_ok || len(record)!=4 do return fail("Invalid persona change fields.")
   field,f_ok:=string_field(record,"field",32)
-  _,text_ok:=string_field(record,"text",1024)
+  text,text_ok:=string_field(record,"text",1024)
   _,reason_ok:=string_field(record,"reason",512)
   sources,s_ok:=record["source_ids"].(json.Array)
   fast:=field=="preferences" || field=="relationship"
   slow:=field=="outlook" || field=="speaking_style" || field=="disposition"
   if !f_ok || (!fast && !slow) do return fail("Unsupported persona field. Use preferences, relationship, outlook, speaking_style or disposition.")
-  if !text_ok do return fail("Persona text must be nonempty valid UTF-8 without NUL, at most 1024 bytes.")
+  if !text_ok {
+   _,is_string:=record["text"].(json.String)
+   if !is_string do return fail("Persona text must be a JSON string, not null, a number or an object.")
+   if len(strings.trim_space(text))==0 do return fail("Persona text must not be blank. Supply a nonempty evidence-based description.")
+   if len(text)>1024 do return fail("Persona text exceeds 1024 UTF-8 bytes. Rewrite it more concisely while preserving its meaning.")
+   return fail("Persona text contains NUL or invalid UTF-8. Return a valid JSON string without NUL.")
+  }
   if !reason_ok do return fail("Persona reason must be nonempty valid UTF-8 without NUL, at most 512 bytes.")
   if !s_ok || len(sources)>32 do return fail("Persona source_ids must be an array of at most 32 original-message IDs.")
   for earlier in changes[:i] { if earlier.(json.Object)["field"].(json.String)==record["field"].(json.String) do return fail("Duplicate persona field.") }
