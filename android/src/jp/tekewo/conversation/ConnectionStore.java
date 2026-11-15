@@ -97,6 +97,7 @@ final class ConnectionStore {
     }
 
     private IOException failure() {
+        if (alias.startsWith("conversation.images-")) return new IOException("画像の暗号鍵を安全に保存・読込できません。復元キーを保管し、アプリのデータを消さずに再試行してください。");
         return new IOException(alias.equals("conversation.chatgpt.credentials.v1")
                 ? "ChatGPT の接続情報を安全に保存・読込できませんでした。サインアウトして再接続してください。"
                 : "画像生成APIの接続情報を安全に保存・読込できませんでした。再設定してください。");

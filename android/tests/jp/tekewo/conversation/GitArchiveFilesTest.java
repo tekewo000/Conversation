@@ -62,14 +62,19 @@ public final class GitArchiveFilesTest {
     private static void personIconParticipatesInProfileFingerprint() throws Exception {
         JSONObject withIcon = delta(3, 3);
         String png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
-        withIcon.put("icon_png_base64", png);
+        byte[] sealed = ImageVault.seal(ImageVault.newKey(), ID, "icon.png", java.util.Base64.getDecoder().decode(png));
+        withIcon.put("encrypted_icon_base64", java.util.Base64.getEncoder().encodeToString(sealed));
         GitArchiveFiles.Batch icon = GitArchiveFiles.build(ID, 42, RAW, withIcon);
         JSONObject profile = new JSONObject(new String(icon.files.get("persona.json"), StandardCharsets.UTF_8));
-        assert profile.getString("icon_png_base64").equals(png);
+        assert !profile.has("icon_png_base64");
+        assert java.util.Arrays.equals(icon.files.get("icon.png.enc"), sealed);
+        assert profile.getString("icon_sha256").equals(GitArchiveFiles.sha256(sealed));
+        JSONObject plain = delta(0, 0).put("icon_png_base64", png);
+        reject(() -> GitArchiveFiles.build(ID, 42, RAW, plain));
         GitArchiveFiles.Batch removed = GitArchiveFiles.build(ID, 42, RAW, delta(3, 3));
         assert !icon.manifest.getString("persona_sha256").equals(removed.manifest.getString("persona_sha256"));
         assert !new JSONObject(new String(removed.files.get("persona.json"), StandardCharsets.UTF_8)).has("icon_png_base64");
-        withIcon.put("icon_png_base64", "not a png");
+        withIcon.put("encrypted_icon_base64", "not an encrypted image");
         reject(() -> GitArchiveFiles.build(ID, 42, RAW, withIcon));
     }
 

@@ -7,6 +7,7 @@ import java.nio.file.Files;
 
 public final class PersonRegistryTest {
     public static void main(String[] args) throws Exception {
+        ImageVaultTest.install();
         File root = Files.createTempDirectory("conversation-people-").toFile();
         try {
             PersonRegistry registry = new PersonRegistry(root);
@@ -67,6 +68,7 @@ public final class PersonRegistryTest {
             byte[] png = java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=");
             assert people.icon(first.id).length == 0;
             people.setIcon(first.id, png);
+            assert ImageVault.encrypted(Files.readAllBytes(new File(first.directory, "icon.png").toPath()));
             assert java.util.Arrays.equals(new PersonRegistry(root).icon(first.id), png);
             assert people.icon(second.id).length == 0;
             expectFailure(() -> people.setIcon(first.id, new byte[] {1, 2, 3}));

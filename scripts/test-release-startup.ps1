@@ -1,12 +1,18 @@
-param([Parameter(Mandatory)][string]$Serial, [switch]$Media)
+param([Parameter(Mandatory)][string]$Serial, [switch]$Media, [switch]$ImageSecurity)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $tools = Get-Content "$repo/.tools/android-toolchain.json" -Raw | ConvertFrom-Json
-$probeClass = if ($Media) { 'AttachmentApiProbe' } else { 'ReleaseStartupProbe' }
+if ($Media -and $ImageSecurity) { throw 'Select either -Media or -ImageSecurity.' }
+$probeClass = if ($ImageSecurity) { 'ImageSecurityProbe' } elseif ($Media) { 'AttachmentApiProbe' } else { 'ReleaseStartupProbe' }
 . "$PSScriptRoot/android-signing.ps1"
 $build = Join-Path $repo "build/release-startup-probe/$([guid]::NewGuid())"
 New-Item -ItemType Directory -Force "$build/classes", "$build/dex" | Out-Null
-& "$($tools.JavaHome)/bin/javac.exe" '-J-Duser.language=en' '-Xlint:-options' -encoding UTF-8 --release 8 -classpath $tools.PlatformJar -d "$build/classes" "$repo/android/device-tests/jp/tekewo/conversation/$probeClass.java"
+$sources = @("$repo/android/device-tests/jp/tekewo/conversation/$probeClass.java")
+if ($ImageSecurity) {
+    $sources += @('ImageVault', 'AttachmentFiles', 'AttachmentMedia', 'GitArchiveFiles', 'PersonRegistry', 'PersonDocument', 'ConnectionStore', 'ConversationApplication') |
+        ForEach-Object { "$repo/android/src/jp/tekewo/conversation/$_.java" }
+}
+& "$($tools.JavaHome)/bin/javac.exe" '-J-Duser.language=en' '-Xlint:-options' -encoding UTF-8 --release 8 -classpath $tools.PlatformJar -d "$build/classes" @sources
 if ($LASTEXITCODE -ne 0) { throw 'Release probe compilation failed.' }
 & "$($tools.JavaHome)/bin/java.exe" -classpath "$($tools.BuildTools)/lib/d8.jar" com.android.tools.r8.D8 --min-api 29 --lib $tools.PlatformJar --output "$build/dex" "$build/classes/jp/tekewo/conversation/$probeClass.class"
 if ($LASTEXITCODE -ne 0) { throw 'Release probe DEX compilation failed.' }
@@ -35,7 +41,7 @@ try {
     $installed = $true
     $output = @(& $tools.Adb -s $Serial shell am instrument -w "jp.tekewo.conversation.startupprobe/jp.tekewo.conversation.$probeClass")
     $output | Write-Output
-    $expected = if ($Media) { 'MEDIA_API_PASS' } else { 'RELEASE_STARTUP_PASS' }
+    $expected = if ($ImageSecurity) { 'IMAGE_SECURITY_RELEASE_PASS' } elseif ($Media) { 'MEDIA_API_PASS' } else { 'RELEASE_STARTUP_PASS' }
     if ($LASTEXITCODE -ne 0 -or -not ($output -match $expected)) { throw "Installed Release $probeClass failed." }
 } finally {
     if ($installed) { & $tools.Adb -s $Serial uninstall jp.tekewo.conversation.startupprobe }

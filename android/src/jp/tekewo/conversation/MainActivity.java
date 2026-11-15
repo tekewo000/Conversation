@@ -62,6 +62,7 @@ public final class MainActivity extends ComponentActivity {
     private PersonRegistry.Person activePerson;
     private File pendingExportDirectory;
     private String pendingIconPersonId = "";
+    private String pendingRecoveryPersonId = "";
     private String pendingAttachmentPersonId = "";
     private String gitStatus = "";
     private final android.os.Handler syncTimer = new android.os.Handler(android.os.Looper.getMainLooper());
@@ -89,6 +90,7 @@ public final class MainActivity extends ComponentActivity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         if (state != null) pendingIconPersonId = state.getString("icon_person", "");
+        if (state != null) pendingRecoveryPersonId = state.getString("recovery_person", "");
         if (state != null) pendingAttachmentPersonId = state.getString("attachment_person", "");
         textSize = Math.max(16, Math.min(28, getPreferences(MODE_PRIVATE).getInt("text_size", DEFAULT_TEXT_SIZE)));
         messageGap = Math.max(8, Math.min(24, getPreferences(MODE_PRIVATE).getInt("message_gap", 12)));
@@ -128,6 +130,15 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         if (activePerson != null) compose.setDraft(getPreferences(MODE_PRIVATE).getString(draftKey(), ""));
+        worker.execute(() -> {
+            List<Exception> failures = new ArrayList<>();
+            for (PersonRegistry.Person person : people.list()) {
+                try { AttachmentFiles.migrateImages(person.directory); } catch (Exception error) { failures.add(error); }
+                try { people.icon(person.id); } catch (Exception error) { failures.add(error); }
+                try { ImageVault.migrateExports(person.directory); } catch (Exception error) { failures.add(error); }
+            }
+            if (!failures.isEmpty()) ui(() -> showError("一部の既存画像を暗号化できませんでした。対象のデータは保持し、ほかの画像の移行は続けました。データを消さずに再試行してください。\n" + safeError(failures.get(0))));
+        });
         if (activePerson != null) compose.setAttachments(getPreferences(MODE_PRIVATE).getString("attachments_" + activePerson.id, ""));
         if (activePerson != null) compose.setGenerateImages(getPreferences(MODE_PRIVATE).getBoolean("image_mode_" + activePerson.id, false));
         compose.setPersonName(activePerson == null ? "" : activePerson.name);
@@ -1033,6 +1044,7 @@ public final class MainActivity extends ComponentActivity {
             if (removed) {
                 try {
                     if (person.repository != null) new GitHubTokenStore(this, person.id).clear();
+                    ((ConversationApplication)getApplication()).deleteKeys(person.id);
                 } catch (Exception error) { if (failure == null) failure = error; else failure.addSuppressed(error); }
                 if (!getPreferences(MODE_PRIVATE).edit().remove("draft_" + person.id).remove("attachments_" + person.id).remove("image_mode_" + person.id).commit() && failure == null)
                     failure = new java.io.IOException("下書きの削除を保存できませんでした。");
@@ -1164,7 +1176,18 @@ public final class MainActivity extends ComponentActivity {
             panel.rows.add(new ComposeUi.Row("GitHubトークンを設定", this::editGitToken, 4));
         }
         panel.rows.add(entry("端末からZIPを書き出す", "会話・記憶・人物のデータをまとめて保管", 1, this::exportArchive));
+        panel.blocks.add(new ComposeUi.Block("画像の保護", "添付写真・生成画像・人物アイコンは暗号化して保存します。画像のバックアップには復元キーの書き出しが必要です。キーは画像と別の安全な場所に保管してください。会話の文章・動画・PDFは、この画像暗号化の対象外です。"));
+        panel.blocks.add(new ComposeUi.Block("画像の送信と書き出し", "会話で参照する画像はOpenAIに送信します。生成時は指示文をOpenAIに送信します。画像の「保存」はダウンロードへの通常画像の書き出しです。以前のGit履歴や書き出し済みファイルは今回の暗号化では消えません。"));
+        panel.rows.add(entry("画像の復元キーを書き出す", "紛失すると、端末を失った際に画像を復元できません", 4, this::exportImageRecovery));
         compose.showPage(panel);
+    }
+
+    private void exportImageRecovery() {
+        if (activePerson == null) return;
+        pendingRecoveryPersonId = activePerson.id;
+        Intent destination = new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/octet-stream")
+                .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE, "Conversation-" + activePerson.id + "-images.key");
+        startActivityForResult(destination, 85);
     }
 
     private void editGitToken() {
@@ -1218,7 +1241,8 @@ public final class MainActivity extends ComponentActivity {
                 synchronized (storeGate) { requireCurrentPerson(); delta = new JSONObject(nativeArchiveDelta(prior.cursor)); }
                 if (delta.has("error")) throw new java.io.IOException("保存する履歴を読み出せませんでした。");
                 byte[] icon = people.icon(person.id);
-                if (icon.length > 0) delta.put("icon_png_base64", java.util.Base64.getEncoder().encodeToString(icon));
+                if (icon.length > 0) delta.put("encrypted_icon_base64", java.util.Base64.getEncoder().encodeToString(
+                        ImageVault.backup(person.directory, new File(person.directory, "icon.png"))));
                 AttachmentFiles.addToDelta(person.directory, delta);
                 gitWorker.execute(() -> {
                     boolean more = false;
@@ -1266,7 +1290,7 @@ public final class MainActivity extends ComponentActivity {
         worker.execute(() -> {
             String error = nativeExport();
             if (error.isEmpty()) {
-                try { BackupArchive.addIcon(exportDirectory, people.icon(person.id)); AttachmentFiles.backup(person.directory, exportDirectory); }
+                try { BackupArchive.addIcon(person.directory, exportDirectory, people.icon(person.id)); AttachmentFiles.backup(person.directory, exportDirectory); }
                 catch (Exception failure) { error = safeError(failure); }
             }
             final String exportError = error;
@@ -1282,6 +1306,20 @@ public final class MainActivity extends ComponentActivity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == 85) {
+            final String id = pendingRecoveryPersonId; pendingRecoveryPersonId = "";
+            if (result != RESULT_OK || data == null || data.getData() == null) return;
+            final PersonRegistry.Person person = activePerson;
+            if (person == null || !person.id.equals(id)) { showError("人物が変わりました。もう一度復元キーを書き出してください。"); return; }
+            final Uri destination = data.getData();
+            worker.execute(() -> {
+                try {
+                    ((ConversationApplication)getApplication()).writeRecovery(person.directory, getContentResolver().openOutputStream(destination, "w"));
+                    ui(() -> { showError("画像の復元キーを書き出しました。画像のバックアップと別の場所に保管してください。"); scheduleGitSync(); });
+                } catch (Exception error) { ui(() -> showError(safeError(error))); }
+            });
+            return;
+        }
         if (request == 84) {
             final PersonRegistry.Person person = activePerson;
             final String selectedPerson = pendingAttachmentPersonId; pendingAttachmentPersonId = "";
@@ -1357,6 +1395,7 @@ public final class MainActivity extends ComponentActivity {
 
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putString("icon_person", pendingIconPersonId);
+        state.putString("recovery_person", pendingRecoveryPersonId);
         state.putString("attachment_person", pendingAttachmentPersonId);
         super.onSaveInstanceState(state);
     }

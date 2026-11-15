@@ -13,6 +13,7 @@ import java.util.zip.ZipEntry;
 
 public final class BackupArchiveTest {
     public static void main(String[] args) throws Exception {
+        ImageVaultTest.install();
         File root = Files.createTempDirectory("conversation-backup-").toFile();
         try {
             File snapshot = new File(root, "snapshot-current"); assert snapshot.mkdir();
@@ -42,8 +43,13 @@ public final class BackupArchiveTest {
             assert metadata.getBytes(StandardCharsets.UTF_8).length > 65536;
             Files.write(new File(root, "metadata.json").toPath(), metadata.getBytes(StandardCharsets.UTF_8));
             byte[] icon = java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=");
-            BackupArchive.addIcon(root, icon);
-            assert java.util.Arrays.equals(Files.readAllBytes(new File(root, "snapshot-current/icon.png").toPath()), icon);
+            File person = new File(root, "person"); assert person.mkdir();
+            Files.write(new File(person, "icon.png").toPath(), ImageVault.encode(person, "icon.png", icon));
+            BackupArchive.addIcon(person, root, icon);
+            byte[] sealed = Files.readAllBytes(new File(root, "snapshot-current/icon.png.enc").toPath());
+            assert ImageVault.encrypted(sealed);
+            assert java.util.Arrays.equals(ImageVault.open(ImageVault.keys.get(person, false), person.getName(), "icon.png", sealed), icon);
+            assert !new File(root, "snapshot-current/icon.png").exists();
             BackupArchive.write(root, new ByteArrayOutputStream());
             Files.write(new File(root, "metadata.json").toPath(), new byte[1024 * 1024 + 1]);
             try { BackupArchive.write(root, new ByteArrayOutputStream()); throw new AssertionError("Oversized metadata accepted"); }

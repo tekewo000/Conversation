@@ -11,9 +11,8 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 final class BackupArchive {
-    static void addIcon(File directory, byte[] png) throws Exception {
-        if (png.length == 0) return;
-        PersonRegistry.validateIcon(png);
+    static void addIcon(File person, File directory, byte[] png) throws Exception {
+        if (png.length > 0) PersonRegistry.validateIcon(png);
         File root = directory.getCanonicalFile();
         File metadata = new File(root, "metadata.json");
         validate(root, metadata);
@@ -22,9 +21,12 @@ final class BackupArchive {
         File snapshot = new File(root, manifest.getString("snapshot"));
         validate(root, snapshot);
         if (!snapshot.isDirectory()) throw new IOException("Backup snapshot missing");
-        File icon = new File(snapshot, "icon.png");
+        File icon = new File(snapshot, "icon.png.enc");
         validate(root, icon);
-        Files.write(icon.toPath(), png);
+        if (png.length > 0) Files.write(icon.toPath(), ImageVault.backup(person, new File(person, "icon.png")));
+        else Files.deleteIfExists(icon.toPath());
+        File oldIcon = new File(snapshot, "icon.png"); validate(root, oldIcon);
+        Files.deleteIfExists(oldIcon.toPath());
     }
     static void write(File directory, OutputStream destination) throws Exception {
         File root = directory.getCanonicalFile();
@@ -52,6 +54,7 @@ final class BackupArchive {
             for (File child : children) add(root, child, zip, buffer);
             return;
         }
+        if (ImageVault.image(file.getName())) throw new IOException("暗号化されていない画像はZIPへ書き出せません。");
         zip.putNextEntry(new ZipEntry(root.toPath().relativize(file.toPath()).toString().replace('\\', '/')));
         try (FileInputStream stream = new FileInputStream(file)) {
             int count; while ((count = stream.read(buffer)) != -1) zip.write(buffer, 0, count);

@@ -53,13 +53,15 @@ final class AttachmentFiles {
         File temporary = File.createTempFile("attachment-", ".pending", directory(person));
         try {
             MessageDigest hash = MessageDigest.getInstance("SHA-256");
+            ByteArrayOutputStream image = extension.matches("jpg|png|webp|gif") ? new ByteArrayOutputStream() : null;
             long total = 0;
             try (FileOutputStream output = new FileOutputStream(temporary)) {
                 byte[] buffer = new byte[65536]; int count;
                 while ((count = input.read(buffer)) != -1) {
                     total += count;
                     if (total > MAX_BYTES) throw new IOException("添付ファイルは1件25MiB以内にしてください。");
-                    hash.update(buffer, 0, count); output.write(buffer, 0, count);
+                    hash.update(buffer, 0, count);
+                    if (image == null) output.write(buffer, 0, count); else image.write(buffer, 0, count);
                 }
                 output.getFD().sync();
             }
@@ -69,24 +71,27 @@ final class AttachmentFiles {
             String fileName = digest + "." + extension;
             File target = resolve(person, fileName);
             if (target.exists()) verify(target);
-            else Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE);
+            else {
+                if (image != null) try (FileOutputStream output = new FileOutputStream(temporary)) {
+                    output.write(ImageVault.encode(person, fileName, image.toByteArray())); output.getFD().sync();
+                }
+                Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE);
+            }
             return new Ref(label(name), fileName);
         } finally { Files.deleteIfExists(temporary.toPath()); }
     }
     static byte[] read(File person, Ref ref) throws Exception {
-        File file = resolve(person, ref.fileName); verify(file);
-        return Files.readAllBytes(file.toPath());
+        File file = resolve(person, ref.fileName);
+        if (!file.isFile() || file.length() == 0 || file.length() > MAX_BYTES + (ref.image() ? ImageVault.OVERHEAD : 0))
+            throw new IOException("添付ファイルが見つからないか、大きすぎます。");
+        byte[] bytes = ref.image() ? ImageVault.read(person, file) : Files.readAllBytes(file.toPath());
+        if (bytes.length > MAX_BYTES || !ref.fileName.startsWith(GitArchiveFiles.sha256(bytes) + "."))
+            throw new IOException("添付ファイルの内容を確認できません。");
+        if (ref.image()) ImageVault.protect(person, file, bytes);
+        return bytes;
     }
     static void verify(File file) throws Exception {
-        if (!file.isFile() || file.length() == 0 || file.length() > MAX_BYTES) throw new IOException("添付ファイルが見つからないか、大きすぎます。");
-        MessageDigest hash = MessageDigest.getInstance("SHA-256");
-        try (InputStream input = new FileInputStream(file)) {
-            byte[] buffer = new byte[65536]; int count;
-            while ((count = input.read(buffer)) != -1) hash.update(buffer, 0, count);
-        }
-        StringBuilder digest = new StringBuilder();
-        for (byte value : hash.digest()) digest.append(String.format(Locale.ROOT, "%02x", value & 255));
-        if (!file.getName().startsWith(digest + ".")) throw new IOException("添付ファイルの内容を確認できません。");
+        read(file.getParentFile().getParentFile(), new Ref("", file.getName()));
     }
     static void backup(File person, File export) throws Exception {
         JSONObject manifest = new JSONObject(new String(Files.readAllBytes(new File(export, "metadata.json").toPath()), java.nio.charset.StandardCharsets.UTF_8));
@@ -103,21 +108,40 @@ final class AttachmentFiles {
                 while ((line = reader.readLine()) != null) for (Ref ref : references(new JSONObject(line).getString("content"))) {
                     if (!copied.add(ref.fileName)) continue;
                     File checked = resolve(person, ref.fileName); verify(checked);
-                    Files.copy(checked.toPath(), new File(destination, checked.getName()).toPath(), StandardCopyOption.REPLACE_EXISTING);
+                    String name = checked.getName() + (ref.image() ? ".enc" : "");
+                    if (Files.isSymbolicLink(new File(destination, name).toPath())) throw new IOException("バックアップの画像の保存先が不正です。");
+                    if (ref.image()) {
+                        Files.write(new File(destination, name).toPath(), ImageVault.backup(person, checked));
+                        Files.deleteIfExists(new File(destination, checked.getName()).toPath());
+                    } else Files.copy(checked.toPath(), new File(destination, name).toPath(), StandardCopyOption.REPLACE_EXISTING);
                 }
             }
         }
     }
     static void addToDelta(File person, JSONObject delta) throws Exception {
         // shortcut: one Git batch is bounded to 24 MiB of binary files; larger batches remain local and can be exported as ZIP.
-        JSONObject files = new JSONObject(); long size = 0;
+        JSONObject files = new JSONObject(), images = new JSONObject(); long size = 0;
         for (Ref ref : references(delta.getJSONArray("records").toString())) {
-            if (files.has(ref.fileName)) continue;
+            if (files.has(ref.fileName) || images.has(ref.fileName + ".enc")) continue;
             File file = resolve(person, ref.fileName);
+            byte[] bytes = read(person, ref);
             size += file.length();
             if (size > 24 * 1024 * 1024) throw new IOException("この差分の添付はGit保存の上限24MiBを超えています。会話は端末に保持されています。ZIPバックアップをご利用ください。");
-            files.put(ref.fileName, Base64.getEncoder().encodeToString(read(person, ref)));
+            if (ref.image()) images.put(ref.fileName + ".enc", Base64.getEncoder().encodeToString(ImageVault.backup(person, file)));
+            else files.put(ref.fileName, Base64.getEncoder().encodeToString(bytes));
         }
         if (files.length() > 0) delta.put("attachment_files", files);
+        if (images.length() > 0) delta.put("encrypted_image_files", images);
+    }
+
+    static void migrateImages(File person) throws Exception {
+        File[] files = directory(person).listFiles();
+        if (files == null) throw new IOException("画像の保存先を読み込めません。");
+        Exception failure = null;
+        for (File file : files) if (ImageVault.image(file.getName())) {
+            try { read(person, new Ref("", file.getName())); }
+            catch (Exception error) { if (failure == null) failure = error; }
+        }
+        if (failure != null) throw failure;
     }
 }

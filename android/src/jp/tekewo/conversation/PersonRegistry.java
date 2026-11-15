@@ -86,10 +86,13 @@ final class PersonRegistry {
         File file = new File(personDirectory(id), "icon.png");
         if (Files.isSymbolicLink(file.toPath())) throw new IOException("人物アイコンの保存先が不正です。");
         if (!file.exists()) return new byte[0];
-        if (file.length() > 1024 * 1024) throw new IOException("人物アイコンが大きすぎます。");
-        byte[] data = Files.readAllBytes(file.toPath());
-        validateIcon(data);
-        return data;
+        if (file.length() > 1024 * 1024 + ImageVault.OVERHEAD) throw new IOException("人物アイコンが大きすぎます。");
+        try {
+            byte[] data = ImageVault.read(personDirectory(id), file);
+            validateIcon(data);
+            ImageVault.protect(personDirectory(id), file, data);
+            return data;
+        } catch (java.nio.file.NoSuchFileException removed) { return new byte[0]; }
     }
 
     synchronized void setIcon(String id, byte[] png) throws IOException {
@@ -97,7 +100,7 @@ final class PersonRegistry {
         File file = new File(personDirectory(id), "icon.png");
         if (png == null) { Files.deleteIfExists(file.toPath()); return; }
         validateIcon(png);
-        writeAtomic(file, png);
+        writeAtomic(file, ImageVault.encode(personDirectory(id), "icon.png", png));
     }
 
     static void validateIcon(byte[] png) throws IOException {
