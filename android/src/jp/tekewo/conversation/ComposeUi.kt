@@ -546,7 +546,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                     }
                 }
             }
-            if (!value.sheet) Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End) {
+            if (!value.sheet || value.confirmLabel.isNotEmpty()) Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = ::dismiss) {
                     Text(if (value.confirmLabel.isEmpty()) "閉じる" else "キャンセル", fontSize = 14.sp, letterSpacing = 0.sp)
                 }

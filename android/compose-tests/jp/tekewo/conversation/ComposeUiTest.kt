@@ -261,6 +261,24 @@ class ComposeUiTest {
         compose.runOnIdle { assertEquals(1, actions) }
     }
 
+    @Test fun sheetConfirmationIsVisibleAndRunsOnlyWhenConfirmed() {
+        var confirmed = 0
+        compose.runOnUiThread {
+            install()
+            val panel = ComposeUi.Panel("過去の記憶を階層に整理")
+            panel.sheet = true
+            panel.message = "保存済みの会話を整理します。"
+            panel.confirmLabel = "整理する"
+            panel.confirm = Runnable { confirmed++; ui.hide() }
+            ui.show(panel)
+        }
+        compose.onNodeWithText("整理する").assertIsDisplayed().assertIsEnabled()
+        compose.runOnIdle { assertEquals(0, confirmed) }
+        compose.onNodeWithText("整理する").performClick()
+        compose.runOnIdle { assertEquals(1, confirmed) }
+        compose.onNodeWithText("過去の記憶を階層に整理").assertDoesNotExist()
+    }
+
     @Test fun sheetCloseButtonDismissesAndNotifiesItsOwner() {
         var dismissals = 0
         compose.runOnUiThread {

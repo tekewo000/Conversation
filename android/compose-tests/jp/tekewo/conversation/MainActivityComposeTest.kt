@@ -45,6 +45,37 @@ class MainActivityComposeTest {
         }
     }
 
+    @Test fun confirmingHistoricalRebuildCreatesWorkAndShowsProgressWithoutChangingHistory() {
+        assertTrue(!ChatGptConnection(context).hasSession())
+        val people = PersonRegistry(context.filesDir)
+        previousPerson = people.active()?.id
+        val person = people.stage(PersonDocument.named(name), null); people.commit(person)
+        compose.activityRule.scenario.recreate()
+        val add = MainActivity::class.java.getDeclaredMethod("nativeAddMessage", ByteArray::class.java, ByteArray::class.java).apply { isAccessible = true }
+        add.invoke(null, "user".toByteArray(), "京都旅行の初日はカフェに行った".toByteArray())
+        add.invoke(null, "assistant".toByteArray(), "旅の話を聞いた".toByteArray())
+        assertEquals("", MainActivity.nativeApplyJob(1, """{"memories":[],"continuity":{"threads":[],"episodes":[]}}""".toByteArray()))
+        compose.activityRule.scenario.recreate()
+        // Only the foreground guard sees a synthetic session; the worker remains signed out.
+        compose.runOnUiThread {
+            val connection = MainActivity::class.java.getDeclaredField("connection").apply { isAccessible = true }.get(compose.activity)
+            ChatGptConnection::class.java.getDeclaredField("state").apply { isAccessible = true }.set(connection,
+                org.json.JSONObject().put("access_token", "synthetic-ui-only").put("refresh_token", "synthetic-ui-only")
+                    .put("subject", "synthetic-ui-only").put("client_id", "synthetic-ui-only"))
+        }
+        openShortTermMemory()
+        compose.onNodeWithText("過去の記憶を階層に整理").performClick()
+        compose.onNodeWithText("整理する").assertIsDisplayed()
+        assertTrue(!MemoryRebuild.pending(person.directory))
+        compose.onNodeWithText("整理する").performClick()
+        compose.waitUntil(10_000) { MemoryRebuild.pending(person.directory) }
+        compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("過去の記憶を階層に整理中", substring = true)).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("過去の記憶を階層に整理中", substring = true).assertTextContains("0 / 2 発言", substring = true)
+        val snapshot = org.json.JSONObject(MainActivity.nativeContext(byteArrayOf()))
+        assertEquals(2L, snapshot.getJSONObject("memory_progress").getLong("total_messages"))
+        assertEquals(0, snapshot.getJSONObject("continuity").getJSONArray("episodes").length())
+    }
+
     @Test fun longPressSavesSceneAndMetaWithoutReplyAndRebuildProgressKeepsHistory() {
         val people = PersonRegistry(context.filesDir)
         previousPerson = people.active()?.id
