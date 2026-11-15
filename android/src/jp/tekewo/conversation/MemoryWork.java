@@ -85,7 +85,7 @@ public final class MemoryWork extends Worker {
             long started = android.os.SystemClock.elapsedRealtime();
             android.util.Log.i("ConversationMemory", rebuilding ? "Starting historical rebuild" : records ? "Starting records messages=" + batchMessages : "Starting persona review");
             if (rebuilding) rebuild.phase("AIへの接続を確認しています");
-            else if (records) recordPhase("会話の記憶整理：AIへの接続を確認しています");
+            else phase(records, operation + "：AIへの接続を確認しています");
             List<ChatRequest.Model> models = connection.listModels();
             if (models.isEmpty()) throw new IOException("利用できるモデルがありません。");
             SharedPreferences preferences = settings(context);
@@ -99,21 +99,21 @@ public final class MemoryWork extends Worker {
             ChatSession.Transport backend = (instructions, input, delta) -> {
                 if (isStopped()) throw new IOException("記憶の整理が中断されました。");
                 operation = instructions.equals(ChatSession.REFLECT) ? "人物像の振り返り" : instructions.equals(ChatSession.REBUILD) ? "過去の記憶の再整理" : "会話の記憶整理";
-                if (records) recordPhase(operation + "：" + batchMessages + "発言の差分を整理しています");
+                if (!rebuilding) phase(records, operation + (records ? "：" + batchMessages + "発言の差分を整理しています" : "：会話を振り返っています"));
                 final long[] lastUpdate = {0};
                 final int[] received = {0};
                 String response = connection.request(request, instructions, input, chunk -> {
                     delta.accept(chunk);
-                    if (records) {
+                    if (!rebuilding) {
                         received[0] += chunk.length();
                         long now = android.os.SystemClock.elapsedRealtime();
                         if (now - lastUpdate[0] >= 1000) {
                             lastUpdate[0] = now;
-                            recordPhase(operation + "：応答を受信しています（" + received[0] + "文字）");
+                            phase(records, operation + "：応答を受信しています（" + received[0] + "文字）");
                         }
                     }
                 }, true, instructions.equals(ChatSession.REFLECT) ? 120 : 300);
-                if (records) recordPhase(operation + "：出典を確認して保存しています");
+                if (!rebuilding) phase(records, operation + "：出典を確認して保存しています");
                 return response;
             };
             boolean more;
@@ -161,8 +161,11 @@ public final class MemoryWork extends Worker {
         if (records) editor.putString("memory_phase", "");
         editor.apply();
     }
-    private void recordPhase(String value) {
-        settings(getApplicationContext()).edit().putString("memory_status", "").putString("memory_phase", value).apply();
+    private void phase(boolean records, String value) {
+        SharedPreferences.Editor editor = settings(getApplicationContext()).edit();
+        if (records) editor.putString("memory_status", "").putString("memory_phase", value);
+        else editor.putString("persona_status", value);
+        editor.apply();
         updated();
     }
     @Override public void onStopped() {

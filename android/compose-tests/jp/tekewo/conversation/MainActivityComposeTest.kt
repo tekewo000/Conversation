@@ -93,6 +93,30 @@ class MainActivityComposeTest {
         } finally { preferences.edit().putBoolean("plan_welcome", welcome).commit() }
     }
 
+    @Test fun reconnectingRestartsADelayedPersonaReview() {
+        createManagementPerson()
+        val manager = androidx.work.WorkManager.getInstance(context)
+        val delayed = androidx.work.OneTimeWorkRequest.Builder(MemoryWork::class.java)
+            .setInitialDelay(1, java.util.concurrent.TimeUnit.DAYS).build()
+        val preferences = context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE)
+        val welcome = preferences.getBoolean("plan_welcome", false)
+        try {
+            preferences.edit().putBoolean("plan_welcome", true).commit()
+            manager.enqueueUniqueWork(MemoryWork.NAME, androidx.work.ExistingWorkPolicy.REPLACE, delayed)
+                .result.get(10, java.util.concurrent.TimeUnit.SECONDS)
+            val page = openConnectionPage()
+            completeSyntheticSignIn(null, page.pageVersion)
+            compose.waitUntil(10_000) {
+                val old = manager.getWorkInfoById(delayed.id).get(2, java.util.concurrent.TimeUnit.SECONDS)
+                old == null || old.state == androidx.work.WorkInfo.State.CANCELLED
+            }
+        } finally {
+            manager.cancelUniqueWork(MemoryWork.NAME).result.get(10, java.util.concurrent.TimeUnit.SECONDS)
+            manager.cancelUniqueWork(MemoryWork.RECORD_NAME).result.get(10, java.util.concurrent.TimeUnit.SECONDS)
+            preferences.edit().putBoolean("plan_welcome", welcome).commit()
+        }
+    }
+
     @Test fun firstSignInWelcomeReturnsToChatWhenConversationIsChosen() {
         createManagementPerson()
         val preferences = context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE)

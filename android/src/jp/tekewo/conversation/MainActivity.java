@@ -217,7 +217,7 @@ public final class MainActivity extends ComponentActivity {
             if (memoryView != 0) refreshMemoryView();
             else if (compose.isPageVisible("management", compose.getPageVersion())) showHistoryMenu();
         });
-        queueMemories(null);
+        queueMemories(true);
         scheduleGitSync();
     }
 
@@ -468,7 +468,7 @@ public final class MainActivity extends ComponentActivity {
             } finally { ui(() -> {
                 if (!replied.get()) setBusy(false);
                 scheduleGitSync();
-                if (replied.get()) queueMemories(request[0]);
+                if (replied.get()) queueMemories(false);
             }); }
         });
     }
@@ -719,11 +719,11 @@ public final class MainActivity extends ComponentActivity {
         });
     }
 
-    private void retryMemories() { queueMemories(null); if (semanticMemory != null) semanticMemory.refresh(); }
+    private void retryMemories() { queueMemories(true); if (semanticMemory != null) semanticMemory.refresh(); }
 
-    private void queueMemories(ChatRequest selected) {
+    private void queueMemories(boolean resume) {
         if (closed || changingPerson || activePerson == null || !connection.hasSession()) return;
-        if (MemoryRebuild.pending(activePerson.directory)) MemoryWork.resume(this); else MemoryWork.enqueue(this);
+        if (resume || MemoryRebuild.pending(activePerson.directory)) MemoryWork.resume(this); else MemoryWork.enqueue(this);
     }
 
     private void showPeople() {
