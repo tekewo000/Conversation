@@ -7,6 +7,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $repo
 $tools = & "$PSScriptRoot/setup-android.ps1"
 & "$PSScriptRoot/setup-sqlite.ps1"
+& "$PSScriptRoot/setup-sqlcipher.ps1"
 & "$PSScriptRoot/setup-rag.ps1"
 
 function Run([string]$Program, [string[]]$Arguments) {
@@ -61,7 +62,7 @@ $llvmBin = Join-Path $tools.Ndk 'toolchains/llvm/prebuilt/windows-x86_64/bin'
 $object = Join-Path $build 'core/conversation_core.o'
 $archive = Join-Path $build 'core/libconversation_core.a'
 $odinArguments = @('build', 'core', '-target:linux_arm64', '-subtarget:android', '-minimum-os-version:29',
-    '-build-mode:obj', '-no-entry-point', '-use-single-module', "-out:$object")
+    '-build-mode:obj', '-no-entry-point', '-use-single-module', '-define:CONVERSATION_ENCRYPTION_REQUIRED=true', "-out:$object")
 if ($Configuration -eq 'Release') { $odinArguments += '-o:speed' }
 Run $tools.Odin $odinArguments
 Run "$llvmBin/llvm-ar.exe" @('rcs', $archive, $object)

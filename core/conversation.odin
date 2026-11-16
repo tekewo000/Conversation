@@ -231,7 +231,22 @@ migrate_legacy :: proc() -> bool {
 @(export)
 conversation_init :: proc "c" (storage_dir: cstring) -> bool {
  context = runtime.default_context()
+ when #config(CONVERSATION_ENCRYPTION_REQUIRED, false) { return fail("Encrypted database handle is required.") }
+ else { return initialize_database(storage_dir, nil) }
+}
+
+@(export)
+conversation_init_database :: proc "c" (storage_dir: cstring, database: rawptr) -> bool {
+ context = runtime.default_context()
+ if database == nil { context = runtime.default_context(); return fail("A database handle is required.") }
+ return initialize_database(storage_dir, SQLite(database))
+}
+
+initialize_database :: proc(storage_dir: cstring, supplied: SQLite) -> bool {
+ context = runtime.default_context()
  release_state()
+ db = supplied
+ defer { if !ready do release_state() }
  last_error = ""
  if storage_dir == nil || !valid_text(string(storage_dir)) do return fail("A valid storage directory is required.")
  e: mem.Allocator_Error
@@ -249,7 +264,7 @@ conversation_init :: proc "c" (storage_dir: cstring) -> bool {
  defer delete(path)
  cpath, path_e := strings.clone_to_cstring(path)
  defer delete(cpath)
- if path_e != nil || sqlite3_open_v2(cpath, &db, 6, nil) != 0 { release_state(); return fail("Could not open SQLite database.") }
+ if path_e != nil || (db == nil && sqlite3_open_v2(cpath, &db, 6, nil) != 0) { release_state(); return fail("Could not open SQLite database.") }
  sqlite3_busy_timeout(db, 5000)
  version:=scalar("PRAGMA user_version")
  if version<0 || version>7 { release_state(); return fail("Unsupported database version; database was preserved.") }
@@ -723,6 +738,7 @@ conversation_close :: proc "c" () { context=runtime.default_context(); release_s
 @(export)
 conversation_export :: proc "c" (output_dir: cstring) -> bool {
  context=runtime.default_context()
+ when #config(CONVERSATION_ENCRYPTION_REQUIRED, false) do return fail("An encrypted export writer is required.")
  if !ready || output_dir==nil || !valid_text(string(output_dir)) do return fail("A valid export directory is required.")
  base:=string(output_dir)
  create_e:=make_storage_directories(base)

@@ -338,3 +338,7 @@ Compose試験は先に通常のビルドを実行してから使います。`-Co
 `vendor/`がライセンス付きの固定依存、`scripts/`がビルドと検証です。
 `ComposeUi.kt`が画面と入力を描画し、`MainActivity.java`が既存の保存・認証・通信処理を呼び出します。
 Dear ImGuiとOpenGLの描画コードはビルドに含めません。
+
+## 個人データの暗号化と既存Gitの移行
+
+写真の復元キーを引き続き使って全個人データを保護します。[暗号化範囲](docs/data-encryption.md)と[Git全履歴の移行・PC復元手順](docs/git-backup-migration.md)を参照してください。ReleaseにはAndroid APKと、Java 17以降・Gitで動くPC用バックアップツールを添付します。

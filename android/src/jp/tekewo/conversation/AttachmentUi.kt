@@ -27,7 +27,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
@@ -58,8 +57,7 @@ internal fun AttachmentPreview(person: File?, ref: AttachmentFiles.Ref, modifier
             try {
                 if (person == null) return@withContext null
                 if (ref.image()) AttachmentMedia.thumbnail(AttachmentFiles.read(person, ref))
-                else if (ref.video()) MediaMetadataRetriever().use { video ->
-                    video.setDataSource(AttachmentFiles.resolve(person, ref.fileName).path)
+                else if (ref.video()) AttachmentMedia.video(person,ref).use { video ->
                     video.getScaledFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 512, 512)
                 } else null
             } catch (_: Exception) { failed = true; null }
@@ -71,7 +69,7 @@ internal fun AttachmentPreview(person: File?, ref: AttachmentFiles.Ref, modifier
             if (person == null) return@clickable
             if (ref.image() || ref.video()) expanded = true
             else try {
-                val uri = FileProvider.getUriForFile(context, "${context.packageName}.attachments", AttachmentFiles.resolve(person, ref.fileName))
+                val uri = AttachmentProvider.uri(context,person,ref)
                 context.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri,
                     if (ref.fileName.endsWith(".pdf")) "application/pdf" else "text/plain")
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
@@ -113,7 +111,7 @@ internal fun AttachmentPreview(person: File?, ref: AttachmentFiles.Ref, modifier
                 VideoView(viewContext).apply {
                     val controls = MediaController(viewContext)
                     controls.setAnchorView(this); setMediaController(controls)
-                    setVideoURI(Uri.fromFile(AttachmentFiles.resolve(person, ref.fileName)))
+                    setVideoURI(AttachmentProvider.uri(viewContext,person,ref))
                     setOnErrorListener { _, _, _ -> Toast.makeText(viewContext, "この動画を再生できません。", Toast.LENGTH_LONG).show(); true }
                     setOnPreparedListener { start() }
                 }

@@ -9,6 +9,7 @@ import org.json.*;
 
 public final class AttachmentFilesTest {
     public static void main(String[] args) throws Exception {
+        ImageVaultTest.install();
         File person = Files.createTempDirectory("conversation-attachments-").toFile();
         try {
             File deletedPerson = new File(person, "deleted-person");
@@ -16,6 +17,7 @@ public final class AttachmentFilesTest {
             assert !deletedPerson.exists();
             byte[] bytes = "保存するテキスト".getBytes(StandardCharsets.UTF_8);
             AttachmentFiles.Ref ref = AttachmentFiles.save(person, "資料[1].txt", "txt", new ByteArrayInputStream(bytes));
+            assert DataVault.encrypted(Files.readAllBytes(AttachmentFiles.resolve(person,ref.fileName).toPath()));
             assert Arrays.equals(bytes, AttachmentFiles.read(person, ref));
             assert AttachmentFiles.references("本文\n" + ref.markdown()).get(0).fileName.equals(ref.fileName);
             assert AttachmentFiles.withoutReferences("本文\n" + ref.markdown()).equals("本文");
@@ -37,19 +39,14 @@ public final class AttachmentFilesTest {
             AttachmentFiles.addToDelta(person, delta);
             GitArchiveFiles.Batch git = GitArchiveFiles.build(GitArchiveFilesTest.ID, 42, GitArchiveFilesTest.RAW, delta);
             assert Arrays.equals(bytes, git.files.get("media/" + ref.fileName));
-            File export = new File(person, "export"), snapshot = new File(export, "snapshot-current");
-            assert snapshot.mkdirs();
-            Files.write(new File(export, "metadata.json").toPath(), "{\"snapshot\":\"snapshot-current\"}".getBytes(StandardCharsets.UTF_8));
-            Files.write(new File(snapshot, "messages-000000.jsonl").toPath(), (new JSONObject().put("content", ref.markdown()) + "\n").getBytes(StandardCharsets.UTF_8));
-            AttachmentFiles.Ref removed = AttachmentFiles.save(person, "未送信", "txt", new ByteArrayInputStream(new byte[]{1, 2, 3}));
-            AttachmentFiles.backup(person, export);
-            assert !new File(snapshot, "media/" + removed.fileName).exists();
-            ByteArrayOutputStream output = new ByteArrayOutputStream(); BackupArchive.write(export, output);
-            boolean found = false;
-            try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(output.toByteArray()))) {
-                ZipEntry entry; while ((entry = zip.getNextEntry()) != null) if (entry.getName().equals("snapshot-current/media/" + ref.fileName)) found = true;
-            }
-            assert found;
+            BackupArchive writer=new BackupArchive(person,new File(person,"export"));
+            writer.writeChunk("messages-000000.jsonl",(new JSONObject().put("content",ref.markdown())+"\n").getBytes(StandardCharsets.UTF_8));
+            writer.finish();
+            ByteArrayOutputStream output=new ByteArrayOutputStream(); BackupArchive.write(writer.directory,output);
+            File restored=new File(person,"recovered");
+            BackupRestore.restore(ImageVault.keys.get(person,false),person.getName(),writer.directory,restored);
+            assert Arrays.equals(bytes,Files.readAllBytes(new File(restored,"media/"+ref.fileName).toPath()));
+            writer.close();
             Files.write(AttachmentFiles.resolve(person, ref.fileName).toPath(), new byte[]{1});
             try { AttachmentFiles.read(person, ref); throw new AssertionError(); } catch (IOException expected) {}
             System.out.println("PASS: attachment persistence, deduplication, traversal/integrity rejection, ZIP and Git files");

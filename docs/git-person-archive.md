@@ -1,5 +1,7 @@
 # 人物ごとの非公開 Git アーカイブ
 
+> 以下はv0.9.xの旧平文Git形式の記録です。v0.10.0以降は[個人データ暗号化](data-encryption.md)の形式を使います。既存のGit履歴は[別リポジトリへの暗号化移行](git-backup-migration.md)で保持できます。
+
 人物 1 人を GitHub の非公開リポジトリ 1 個に固定します。アプリはリポジトリを作成しません。利用者が GitHub で空の **Private** リポジトリを作成し、アプリに URL と fine-grained personal access token を設定します。README・ライセンスなどの初期ファイルは付けないでください。既存リポジトリも、既定ブランチのファイルをすべて削除してあれば初回保存に使えます。過去のコミットや別ブランチ・タグは削除しないため、以前のデータは履歴に残ります。
 
 トークンでは、対象の resource owner と保存先リポジトリを選び、リポジトリ権限を **Contents: Read and write**、**Metadata: Read-only** にします。他の権限は使いません。複数の人物を同じトークンで保存する場合は、それぞれの専用リポジトリを選択してください。組織の承認が必要なトークンは、承認後に利用します。GitHub 公式の [トークン権限](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens)、[Contents API](https://docs.github.com/en/rest/repos/contents)、[GraphQL 認証](https://docs.github.com/en/graphql/guides/forming-calls-with-graphql) を参照してください。

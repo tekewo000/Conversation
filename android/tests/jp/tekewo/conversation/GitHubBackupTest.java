@@ -12,6 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 public final class GitHubBackupTest {
+    static final byte[] KEY = new byte[32];
     static final String ID = GitArchiveFilesTest.ID, RAW = GitArchiveFilesTest.RAW;
     static final GitHubBackup.PersonIdentity PERSON = new GitHubBackup.PersonIdentity(ID);
     static final String REPO = "owner/person";
@@ -27,8 +28,9 @@ public final class GitHubBackupTest {
         final ArrayList<String> requests = new ArrayList<>();
         JSONArray additions = new JSONArray();
         private String commit() { String next = String.format("%040x", ++commits); parents.put(next, head); head = next; return head; }
-        void manifest(JSONObject value) throws Exception { files.put("archive.json", GitArchiveFiles.utf8(value.toString())); }
-        JSONObject manifest() throws Exception { return new JSONObject(new String(files.get("archive.json"), StandardCharsets.UTF_8)); }
+        void manifest(JSONObject value) throws Exception { files.put("archive.enc", DataVault.seal(KEY,ID,"backup","archive.json",GitArchiveFiles.utf8(value.toString()))); }
+        JSONObject manifest() throws Exception { return EncryptedArchive.manifest(KEY,ID,files.get("archive.enc")); }
+        byte[] logical(String name) throws Exception { return EncryptedArchive.read(KEY,ID,name,manifest().getJSONObject("files").getJSONObject(name),files::get); }
         @Override public GitHubBackup.Response request(String method, String path, JSONObject body) throws IOException {
             requests.add(method + " " + path);
             try {
@@ -45,10 +47,11 @@ public final class GitHubBackupTest {
                     if (unavailableRefs) return response(409, new JSONObject());
                     return new GitHubBackup.Response(200, unrelatedRefs ? new JSONArray().put(new JSONObject().put("ref", "refs/tags/old")) : new JSONArray());
                 }
-                if (method.equals("GET") && path.contains("/contents/archive.json?ref=")) {
+                if (method.equals("GET") && path.contains("/contents/") && path.contains("?ref=")) {
                     archiveReads++;
                     if (makePublicBeforeWrite) { makePublicBeforeWrite = false; privateRepo = false; }
-                    byte[] bytes = files.get("archive.json");
+                    String fileName=path.substring(path.indexOf("/contents/")+10,path.indexOf("?ref="));
+                    byte[] bytes = files.get(fileName);
                     if (bytes == null) return response(404, new JSONObject());
                     return response(200, new JSONObject().put("encoding", "base64").put("size", bytes.length)
                             .put("content", Base64.getEncoder().encodeToString(bytes)));
@@ -65,10 +68,11 @@ public final class GitHubBackupTest {
                     for (String name : files.keySet()) entries.put(new JSONObject().put("path", name).put("type", "blob"));
                     return response(200, new JSONObject().put("sha", TREE_SHA).put("truncated", false).put("tree", entries));
                 }
-                if (method.equals("PUT") && path.endsWith("/contents/archive.json")) {
+                if (method.equals("PUT") && path.endsWith("/contents/archive.enc")) {
                     writes++;
                     assert head.isEmpty();
-                    files.put("archive.json", Base64.getDecoder().decode(body.getString("content")));
+                    assert DataVault.encrypted(Base64.getDecoder().decode(body.getString("content"))) : "plaintext metadata sent";
+                    files.put("archive.enc", Base64.getDecoder().decode(body.getString("content")));
                     commit();
                     if (loseBootstrap) { loseBootstrap = false; throw new IOException("lost bootstrap response"); }
                     return response(201, new JSONObject().put("commit", new JSONObject().put("sha", head)));
@@ -105,7 +109,7 @@ public final class GitHubBackupTest {
     }
 
     static GitHubBackup.SyncResult sync(Fake fake, JSONObject delta, GitHubBackup.SyncState prior) throws Exception {
-        return new GitHubBackup(fake).sync(PERSON, REPO, RAW, delta, prior);
+        return new GitHubBackup(fake,KEY).sync(PERSON, REPO, RAW, delta, prior);
     }
     static JSONObject delta(long from, long through) throws Exception { return GitArchiveFilesTest.delta(from, through); }
     interface Checked { void run() throws Exception; }
@@ -118,18 +122,33 @@ public final class GitHubBackupTest {
         }
     }
 
+    static void checkMigrationProof() throws Exception {
+        Fake fake=new Fake();
+        byte[] index="encrypted history index".getBytes(StandardCharsets.UTF_8);fake.files.put("history/index.enc",index);
+        String history=fake.commit();
+        JSONObject proof=new JSONObject().put("format","conversation-git-migration-v1").put("verified",true).put("person_id",ID)
+            .put("source_repository_id",11).put("repository_id",42).put("repository",REPO).put("index_sha256",GitArchiveFiles.sha256(index)).put("history_head",history);
+        fake.files.put("history/complete.enc",DataVault.seal(KEY,ID,"history","complete",proof.toString().getBytes(StandardCharsets.UTF_8)));fake.commit();
+        GitHubBackup client=new GitHubBackup(fake,KEY);
+        GitHubBackup.SyncState prior=client.verifyMigration(PERSON,REPO,11);
+        assert prior.cursor==0&&prior.repoId==42;
+        rejected("conflict",()->client.verifyMigration(PERSON,REPO,99));
+        GitHubBackup.SyncResult result=client.sync(PERSON,REPO,RAW,delta(0,1),prior,42);
+        assert result.cursor==1 && fake.files.containsKey("history/index.enc");
+    }
     public static void main(String[] args) throws Exception {
+        checkMigrationProof();
         Fake iconBackup = new Fake();
         GitHubBackup.SyncResult withoutIcon = sync(iconBackup, delta(0, 1), GitHubBackup.SyncState.empty());
         JSONObject iconOnly = delta(1, 1).put("encrypted_icon_base64", java.util.Base64.getEncoder().encodeToString(
                 ImageVault.seal(ImageVault.newKey(), GitArchiveFilesTest.ID, "icon.png", new byte[]{1, 2, 3})));
         GitHubBackup.SyncResult withIcon = sync(iconBackup, iconOnly, withoutIcon);
         assert withIcon.status.equals("synced") && withIcon.cursor == 1;
-        assert new JSONObject(new String(iconBackup.files.get("persona.json"), StandardCharsets.UTF_8)).has("image_encryption");
+        assert new JSONObject(new String(iconBackup.logical("persona.json"), StandardCharsets.UTF_8)).has("image_encryption");
         assert sync(iconBackup, iconOnly, withIcon).status.equals("unchanged");
         GitHubBackup.SyncResult iconRemoved = sync(iconBackup, delta(1, 1), withIcon);
         assert iconRemoved.status.equals("synced") && iconRemoved.cursor == 1;
-        assert !new JSONObject(new String(iconBackup.files.get("persona.json"), StandardCharsets.UTF_8)).has("image_encryption");
+        assert !new JSONObject(new String(iconBackup.logical("persona.json"), StandardCharsets.UTF_8)).has("image_encryption");
         assert GitHubBackup.normalizeRepository("https://github.com/Owner/Person.git/").equals(REPO);
         assert GitHubBackup.normalizeRepository("GITHUB.COM/Owner/Person.GIT/").equals(REPO);
         for (String bad : Arrays.asList("http://github.com/owner/person", "https://user:pass@github.com/owner/person", "https://evil.com/owner/person",
@@ -140,7 +159,7 @@ public final class GitHubBackupTest {
         GitHubBackup inaccessible = new GitHubBackup((method, path, body) -> {
             assert method.equals("GET") && path.equals("/repos/" + REPO) && body == null;
             return new GitHubBackup.Response(404, "github_pat_SECRET");
-        });
+        },KEY);
         try {
             inaccessible.verifyIdentity(PERSON, REPO);
             throw new AssertionError("Inaccessible repository accepted");
@@ -150,12 +169,12 @@ public final class GitHubBackupTest {
             assert expected.getMessage().contains("Resource owner") && expected.getMessage().contains("Repository access");
             assert !expected.toString().contains("github_pat_SECRET") && expected.getCause() == null;
         }
-        rejected("http", () -> new GitHubBackup((method, path, body) -> new GitHubBackup.Response(401, "{}"))
+        rejected("http", () -> new GitHubBackup((method, path, body) -> new GitHubBackup.Response(401, "{}"),KEY)
                 .verifyRepository(REPO));
         for (String missing : Arrays.asList("commits", "trees")) {
             Fake history = new Fake(); history.commit();
             GitHubBackup client = new GitHubBackup((method, path, body) -> path.contains("/git/" + missing + "/")
-                    ? new GitHubBackup.Response(404, "github_pat_SECRET") : history.request(method, path, body));
+                    ? new GitHubBackup.Response(404, "github_pat_SECRET") : history.request(method, path, body),KEY);
             try {
                 client.verifyIdentity(PERSON, REPO);
                 throw new AssertionError("Unavailable history accepted");
@@ -170,10 +189,10 @@ public final class GitHubBackupTest {
         rejected("public_repository", () -> sync(publicRepo, delta(0, 1), GitHubBackup.SyncState.empty()));
         assert publicRepo.writes == 0 && publicRepo.requests.size() == 1;
         Fake replacedBeforeFirstSync = new Fake(); replacedBeforeFirstSync.repoId = 43;
-        rejected("conflict", () -> new GitHubBackup(replacedBeforeFirstSync).sync(PERSON, REPO, RAW, delta(0, 1), GitHubBackup.SyncState.empty(), 42));
+        rejected("conflict", () -> new GitHubBackup(replacedBeforeFirstSync,KEY).sync(PERSON, REPO, RAW, delta(0, 1), GitHubBackup.SyncState.empty(), 42));
         assert replacedBeforeFirstSync.writes == 0 && replacedBeforeFirstSync.requests.size() == 1;
         Fake tagsOnly = new Fake(); tagsOnly.unrelatedRefs = true;
-        rejected("conflict", () -> new GitHubBackup(tagsOnly).verifyIdentity(PERSON, REPO));
+        rejected("conflict", () -> new GitHubBackup(tagsOnly,KEY).verifyIdentity(PERSON, REPO));
         assert tagsOnly.writes == 0;
         Fake unavailable = new Fake(); unavailable.unavailableRefs = true; unavailable.unrelatedRefs = true;
         rejected("conflict", () -> sync(unavailable, delta(0, 1), GitHubBackup.SyncState.empty()));
@@ -183,34 +202,34 @@ public final class GitHubBackupTest {
         Fake unrelated = new Fake(); unrelated.files.put("README.md", GitArchiveFiles.utf8("Existing files\n")); unrelated.commit();
         rejected("conflict", () -> sync(unrelated, delta(0, 1), GitHubBackup.SyncState.empty()));
         assert unrelated.writes == 0;
-        rejected("conflict", () -> new GitHubBackup(unrelated).verifyIdentity(PERSON, REPO));
+        rejected("conflict", () -> new GitHubBackup(unrelated,KEY).verifyIdentity(PERSON, REPO));
         Fake emptyManifest = new Fake(); emptyManifest.files.put("person.md", GitArchiveFiles.utf8("Do not overwrite\n"));
         emptyManifest.manifest(new JSONObject()); emptyManifest.commit();
-        rejected("conflict", () -> new GitHubBackup(emptyManifest).verifyIdentity(PERSON, REPO));
+        rejected("conflict", () -> new GitHubBackup(emptyManifest,KEY).verifyIdentity(PERSON, REPO));
         rejected("conflict", () -> sync(emptyManifest, delta(0, 1), GitHubBackup.SyncState.empty()));
         assert emptyManifest.writes == 0;
         assert new String(emptyManifest.files.get("person.md"), StandardCharsets.UTF_8).equals("Do not overwrite\n");
         Fake reused = new Fake(); reused.files.put("old.txt", GitArchiveFiles.utf8("Previous data\n")); reused.commit();
         reused.files.clear();
         String deletedFilesHead = reused.commit();
-        assert new GitHubBackup(reused).verifyIdentity(PERSON, REPO).repoId == 42 && reused.writes == 0;
+        assert new GitHubBackup(reused,KEY).verifyIdentity(PERSON, REPO).repoId == 42 && reused.writes == 0;
         GitHubBackup.SyncResult reusedFirst = sync(reused, delta(0, 1), GitHubBackup.SyncState.empty());
         assert reusedFirst.cursor == 1 && reusedFirst.status.equals("synced");
         assert reused.commits == 3 && reused.writes == 1 && reused.parents.get(reusedFirst.head).equals(deletedFilesHead);
         assert reused.manifest().getBoolean("complete") && reused.manifest().getString("previous_head").equals(deletedFilesHead);
-        assert Arrays.equals(reused.files.get("person.md"), RAW.getBytes(StandardCharsets.UTF_8));
+        assert Arrays.equals(reused.logical("person.md"), RAW.getBytes(StandardCharsets.UTF_8));
         assert sync(reused, delta(1, 2), reusedFirst).cursor == 2;
         Fake emptyTree404 = new Fake();
         emptyTree404.treeSha = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
         String emptyHead = emptyTree404.commit();
         GitHubBackup emptyTreeClient = new GitHubBackup((method, path, body) -> path.contains("/git/trees/")
-                ? new GitHubBackup.Response(404, "{}") : emptyTree404.request(method, path, body));
+                ? new GitHubBackup.Response(404, "{}") : emptyTree404.request(method, path, body),KEY);
         assert emptyTreeClient.verifyIdentity(PERSON, REPO).repoId == 42 && emptyTree404.writes == 0;
         GitHubBackup.SyncResult emptyTreeSaved = emptyTreeClient.sync(PERSON, REPO, RAW, delta(0, 1), GitHubBackup.SyncState.empty());
         assert emptyTreeSaved.cursor == 1 && emptyTree404.writes == 1 && emptyTree404.commits == 2;
         assert emptyTree404.parents.get(emptyTreeSaved.head).equals(emptyHead);
         assert emptyTree404.manifest().getBoolean("complete");
-        assert Arrays.equals(emptyTree404.files.get("person.md"), RAW.getBytes(StandardCharsets.UTF_8));
+        assert Arrays.equals(emptyTree404.logical("person.md"), RAW.getBytes(StandardCharsets.UTF_8));
         Fake reusedLostResponse = new Fake(); reusedLostResponse.commit(); reusedLostResponse.loseCommit = true;
         GitHubBackup.SyncResult reusedRecovered = sync(reusedLostResponse, delta(0, 1), GitHubBackup.SyncState.empty());
         assert reusedRecovered.status.equals("recovered") && reusedLostResponse.commits == 2;
@@ -232,34 +251,34 @@ public final class GitHubBackupTest {
         Fake truncatedTree = new Fake(); truncatedTree.commit();
         GitHubBackup truncatedClient = new GitHubBackup((method, path, body) -> path.contains("/git/trees/")
                 ? new GitHubBackup.Response(200, new JSONObject().put("tree", new JSONArray()).put("truncated", true))
-                : truncatedTree.request(method, path, body));
+                : truncatedTree.request(method, path, body),KEY);
         rejected("conflict", () -> truncatedClient.verifyIdentity(PERSON, REPO));
         Fake malformedTree = new Fake(); malformedTree.commit();
         GitHubBackup malformedClient = new GitHubBackup((method, path, body) -> path.contains("/git/trees/")
                 ? new GitHubBackup.Response(200, new JSONObject().put("tree", new JSONArray()))
-                : malformedTree.request(method, path, body));
+                : malformedTree.request(method, path, body),KEY);
         rejected("repository", () -> malformedClient.verifyIdentity(PERSON, REPO));
         Fake foreign = new Fake(); foreign.commit();
         foreign.manifest(GitArchiveFiles.marker("e24785e0-f679-4e67-bd8c-7323760c9956", 42));
-        rejected("conflict", () -> new GitHubBackup(foreign).verifyIdentity(PERSON, REPO));
+        rejected("conflict", () -> new GitHubBackup(foreign,KEY).verifyIdentity(PERSON, REPO));
         rejected("conflict", () -> sync(foreign, delta(0, 1), GitHubBackup.SyncState.empty()));
         assert foreign.writes == 0;
 
         Fake fake = new Fake();
-        assert new GitHubBackup(fake).verifyIdentity(PERSON, REPO).repoId == 42 && fake.writes == 0;
+        assert new GitHubBackup(fake,KEY).verifyIdentity(PERSON, REPO).repoId == 42 && fake.writes == 0;
         GitHubBackup.SyncResult first = sync(fake, delta(0, 2), GitHubBackup.SyncState.empty());
         assert first.status.equals("synced") && first.cursor == 2 && first.repoId == 42;
         assert fake.commits == 2 && fake.writes == 2;
-        assert Arrays.equals(fake.files.get("person.md"), RAW.getBytes(StandardCharsets.UTF_8));
+        assert Arrays.equals(fake.logical("person.md"), RAW.getBytes(StandardCharsets.UTF_8));
         assert fake.manifest().getBoolean("complete");
         assert GitHubBackup.SyncState.fromJson(first.toJson()).head.equals(first.head);
-        assert fake.additions.length() == 4;
+        assert fake.additions.length() == 5;
         int writes = fake.writes;
         assert sync(fake, delta(2, 2), first).status.equals("unchanged");
         assert fake.writes == writes;
         GitHubBackup.SyncResult second = sync(fake, delta(2, 3), first);
-        assert second.cursor == 3 && fake.additions.length() == 2;
-        assert fake.files.keySet().stream().filter(name -> name.startsWith("events/")).count() == 2;
+        assert second.cursor == 3 && fake.additions.length() == 3;
+        assert fake.manifest().getJSONObject("files").keySet().stream().filter(name -> name.startsWith("events/")).count() == 2;
         for (String request : fake.requests) assert !request.contains("/git/trees") && !request.contains("/contents/events/");
         writes = fake.writes;
         fake.repoId = 43;
@@ -303,7 +322,7 @@ public final class GitHubBackupTest {
         rejected("public_repository", () -> sync(privacyChange, delta(1, 2), beforePublic));
         assert privacyChange.writes == beforeWrites;
 
-        GitHubBackup broken = new GitHubBackup((method, path, body) -> { throw new IOException("github_pat_SECRET"); });
+        GitHubBackup broken = new GitHubBackup((method, path, body) -> { throw new IOException("github_pat_SECRET"); },KEY);
         rejected("network", () -> broken.verifyRepository(REPO));
         new GitHubBackup.HttpTransport("github_pat_not_a_live_token");
         try { new GitHubBackup.HttpTransport("secret\r\nInjected: yes"); throw new AssertionError(); }
@@ -326,7 +345,7 @@ public final class GitHubBackupTest {
             GitHubBackup publicRead = new GitHubBackup((method, path, body) -> {
                 assert method.equals("GET") && path.equals("/repos/octocat/hello-world") && body == null;
                 return new GitHubBackup.Response(200, metadata);
-            });
+            },KEY);
             rejected("public_repository", () -> publicRead.verifyRepository("octocat/hello-world"));
             System.out.println("Live public repository read rejected; no credentials or writes used");
         }

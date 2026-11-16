@@ -48,17 +48,23 @@ final class PersonRegistry {
         root = directory.getCanonicalFile();
         if (!root.isDirectory() && !root.mkdirs()) throw new IOException("人物の保存先を作成できません。");
         peopleDirectory = new File(root, "people"); index = new File(root, "people-registry.json");
-        deleteLegacyHistory();
+        synchronized(PersonRegistry.class) {
+
         if (!index.exists()) return;
         if (index.length() <= 0 || index.length() > 1024 * 1024 || Files.isSymbolicLink(index.toPath())) throw new IOException("人物一覧が不正です。");
         try {
-            JSONObject json = new JSONObject(read(index));
-            if (json.getInt("version") != 1) throw new IOException("人物一覧の形式に対応していません。");
+            JSONObject json = loadIndex(root,index);
+            if (json.getInt("version") != 2) throw new IOException("人物一覧の形式に対応していません。");
             JSONArray records = json.getJSONArray("people");
             Set<String> repositories = new HashSet<>(); Set<Long> remoteIds = new HashSet<>();
             for (int i = 0; i < records.length(); i++) {
-                JSONObject record = records.getJSONObject(i);
-                String id = record.getString("id");
+                JSONObject envelope = records.getJSONObject(i);
+                String id = envelope.getString("id");
+                File recordPerson = personDirectory(id);
+                byte[] recordKey = ImageVault.keys.get(recordPerson,false);
+                JSONObject record;
+                try { record = new JSONObject(new String(DataVault.open(recordKey,id,"file","registry-entry",java.util.Base64.getDecoder().decode(envelope.getString("data"))),StandardCharsets.UTF_8)); }
+                finally { java.util.Arrays.fill(recordKey,(byte)0); }
                 if (!validId(id) || people.containsKey(id)) throw new IOException("人物IDが不正です。");
                 String repository = record.isNull("repository") ? null : normalizeRepository(record.getString("repository"));
                 if (repository != null && !repositories.add(repository)) throw new IOException("同じリポジトリが複数の人物に設定されています。");
@@ -67,8 +73,8 @@ final class PersonRegistry {
                     throw new IOException("GitHubリポジトリIDが不正、または重複しています。");
                 File personDirectory = personDirectory(id);
                 File rawFile = new File(personDirectory, "person.md");
-                if (rawFile.length() > PersonDocument.MAX_BYTES || Files.isSymbolicLink(rawFile.toPath())) throw new IOException("人物ファイルが不正です。");
-                PersonDocument doc = PersonDocument.parse(Files.readAllBytes(rawFile.toPath()));
+                if (rawFile.length() > PersonDocument.MAX_BYTES + DataVault.OVERHEAD || Files.isSymbolicLink(rawFile.toPath())) throw new IOException("人物ファイルが不正です。");
+                PersonDocument doc = PersonDocument.parse(DataFiles.read(personDirectory,rawFile));
                 if (!record.getString("name").equals(doc.name)) throw new IOException("人物名と保存した資料が一致しません。");
                 people.put(id, new Person(id, doc.name, repository, personDirectory, doc.rawMarkdown, doc.profile, remoteId));
             }
@@ -76,6 +82,7 @@ final class PersonRegistry {
             if (activeId.equals("legacy")) activeId = "";
             if (!activeId.isEmpty() && !people.containsKey(activeId)) throw new IOException("選択中の人物が見つかりません。");
         } catch (JSONException | IllegalArgumentException error) { throw new IOException("人物一覧を読み込めません。", error); }
+        }
     }
 
     synchronized List<Person> list() { return new ArrayList<>(people.values()); }
@@ -118,9 +125,10 @@ final class PersonRegistry {
         if (!directory.mkdirs()) throw new IOException("人物の保存先を作成できません。");
         Person person = new Person(id, doc.name, repository, directory, doc.rawMarkdown, doc.profile, 0);
         try {
-            writeAtomic(new File(directory, "person.md"), doc.rawMarkdown);
-            writeAtomic(new File(directory, "profile.md"), doc.profile);
-            writeAtomic(new File(directory, "person.json"), doc.importPayload(id).toString());
+            DataFiles.write(directory,new File(directory,"person.md"),doc.rawMarkdown.getBytes(StandardCharsets.UTF_8));
+            DataFiles.write(directory,new File(directory,"profile.md"),doc.profile.getBytes(StandardCharsets.UTF_8));
+            DataFiles.write(directory,new File(directory,"person.json"),doc.importPayload(id).toString().getBytes(StandardCharsets.UTF_8));
+            DataFiles.write(directory,new File(directory,".data-migrated-v1"),new byte[]{1});
             staged.put(id, person);
             return person;
         } catch (IOException | JSONException error) {
@@ -174,6 +182,15 @@ final class PersonRegistry {
         }
     }
 
+    synchronized void rebindRepository(String personId,String repository,long remoteId) throws IOException {
+        Person previous=people.get(personId);
+        if(previous==null||remoteId<=0) throw new IOException("移行する人物が見つかりません。");
+        String normalized=normalizeRepository(repository);ensureAvailable(normalized,remoteId,personId);
+        Person replacement=new Person(previous.id,previous.name,normalized,previous.directory,previous.rawMarkdown,previous.profile,remoteId);
+        Map<String,Person> updated=new LinkedHashMap<>(people);updated.put(personId,replacement);
+        persist(updated,activeId);people.put(personId,replacement);
+    }
+
     static String normalizeRepository(String input) {
         if (input == null || input.trim().isEmpty()) throw new IllegalArgumentException("人物ごとのGitHubリポジトリを指定してください。");
         String text = input.trim();
@@ -207,14 +224,22 @@ final class PersonRegistry {
         }
     }
     private void persist(Map<String, Person> records, String selectedId) throws IOException {
+        synchronized(PersonRegistry.class) {
         try {
             JSONArray array = new JSONArray();
             for (Person person : records.values()) {
-                array.put(new JSONObject().put("id", person.id).put("name", person.name)
-                    .put("repository", person.repository == null ? JSONObject.NULL : person.repository).put("remote_id", person.remoteId));
+                JSONObject record = new JSONObject().put("id",person.id).put("name",person.name)
+                    .put("repository",person.repository==null?JSONObject.NULL:person.repository).put("remote_id",person.remoteId);
+                byte[] key=ImageVault.keys.get(person.directory,false);
+                try { array.put(new JSONObject().put("id",person.id).put("data",java.util.Base64.getEncoder().encodeToString(
+                        DataVault.seal(key,person.id,"file","registry-entry",record.toString().getBytes(StandardCharsets.UTF_8))))); }
+                finally { java.util.Arrays.fill(key,(byte)0); }
             }
-            writeAtomic(index, new JSONObject().put("version", 1).put("active_id", selectedId).put("people", array).toString());
+            byte[] encoded=new JSONObject().put("version",2).put("active_id",selectedId).put("people",array).toString().getBytes(StandardCharsets.UTF_8);
+            if(encoded.length>1024*1024) throw new IOException("人物一覧が保存上限を超えています。以前の一覧を保持しています。");
+            writeAtomic(index,encoded);
         } catch (JSONException error) { throw new IOException("人物一覧を保存できません。", error); }
+        }
     }
     private File personDirectory(String id) throws IOException {
         if (!validId(id)) throw new IOException("人物IDが不正です。");
@@ -227,15 +252,25 @@ final class PersonRegistry {
     private static boolean validId(String id) {
         try { return UUID.fromString(id).toString().equals(id); } catch (IllegalArgumentException error) { return false; }
     }
-    private void deleteLegacyHistory() throws IOException {
-        try {
-            for (String name : new String[] { "conversation.sqlite3", "conversation.sqlite3-wal", "conversation.sqlite3-shm", "conversation.sqlite3-journal", "notebook.json" }) {
-                File file = new File(root, name);
-                if (Files.isDirectory(file.toPath(), LinkOption.NOFOLLOW_LINKS)) throw new IOException("保存先に同名のフォルダがあります。");
-                Files.deleteIfExists(file.toPath());
+    private static synchronized JSONObject loadIndex(File root,File index) throws IOException, JSONException {
+        JSONObject json=new JSONObject(read(index));
+        if(json.getInt("version")!=1) return json;
+        JSONArray records=json.getJSONArray("people"), encrypted=new JSONArray();
+        for(int i=0;i<records.length();i++) {
+            JSONObject record=records.getJSONObject(i); String id=record.getString("id");
+            if(!validId(id)) throw new IOException("人物IDが不正です。");
+            File person=new File(root,"people/"+id);
+            for(String name:new String[]{"person.md","profile.md","person.json"}) {
+                File file=new File(person,name);
+                if(file.exists()) DataFiles.migrate(person,file);
             }
-            deleteDirectory(new File(root, "export"));
-        } catch (IOException error) { throw new IOException("これまでの会話データを削除できませんでした。", error); }
+            byte[] key=ImageVault.keys.get(person,false);
+            try { encrypted.put(new JSONObject().put("id",id).put("data",java.util.Base64.getEncoder().encodeToString(
+                    DataVault.seal(key,id,"file","registry-entry",record.toString().getBytes(StandardCharsets.UTF_8))))); }
+            finally { java.util.Arrays.fill(key,(byte)0); }
+        }
+        json.put("version",2).put("people",encrypted);
+        writeAtomic(index,json.toString()); return json;
     }
     private static String read(File file) throws IOException { return new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8); }
     private static void writeAtomic(File file, String text) throws IOException {

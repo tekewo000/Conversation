@@ -18,7 +18,7 @@ import java.util.UUID;
 import javax.net.ssl.HttpsURLConnection;
 
 /** A private repository archives one imported person at a time. */
-final class GitHubBackup {
+final class GitHubBackup implements AutoCloseable {
     interface Transport { Response request(String method, String apiPath, JSONObject body) throws IOException; }
     static final class Response {
         final int status;
@@ -76,7 +76,13 @@ final class GitHubBackup {
         Remote(String head, JSONObject manifest) { this.head = head; this.manifest = manifest; }
     }
     private final Transport transport;
-    GitHubBackup(Transport transport) { this.transport = transport; }
+    private final byte[] root;
+    private String personId;
+    GitHubBackup(Transport transport,byte[] root) {
+        if(root==null||root.length!=32) throw new IllegalArgumentException("A recovery key is required.");
+        this.transport=transport; this.root=root;
+    }
+    @Override public void close() { java.util.Arrays.fill(root,(byte)0); }
 
     static String normalizeRepository(String input) throws IOException {
         try {
@@ -122,6 +128,7 @@ final class GitHubBackup {
 
     /** Verify remote ownership before registering a new local person, without changing GitHub. */
     Repository verifyIdentity(PersonIdentity identity, String input) throws IOException {
+        personId=identity.id;
         try {
             Repository repository = verifyRepository(input);
             Remote remote = readRemote(repository);
@@ -137,6 +144,7 @@ final class GitHubBackup {
     }
 
     SyncResult sync(PersonIdentity identity, String repo, String rawMd, JSONObject delta, SyncState prior, long expectedRepositoryId) throws IOException {
+        personId=identity.id;
         try {
             Repository repository = verifyRepository(repo);
             if (expectedRepositoryId < 0 || (expectedRepositoryId > 0 && repository.repoId != expectedRepositoryId))
@@ -153,10 +161,10 @@ final class GitHubBackup {
                 // The bootstrap contains only ownership metadata, so an interrupted initialization is recognizable.
                 JSONObject marker = GitArchiveFiles.marker(identity.id, repository.repoId);
                 JSONObject init = new JSONObject().put("message", "Initialize person archive")
-                        .put("branch", repository.branch).put("content", encode(GitArchiveFiles.utf8(GitArchiveFiles.canonical(marker) + "\n")));
+                        .put("branch", repository.branch).put("content", encode(DataVault.seal(root,identity.id,"backup","archive.json",GitArchiveFiles.utf8(GitArchiveFiles.canonical(marker)+"\n"))));
                 checkWriteTarget(repository);
                 try {
-                    object(request("PUT", base(repository) + "/contents/archive.json", init), 201, "アーカイブの初期化");
+                    object(request("PUT", base(repository) + "/contents/archive.enc", init), 201, "アーカイブの初期化");
                 } catch (IOException uncertain) {
                     remote = readRemote(repository);
                     validateOwner(remote, identity.id, repository.repoId);
@@ -169,7 +177,7 @@ final class GitHubBackup {
                 remote = readRemote(repository);
             }
             if (remote.manifest == null) {
-                if (!prior.head.isEmpty() || prior.cursor != 0)
+                if ((!prior.head.isEmpty() && !prior.head.equals(remote.head)) || prior.cursor != 0)
                     throw conflict("保存先のアーカイブが削除されています。ローカルの会話は保持しています。");
                 // An existing empty tree can receive the complete archive atomically at its verified HEAD.
                 remote = new Remote(remote.head, GitArchiveFiles.marker(identity.id, repository.repoId));
@@ -189,14 +197,15 @@ final class GitHubBackup {
             batch.manifest.put("previous_head", remote.head);
             batch.files.put("archive.json", GitArchiveFiles.utf8(GitArchiveFiles.canonical(batch.manifest) + "\n"));
             JSONArray additions = new JSONArray();
-            for (Map.Entry<String, byte[]> file : batch.files.entrySet()) {
-                if (complete && file.getKey().equals("person.md") && sameHash(remote.manifest, batch.manifest, "source_sha256")) continue;
-                if (complete && file.getKey().equals("persona.json") && sameHash(remote.manifest, batch.manifest, "persona_sha256")) continue;
-                additions.put(new JSONObject().put("path", file.getKey()).put("contents", encode(file.getValue())));
-            }
+            JSONObject previousFiles=remote.manifest.optJSONObject("files");
+            if(previousFiles==null) previousFiles=new JSONObject(); else previousFiles=new JSONObject(previousFiles.toString());
+            if(!batch.files.containsKey("icon.png.enc")) previousFiles.remove("icon.png.enc");
+            Map<String,byte[]> protectedFiles=EncryptedArchive.encode(root,identity.id,batch.files,batch.manifest,previousFiles);
+            for(Map.Entry<String,byte[]> file:protectedFiles.entrySet())
+                additions.put(new JSONObject().put("path",file.getKey()).put("contents",encode(file.getValue())));
             JSONObject input = new JSONObject().put("branch", new JSONObject().put("repositoryNameWithOwner", repository.repo)
                     .put("branchName", repository.branch)).put("expectedHeadOid", remote.head)
-                    .put("message", new JSONObject().put("headline", "Save person archive through " + batch.through))
+                    .put("message", new JSONObject().put("headline", "Save encrypted data"))
                     .put("fileChanges", new JSONObject().put("additions", additions));
             JSONObject body = new JSONObject().put("query", "mutation($input:CreateCommitOnBranchInput!){createCommitOnBranch(input:$input){commit{oid}}}")
                     .put("variables", new JSONObject().put("input", input));
@@ -229,8 +238,16 @@ final class GitHubBackup {
         JSONObject target = ref.getJSONObject("object");
         String head = target.getString("sha");
         if (!target.getString("type").equals("commit") || !head.matches("[0-9a-f]{40,64}")) throw new IOException();
-        Response file = request("GET", base(repository) + "/contents/archive.json?ref=" + head, null);
+        Response file = request("GET", base(repository) + "/contents/archive.enc?ref=" + head, null);
         if (file.status == 404) {
+            JSONObject proof=readMigrationProof(repository,head);
+            if(proof!=null) {
+                JSONObject verified=object(request("GET",base(repository)+"/git/commits/"+head,null),200,"移行コミットの確認");
+                JSONArray parents=verified.getJSONArray("parents");
+                if(parents.length()!=1||!parents.getJSONObject(0).getString("sha").equals(proof.getString("history_head")))
+                    throw conflict("移行後に保存先が変更されています。移行データを再確認してください。");
+                return new Remote(head,null);
+            }
             JSONObject commit = object(request("GET", base(repository) + "/git/commits/" + head, null), 200, "コミットの確認");
             String treeSha = commit.getJSONObject("tree").getString("sha");
             if (!treeSha.matches("[0-9a-f]{40,64}")) throw new IOException();
@@ -242,10 +259,42 @@ final class GitHubBackup {
             return new Remote(head, null);
         }
         JSONObject data = object(file, 200, "アーカイブの確認");
-        if (!data.getString("encoding").equals("base64") || data.optLong("size", Long.MAX_VALUE) > 65536) throw new IOException();
+        if (!data.getString("encoding").equals("base64") || data.optLong("size", Long.MAX_VALUE) > 1024*1024+DataVault.OVERHEAD) throw new IOException();
         byte[] decoded = Base64.getDecoder().decode(data.getString("content").replace("\n", "").replace("\r", ""));
-        if (decoded.length > 65536) throw new IOException();
-        return new Remote(head, new JSONObject(new String(decoded, StandardCharsets.UTF_8)));
+        if (decoded.length > 1024*1024+DataVault.OVERHEAD) throw new IOException();
+        return new Remote(head, EncryptedArchive.manifest(root,personId,decoded));
+    }
+
+    private JSONObject readMigrationProof(Repository repository,String head) throws Exception {
+        byte[] bytes=content(repository,"history/complete.enc",head,65536);
+        if(bytes==null) return null;
+        JSONObject proof=new JSONObject(new String(DataVault.open(root,personId,"history","complete",bytes),StandardCharsets.UTF_8));
+        if(!"conversation-git-migration-v1".equals(proof.getString("format"))||!proof.getBoolean("verified")
+                ||!personId.equals(proof.getString("person_id"))||GitArchiveFiles.integer(proof,"repository_id")!=repository.repoId
+                ||!repository.repo.equals(proof.getString("repository"))) throw conflict("移行証明が人物・保存先と一致しません。");
+        byte[] index=content(repository,"history/index.enc",head,DataVault.MAX_BYTES+DataVault.OVERHEAD);
+        if(index==null||!GitArchiveFiles.sha256(index).equals(proof.getString("index_sha256"))) throw conflict("移行した履歴の索引を確認できません。");
+        return proof;
+    }
+    private byte[] content(Repository repository,String path,String head,int limit) throws Exception {
+        Response response=request("GET",base(repository)+"/contents/"+path+"?ref="+head,null);
+        if(response.status==404) return null;
+        JSONObject data=object(response,200,"移行データの確認");
+        if(!"base64".equals(data.getString("encoding"))||data.optLong("size",Long.MAX_VALUE)>limit) throw new IOException("移行データが大きすぎます。");
+        byte[] bytes=Base64.getDecoder().decode(data.getString("content").replace("\n","").replace("\r",""));
+        if(bytes.length>limit) throw new IOException("移行データが大きすぎます。"); return bytes;
+    }
+    SyncState verifyMigration(PersonIdentity identity,String input,long sourceRepositoryId) throws IOException {
+        personId=identity.id;
+        try {
+            Repository repository=verifyRepository(input);Remote remote=readRemote(repository);
+            if(remote.head.isEmpty()) throw conflict("PCでの全履歴移行を先に完了してください。");
+            JSONObject proof=readMigrationProof(repository,remote.head);
+            if(proof==null||sourceRepositoryId<=0||GitArchiveFiles.integer(proof,"source_repository_id")!=sourceRepositoryId) throw conflict("元の保存先と移行証明が一致しません。");
+            if(remote.manifest!=null&&remote.manifest.optLong("cursor")>0) throw conflict("移行先には既に保存が進んでいます。保存済みの移行状態から再開してください。");
+            return new SyncState(remote.head,0,repository.repoId,repository.repo,repository.branch);
+        } catch(Failure error) { throw error; }
+        catch(Exception error) { throw fail("migration","移行証明を検証できません。キーと保存先を確認してください。"); }
     }
 
     private void verifyEmpty(Repository repository) throws Exception {

@@ -12,6 +12,7 @@ final class MemoryStore implements ChatSession.Store {
 
     MemoryStore(Context context, String personId) throws Exception {
         this.context = context.getApplicationContext(); this.personId = personId;
+        DataMigration.ensure(this.context);
         System.loadLibrary("conversation");
         synchronized (MainActivity.storeGate) {
             PersonRegistry.Person person = current();

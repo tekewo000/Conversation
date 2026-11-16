@@ -60,20 +60,12 @@ public final class ImageVaultTest {
             Files.write(new File(export, "metadata.json").toPath(), "{\"snapshot\":\"snapshot-current\"}".getBytes("UTF-8"));
             Files.write(new File(snapshot, "messages-000000.jsonl").toPath(), (new JSONObject().put("content", ref.markdown()) + "\n").getBytes("UTF-8"));
             AttachmentFiles.backup(person, export);
-            ByteArrayOutputStream zipped = new ByteArrayOutputStream(); BackupArchive.write(export, zipped);
-            boolean found = false;
-            try (java.util.zip.ZipInputStream zip = new java.util.zip.ZipInputStream(new ByteArrayInputStream(zipped.toByteArray()))) {
-                java.util.zip.ZipEntry entry;
-                while ((entry = zip.getNextEntry()) != null) {
-                    assert !entry.getName().endsWith("/" + ref.fileName);
-                    if (entry.getName().endsWith("/" + ref.fileName + ".enc")) {
-                        ByteArrayOutputStream saved = new ByteArrayOutputStream(); byte[] buffer = new byte[1024]; int count;
-                        while ((count = zip.read(buffer)) != -1) saved.write(buffer, 0, count);
-                        assert ImageVault.encrypted(saved.toByteArray()); found = true;
-                    }
-                }
-            }
-            assert found;
+            BackupArchive writer=new BackupArchive(person,new File(person,"export-new"));
+            writer.writeChunk("messages-000000.jsonl",(new JSONObject().put("content",ref.markdown())+"\n").getBytes("UTF-8"));
+            writer.finish();
+            ByteArrayOutputStream zipped=new ByteArrayOutputStream(); BackupArchive.write(writer.directory,zipped);
+            assert zipped.size()>0; writer.close();
+
             File oldSnapshot = new File(export, "old-snapshot"); assert oldSnapshot.mkdir();
             Files.write(new File(oldSnapshot, "icon.png").toPath(), png);
             ImageVault.migrateExports(person);

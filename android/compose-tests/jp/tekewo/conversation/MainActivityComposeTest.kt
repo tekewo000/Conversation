@@ -371,11 +371,16 @@ class MainActivityComposeTest {
         compose.activityRule.scenario.recreate()
         compose.onNodeWithContentDescription("添付ファイルを追加").performClick()
         compose.onNodeWithText("画像を生成（有料API）").performClick()
-        val fixture = java.io.File(person.directory, "fixture.png")
         val bitmap = android.graphics.Bitmap.createBitmap(64, 32, android.graphics.Bitmap.Config.ARGB_8888)
         bitmap.eraseColor(android.graphics.Color.BLUE)
-        fixture.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }; bitmap.recycle()
-        val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.attachments", fixture)
+        val values = android.content.ContentValues().apply {
+            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME,"fixture.png")
+            put(android.provider.MediaStore.MediaColumns.MIME_TYPE,"image/png")
+            put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH,"Download/ConversationTest-${java.util.UUID.randomUUID()}")
+        }
+        val uri=checkNotNull(context.contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,values))
+        try {
+        context.contentResolver.openOutputStream(uri)!!.use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) };bitmap.recycle()
         val target = MainActivity::class.java.getDeclaredField("pendingAttachmentPersonId").apply { isAccessible = true }
         val received = MainActivity::class.java.getDeclaredMethod("onActivityResult", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType, android.content.Intent::class.java).apply { isAccessible = true }
         val uiField = MainActivity::class.java.getDeclaredField("compose").apply { isAccessible = true }
@@ -392,6 +397,7 @@ class MainActivityComposeTest {
             assertTrue(AttachmentFiles.resolve(person.directory, saved.fileName).isFile)
             assertTrue(ui.generateImages)
         }
+        } finally { context.contentResolver.delete(uri,null,null) }
     }
 
     @Test fun savedReplyKeepsItsBubbleWhileSnapshotAndPageChangeArePending() {

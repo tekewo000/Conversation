@@ -1,64 +1,66 @@
 package jp.tekewo.conversation;
 
-import org.json.JSONObject;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.OutputStream;
+import java.io.*;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
+import java.nio.file.*;
+import java.util.*;
+import java.util.zip.*;
+import org.json.*;
 
-final class BackupArchive {
-    static void addIcon(File person, File directory, byte[] png) throws Exception {
-        if (png.length > 0) PersonRegistry.validateIcon(png);
-        File root = directory.getCanonicalFile();
-        File metadata = new File(root, "metadata.json");
-        validate(root, metadata);
-        if (metadata.length() == 0 || metadata.length() > 1024 * 1024) throw new IOException("Invalid backup metadata");
-        JSONObject manifest = new JSONObject(new String(Files.readAllBytes(metadata.toPath()), StandardCharsets.UTF_8));
-        File snapshot = new File(root, manifest.getString("snapshot"));
-        validate(root, snapshot);
-        if (!snapshot.isDirectory()) throw new IOException("Backup snapshot missing");
-        File icon = new File(snapshot, "icon.png.enc");
-        validate(root, icon);
-        if (png.length > 0) Files.write(icon.toPath(), ImageVault.backup(person, new File(person, "icon.png")));
-        else Files.deleteIfExists(icon.toPath());
-        File oldIcon = new File(snapshot, "icon.png"); validate(root, oldIcon);
-        Files.deleteIfExists(oldIcon.toPath());
+final class BackupArchive implements AutoCloseable {
+    final File directory,person;
+    private final byte[] key;
+    private final JSONObject manifest=new JSONObject();
+    private JSONObject entries=new JSONObject();
+    private final Set<String> attachments=new LinkedHashSet<>();
+    BackupArchive(File person,File export) throws Exception {
+        ImageVault.keys.requireRecovery(person); this.person=person; key=ImageVault.keys.get(person,false);
+        DataFiles.path(person,export);
+        if(!export.isDirectory() && !export.mkdir()) throw new IOException("バックアップ先を作成できません。");
+        directory=new File(export,"snapshot-"+UUID.randomUUID());
+        if(!directory.mkdir()) throw new IOException("バックアップ先を作成できません。");
+        manifest.put("format","conversation-zip-v3").put("complete",false);
     }
-    static void write(File directory, OutputStream destination) throws Exception {
-        File root = directory.getCanonicalFile();
-        File metadata = new File(root, "metadata.json");
-        if (metadata.length() == 0 || metadata.length() > 1024 * 1024) throw new IOException("Invalid backup metadata");
-        String manifest = new String(Files.readAllBytes(metadata.toPath()), StandardCharsets.UTF_8);
-        File snapshot = new File(root, new JSONObject(manifest).getString("snapshot"));
-        validate(root, snapshot);
-        if (!snapshot.isDirectory()) throw new IOException("Backup snapshot missing");
-        try (ZipOutputStream zip = new ZipOutputStream(destination)) {
-            byte[] buffer = new byte[65536];
-            add(root, metadata, zip, buffer);
-            add(root, snapshot, zip, buffer);
+    public void writeChunk(String path,byte[] data) throws Exception {
+        if(path.startsWith("messages-"))
+            for(AttachmentFiles.Ref ref:AttachmentFiles.references(new String(data,StandardCharsets.UTF_8))) attachments.add(ref.fileName);
+        Map<String,byte[]> input=new LinkedHashMap<>(); input.put(path,data);
+        persist(EncryptedArchive.encode(key,person.getName(),input,manifest,entries)); entries=manifest.getJSONObject("files");
+    }
+    void finish() throws Exception {
+        for(String name:attachments) writeChunk("media/"+name,AttachmentFiles.read(person,new AttachmentFiles.Ref("",name)));
+        File icon=new File(person,"icon.png");
+        if(icon.exists()) writeChunk("icon.png",ImageVault.read(person,icon));
+        for(String name:new String[]{"person.md","profile.md","person.json"}) {
+            File file=new File(person,name); if(file.exists()) writeChunk(name,DataFiles.read(person,file));
+        }
+        manifest.put("complete",true);
+        persist(EncryptedArchive.encode(key,person.getName(),Collections.emptyMap(),manifest,entries));
+    }
+    private void persist(Map<String,byte[]> files) throws IOException {
+        for(Map.Entry<String,byte[]> file:files.entrySet()) {
+            File target=new File(directory,file.getKey()); DataFiles.path(person,target);
+            if(!target.getParentFile().isDirectory() && !target.getParentFile().mkdir()) throw new IOException("バックアップ先を開けません。");
+            File pending=new File(target.getPath()+".pending"); DataFiles.path(person,pending);
+            try(FileOutputStream output=new FileOutputStream(pending)) { output.write(file.getValue()); output.getFD().sync(); }
+            Files.move(pending.toPath(),target.toPath(),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
         }
     }
-    private static void validate(File root, File file) throws IOException {
-        if (Files.isSymbolicLink(file.toPath()) || !file.getCanonicalPath().startsWith(root.getPath() + File.separator))
-            throw new IOException("Invalid backup path");
+    static void write(File directory,OutputStream destination) throws Exception {
+        File person=directory.getParentFile().getParentFile();
+        byte[] key=ImageVault.keys.get(person,false);
+        try {
+            JSONObject manifest=BackupRestore.verify(key,person.getName(),directory);
+            Set<String> files=new LinkedHashSet<>(); files.add("format.json"); files.add("archive.enc");
+            JSONObject entries=manifest.getJSONObject("files");
+            for(Iterator<String> names=entries.keys();names.hasNext();) files.add(entries.getJSONObject(names.next()).getString("file"));
+            try(ZipOutputStream zip=new ZipOutputStream(destination)) {
+                for(String name:files) {
+                    byte[] bytes=BackupRestore.readFile(directory,name);
+                    zip.putNextEntry(new ZipEntry(name)); zip.write(bytes); zip.closeEntry();
+                }
+            }
+        } finally { Arrays.fill(key,(byte)0); }
     }
-    private static void add(File root, File file, ZipOutputStream zip, byte[] buffer) throws Exception {
-        validate(root, file);
-        if (file.isDirectory()) {
-            File[] children = file.listFiles();
-            if (children == null) throw new IOException("Backup directory could not be read");
-            for (File child : children) add(root, child, zip, buffer);
-            return;
-        }
-        if (ImageVault.image(file.getName())) throw new IOException("暗号化されていない画像はZIPへ書き出せません。");
-        zip.putNextEntry(new ZipEntry(root.toPath().relativize(file.toPath()).toString().replace('\\', '/')));
-        try (FileInputStream stream = new FileInputStream(file)) {
-            int count; while ((count = stream.read(buffer)) != -1) zip.write(buffer, 0, count);
-        }
-        zip.closeEntry();
-    }
+    @Override public void close() { Arrays.fill(key,(byte)0); }
 }

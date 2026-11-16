@@ -16,34 +16,51 @@ int64_t archive_cursor = -1;
 bool archive_fails = false;
 bool window_fails = false;
 bool annotated = false;
+std::vector<unsigned char> test_key(44, 37), opened_key;
+bool init_person_database(const std::string& path, const std::vector<unsigned char>& key) {
+    opened_key = key;
+    return conversation_init(path.c_str());
+}
+bool switch_test_person(std::string path, const std::string& payload) {
+    return switch_person(path, payload, path.empty() ? std::vector<unsigned char>{} : test_key);
+}
 
 void check_person_switching() {
-    assert(switch_person("previous-person", ""));
+    assert(switch_test_person("previous-person", ""));
     const int before = init_calls;
-    assert(switch_person("previous-person", ""));
-    assert(init_calls == before);
-    assert(!switch_person("bad-path", ""));
+    assert(opened_key == test_key);
+    assert(!switch_person("other-person", "", {}));
+    assert(storage_path == "previous-person" && core_ready);
+    auto different_key = test_key; different_key[0] ^= 1;
+    assert(switch_person("next-person", "", different_key));
+    assert(!switch_person("bad-path", "", test_key));
+    assert(opened_key == different_key && storage_path == "next-person");
+    assert(switch_test_person("previous-person", ""));
+    const int after_key_tests = init_calls;
+    assert(switch_test_person("previous-person", ""));
+    assert(init_calls == after_key_tests);
+    assert(!switch_test_person("bad-path", ""));
     assert(error == "cannot open requested path" && core_ready);
     assert(opened_path == "previous-person" && storage_path == "previous-person");
-    assert(!switch_person("new-person", "bad-import"));
+    assert(!switch_test_person("new-person", "bad-import"));
     assert(error == "invalid import" && core_ready && opened_path == "previous-person");
-    assert(switch_person("new-person", "valid-import"));
+    assert(switch_test_person("new-person", "valid-import"));
     assert(storage_path == "new-person" && opened_path == "new-person" && error.empty());
     const int before_no_import = import_calls;
-    assert(switch_person("another-person", ""));
+    assert(switch_test_person("another-person", ""));
     assert(import_calls == before_no_import);
     assert(archive_delta(17) == "{\"records\":[]}" && archive_cursor == 17 && error.empty());
     archive_fails = true;
     assert(archive_delta(17).empty() && error == "archive failed");
     archive_fails = false;
-    assert(!switch_person("", "valid-import") && core_ready);
-    assert(!switch_person(std::string("bad\0path", 8), "") && core_ready);
-    assert(switch_person("", ""));
+    assert(!switch_test_person("", "valid-import") && core_ready);
+    assert(!switch_test_person(std::string("bad\0path", 8), "") && core_ready);
+    assert(switch_test_person("", ""));
     assert(!core_ready && storage_path.empty() && error.empty());
     assert(message_snapshot(-1) == "{\"first\":0,\"total\":0,\"messages\":[]}");
     assert(archive_delta(17).empty() && !error.empty());
-    assert(!switch_person("bad-path", "") && !core_ready && storage_path.empty());
-    assert(switch_person("another-person", ""));
+    assert(!switch_test_person("bad-path", "") && !core_ready && storage_path.empty());
+    assert(switch_test_person("another-person", ""));
 }
 
 void check_snapshots() {

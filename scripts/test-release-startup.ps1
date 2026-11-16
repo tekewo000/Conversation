@@ -1,18 +1,22 @@
-param([Parameter(Mandatory)][string]$Serial, [switch]$Media, [switch]$ImageSecurity)
+param([Parameter(Mandatory)][string]$Serial, [switch]$Media, [switch]$ImageSecurity, [switch]$DataSecurity, [ValidateSet('Baseline','Verify','Models')][string]$Mode = 'Verify')
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $tools = Get-Content "$repo/.tools/android-toolchain.json" -Raw | ConvertFrom-Json
-if ($Media -and $ImageSecurity) { throw 'Select either -Media or -ImageSecurity.' }
-$probeClass = if ($ImageSecurity) { 'ImageSecurityProbe' } elseif ($Media) { 'AttachmentApiProbe' } else { 'ReleaseStartupProbe' }
+if (([int][bool]$Media + [int][bool]$ImageSecurity + [int][bool]$DataSecurity) -gt 1) { throw 'Select one specialized probe.' }
+$probeClass = if ($DataSecurity) { 'DataSecurityProbe' } elseif ($ImageSecurity) { 'ImageSecurityProbe' } elseif ($Media) { 'AttachmentApiProbe' } else { 'ReleaseStartupProbe' }
 . "$PSScriptRoot/android-signing.ps1"
 $build = Join-Path $repo "build/release-startup-probe/$([guid]::NewGuid())"
 New-Item -ItemType Directory -Force "$build/classes", "$build/dex" | Out-Null
 $sources = @("$repo/android/device-tests/jp/tekewo/conversation/$probeClass.java")
 if ($ImageSecurity) {
-    $sources += @('ImageVault', 'AttachmentFiles', 'AttachmentMedia', 'GitArchiveFiles', 'PersonRegistry', 'PersonDocument', 'ConnectionStore', 'ConversationApplication') |
-        ForEach-Object { "$repo/android/src/jp/tekewo/conversation/$_.java" }
+    $releaseStage = Get-ChildItem "$repo/build/android-release/run-*" -Directory | Sort-Object LastWriteTime -Descending |
+        Where-Object { Test-Path -LiteralPath "$($_.FullName)/gradle/intermediates/javac/release/compileReleaseJavaWithJavac/classes" } | Select-Object -First 1
+    if (-not $releaseStage) { throw 'Build the current Release before compiling its image diagnostics.' }
+    $probeClasspath = "$($tools.PlatformJar);$($releaseStage.FullName)/gradle/intermediates/javac/release/compileReleaseJavaWithJavac/classes"
+} else {
+    $probeClasspath = $tools.PlatformJar
 }
-& "$($tools.JavaHome)/bin/javac.exe" '-J-Duser.language=en' '-Xlint:-options' -encoding UTF-8 --release 8 -classpath $tools.PlatformJar -d "$build/classes" @sources
+& "$($tools.JavaHome)/bin/javac.exe" '-J-Duser.language=en' '-Xlint:-options' -encoding UTF-8 --release 8 -classpath $probeClasspath -d "$build/classes" @sources
 if ($LASTEXITCODE -ne 0) { throw 'Release probe compilation failed.' }
 & "$($tools.JavaHome)/bin/java.exe" -classpath "$($tools.BuildTools)/lib/d8.jar" com.android.tools.r8.D8 --min-api 29 --lib $tools.PlatformJar --output "$build/dex" "$build/classes/jp/tekewo/conversation/$probeClass.class"
 if ($LASTEXITCODE -ne 0) { throw 'Release probe DEX compilation failed.' }
@@ -39,9 +43,9 @@ try {
     & $tools.Adb -s $Serial install -r -t "$build/probe.apk"
     if ($LASTEXITCODE -ne 0) { throw 'Release probe installation failed.' }
     $installed = $true
-    $output = @(& $tools.Adb -s $Serial shell am instrument -w "jp.tekewo.conversation.startupprobe/jp.tekewo.conversation.$probeClass")
+    $output = @(& $tools.Adb -s $Serial shell am instrument -w -e mode $Mode "jp.tekewo.conversation.startupprobe/jp.tekewo.conversation.$probeClass")
     $output | Write-Output
-    $expected = if ($ImageSecurity) { 'IMAGE_SECURITY_RELEASE_PASS' } elseif ($Media) { 'MEDIA_API_PASS' } else { 'RELEASE_STARTUP_PASS' }
+    $expected = if ($DataSecurity -and $Mode -eq 'Models') { 'DATA_SECURITY_MODELS_PASS' } elseif ($DataSecurity -and $Mode -eq 'Baseline') { 'DATA_SECURITY_BASELINE_PASS' } elseif ($DataSecurity) { 'DATA_SECURITY_RELEASE_PASS' } elseif ($ImageSecurity) { 'IMAGE_SECURITY_RELEASE_PASS' } elseif ($Media) { 'MEDIA_API_PASS' } else { 'RELEASE_STARTUP_PASS' }
     if ($LASTEXITCODE -ne 0 -or -not ($output -match $expected)) { throw "Installed Release $probeClass failed." }
 } finally {
     if ($installed) { & $tools.Adb -s $Serial uninstall jp.tekewo.conversation.startupprobe }

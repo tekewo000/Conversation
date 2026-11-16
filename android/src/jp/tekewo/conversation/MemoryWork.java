@@ -26,16 +26,20 @@ public final class MemoryWork extends Worker {
     private volatile ChatSession session;
     private volatile MemoryRebuild rebuild;
     private boolean rebuilding;
+    private java.io.File statePerson;
     private String operation = "記憶の整理";
 
     public MemoryWork(Context context, WorkerParameters parameters) { super(context, parameters); }
     private static SharedPreferences settings(Context context) { return context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE); }
     static boolean isRunning() { return recordsRunning.get() || maintenanceRunning.get(); }
     static String status(Context context) {
-        SharedPreferences preferences = settings(context);
-        String records = preferences.getString("memory_status", "");
-        if (records.isEmpty()) records = preferences.getString("memory_phase", "");
-        String persona = preferences.getString("persona_status", "");
+        JSONObject state;
+        try { PersonRegistry.Person person=new PersonRegistry(context.getFilesDir()).active();
+            state=person==null?new JSONObject():PersonState.load(person.directory);
+        } catch(Exception error) { return "保存した作業状態を読み込めません。"; }
+        String records=state.optString("memory_status");
+        if(records.isEmpty()) records=state.optString("memory_phase");
+        String persona=state.optString("persona_status");
         return records.isEmpty() ? persona : persona.isEmpty() ? records : records + "\n" + persona;
     }
     static void enqueue(Context context) {
@@ -50,7 +54,7 @@ public final class MemoryWork extends Worker {
         WorkManager manager = WorkManager.getInstance(context);
         manager.cancelUniqueWork(NAME);
         manager.cancelUniqueWork(RECORD_NAME);
-        settings(context).edit().putString("memory_phase", "").apply();
+        writeStatus(context,null,"memory_phase","");
     }
     private static void schedule(Context context, boolean records, ExistingWorkPolicy policy) {
         OneTimeWorkRequest request = new OneTimeWorkRequest.Builder(MemoryWork.class)
@@ -67,11 +71,13 @@ public final class MemoryWork extends Worker {
         AtomicBoolean running = records ? recordsRunning : maintenanceRunning;
         if (!running.compareAndSet(false, true)) return Result.retry();
         try {
+            DataMigration.ensure(context);
             connection = new ChatGptConnection(context);
             if (!connection.hasSession()) return Result.success();
             PersonRegistry.Person person;
             synchronized (MainActivity.storeGate) { person = new PersonRegistry(context.getFilesDir()).active(); }
             if (person == null) return Result.success();
+            statePerson=person.directory;
             MemoryStore store = new MemoryStore(context, person.id);
             rebuild = new MemoryRebuild(person.directory, this::updated);
             rebuilding = !records && MemoryRebuild.pending(person.directory);
@@ -120,7 +126,7 @@ public final class MemoryWork extends Worker {
             if (records) {
                 session.extractMemories(backend, 1);
                 more = store.pending().optLong("id", 0) > 0;
-                preferences.edit().putString("memory_status", "").putString("memory_phase", "").apply();
+                writeStatus(context,statePerson,"memory_status",""); writeStatus(context,statePerson,"memory_phase","");
                 schedule(context, false, ExistingWorkPolicy.APPEND_OR_REPLACE);
             } else if (rebuilding) {
                 more = rebuild.step(new MemoryRebuild.Native() {
@@ -131,7 +137,7 @@ public final class MemoryWork extends Worker {
             } else {
                 session.processMemories(backend, 0);
                 more = rebuild.isPending() || store.pendingPersona().optLong("through_id", 0) > 0;
-                preferences.edit().putString("persona_status", "").apply();
+                writeStatus(context,statePerson,"persona_status","");
             }
             JSONObject progress = store.context("").getJSONObject("memory_progress");
             android.util.Log.i("ConversationMemory", "Completed " + (records ? "records" : rebuilding ? "rebuild" : "persona")
@@ -148,7 +154,7 @@ public final class MemoryWork extends Worker {
             }
             String message = operation + "は自動で再試行します。" + (error instanceof IOException ? error.getMessage() : error instanceof org.json.JSONException ? "AIの応答が必要な記憶形式になっていません。" : "");
             if (rebuilding && rebuild != null) rebuild.failed(message);
-            else settings(context).edit().putString(records ? "memory_status" : "persona_status", message).apply();
+            else writeStatus(context,statePerson,records?"memory_status":"persona_status",message);
             return Result.retry();
         } finally { running.set(false); }
     }
@@ -156,16 +162,19 @@ public final class MemoryWork extends Worker {
     private void updated() {
         setProgressAsync(new Data.Builder().putLong("updated", System.currentTimeMillis()).build());
     }
-    private static void preferencesClear(Context context, boolean records) {
-        SharedPreferences.Editor editor = settings(context).edit().putString(records ? "memory_status" : "persona_status", "");
-        if (records) editor.putString("memory_phase", "");
-        editor.apply();
+    private static void writeStatus(Context context,java.io.File person,String key,String value) {
+        try {
+            if(person==null) { PersonRegistry.Person active=new PersonRegistry(context.getFilesDir()).active(); if(active==null) return; person=active.directory; }
+            PersonState.put(person,key,value);
+        } catch(Exception error) { android.util.Log.w("ConversationMemory","Encrypted status could not be saved"); }
     }
-    private void phase(boolean records, String value) {
-        SharedPreferences.Editor editor = settings(getApplicationContext()).edit();
-        if (records) editor.putString("memory_status", "").putString("memory_phase", value);
-        else editor.putString("persona_status", value);
-        editor.apply();
+    private static void preferencesClear(Context context,boolean records) {
+        writeStatus(context,null,records?"memory_status":"persona_status","");
+        if(records) writeStatus(context,null,"memory_phase","");
+    }
+    private void phase(boolean records,String value) {
+        if(records) { writeStatus(getApplicationContext(),statePerson,"memory_status",""); writeStatus(getApplicationContext(),statePerson,"memory_phase",value); }
+        else writeStatus(getApplicationContext(),statePerson,"persona_status",value);
         updated();
     }
     @Override public void onStopped() {

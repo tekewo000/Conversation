@@ -2,3 +2,4 @@
 -keep,allowoptimization class jp.tekewo.conversation.** { *; }
 # ONNX JNI resolves Java types and constructors by name when returning model output.
 -keep class ai.onnxruntime.** { *; }
+-keep class net.zetetic.** { *; }

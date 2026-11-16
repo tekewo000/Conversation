@@ -3,7 +3,7 @@ package jp.tekewo.conversation;
 import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
-import android.database.sqlite.SQLiteDatabase;
+import net.zetetic.database.sqlcipher.SQLiteDatabase;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.Closeable;
@@ -54,6 +54,7 @@ final class SemanticMemory implements Closeable {
             if (closed || cache != null) return;
             try { openCache(); }
             catch (Exception error) {
+                if(error instanceof EncryptedDatabase.Failure) throw error;
                 releaseCache();
                 SQLiteDatabase.deleteDatabase(cacheFile);
                 openCache();
@@ -64,7 +65,7 @@ final class SemanticMemory implements Closeable {
         try (Cursor rows = cache.rawQuery("SELECT value FROM meta WHERE key=?", new String[]{key})) { return rows.moveToFirst() ? rows.getString(0) : ""; }
     }
     private void openCache() throws Exception {
-        cache = SQLiteDatabase.openOrCreateDatabase(cacheFile, null);
+        cache = EncryptedDatabase.open(cacheFile.getParentFile(),cacheFile,false);
         cache.execSQL("CREATE TABLE IF NOT EXISTS vectors(id INTEGER PRIMARY KEY,vector BLOB NOT NULL CHECK(length(vector)=1024))");
         cache.execSQL("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
         if (!RagModels.VERSION.equals(meta("model"))) {

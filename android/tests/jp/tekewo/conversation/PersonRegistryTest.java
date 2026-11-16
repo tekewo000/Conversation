@@ -8,6 +8,8 @@ import java.nio.file.Files;
 public final class PersonRegistryTest {
     public static void main(String[] args) throws Exception {
         ImageVaultTest.install();
+        checkLegacyUpgrade();
+        checkRepositoryRebind();
         File root = Files.createTempDirectory("conversation-people-").toFile();
         try {
             PersonRegistry registry = new PersonRegistry(root);
@@ -17,7 +19,8 @@ public final class PersonRegistryTest {
             PersonRegistry.Person first = registry.stage(doc, "https://GitHub.com/Owner/Friend.git/");
             assert first.repository.equals("owner/friend");
             assert registry.list().isEmpty();
-            assert new String(Files.readAllBytes(new File(first.directory, "person.md").toPath()), StandardCharsets.UTF_8).equals(doc.rawMarkdown);
+            assert DataVault.encrypted(Files.readAllBytes(new File(first.directory, "person.md").toPath()));
+            assert new String(DataFiles.read(first.directory,new File(first.directory,"person.md")),StandardCharsets.UTF_8).equals(doc.rawMarkdown);
             registry.bindRemoteId(first.id, 123);
             registry.commit(first);
             assert registry.active().id.equals(first.id);
@@ -57,6 +60,40 @@ public final class PersonRegistryTest {
             checkCleanupSymlink();
             checkPersonIcons();
             System.out.println("PASS: person registry no selection, exact legacy cleanup, isolation, canonical repo and remote ID uniqueness");
+        } finally { remove(root); }
+    }
+    private static void checkRepositoryRebind() throws Exception {
+        File root=Files.createTempDirectory("rebind-registry-").toFile();
+        try {
+            PersonRegistry people=new PersonRegistry(root);
+            PersonRegistry.Person person=people.stage(PersonDocument.named("same person"),"owner/old");people.bindRemoteId(person.id,11);people.commit(person);
+            byte[] key=ImageVault.keys.get(person.directory,false);
+            people.rebindRepository(person.id,"owner/new",22);
+            PersonRegistry.Person current=new PersonRegistry(root).active();
+            assert current.id.equals(person.id)&&current.repository.equals("owner/new")&&current.remoteId==22;
+            assert java.util.Arrays.equals(key,ImageVault.keys.get(current.directory,false));
+            File blocked=new File(root,"people-registry.json.tmp");assert blocked.mkdir();
+            expectFailure(()->people.rebindRepository(person.id,"owner/failed",33));
+            assert new PersonRegistry(root).active().repository.equals("owner/new");
+        } finally { remove(root); }
+    }
+    private static void checkLegacyUpgrade() throws Exception {
+        File root=Files.createTempDirectory("legacy-registry-").toFile();
+        try {
+            String id=java.util.UUID.randomUUID().toString();
+            File person=new File(root,"people/"+id); assert person.mkdirs();
+            PersonDocument doc=PersonDocument.named("旧データの人物");
+            Files.write(new File(person,"person.md").toPath(),doc.rawMarkdown.getBytes(StandardCharsets.UTF_8));
+            Files.write(new File(person,"profile.md").toPath(),doc.profile.getBytes(StandardCharsets.UTF_8));
+            Files.write(new File(person,"person.json").toPath(),doc.importPayload(id).toString().getBytes(StandardCharsets.UTF_8));
+            org.json.JSONObject record=new org.json.JSONObject().put("id",id).put("name",doc.name).put("repository",org.json.JSONObject.NULL).put("remote_id",0);
+            Files.write(new File(root,"people-registry.json").toPath(),new org.json.JSONObject().put("version",1).put("active_id",id)
+                .put("people",new org.json.JSONArray().put(record)).toString().getBytes(StandardCharsets.UTF_8));
+            PersonRegistry loaded=new PersonRegistry(root);
+            assert loaded.active().name.equals(doc.name);
+            assert DataVault.encrypted(Files.readAllBytes(new File(person,"person.md").toPath()));
+            assert !new String(Files.readAllBytes(new File(root,"people-registry.json").toPath()),StandardCharsets.UTF_8).contains(doc.name);
+            assert new PersonRegistry(root).active().id.equals(id);
         } finally { remove(root); }
     }
     private static void checkPersonIcons() throws Exception {
@@ -163,8 +200,8 @@ public final class PersonRegistryTest {
 
             PersonRegistry migrated = new PersonRegistry(root);
             assert migrated.active() == null && migrated.list().size() == 1;
-            for (String name : oldFiles) assert !new File(root, name).exists() : name;
-            assert !new File(root, "export").exists();
+            for (String name : oldFiles) assert new File(root, name).exists() : name;
+            assert new File(root, "export").exists();
             for (File file : new File[] { personDb, personExport, auth, githubAuth, unrelated })
                 assert java.util.Arrays.equals(retained, Files.readAllBytes(file.toPath())) : file;
             assert new PersonRegistry(root).active() == null;
@@ -179,7 +216,7 @@ public final class PersonRegistryTest {
             File blocked = new File(root, "notebook.json");
             assert blocked.mkdir();
             Files.write(new File(blocked, "unrelated.txt").toPath(), new byte[] { 1 });
-            expectFailure(() -> new PersonRegistry(root));
+            assert new PersonRegistry(root).active() == null;
             assert new File(blocked, "unrelated.txt").isFile();
         } finally { remove(root); }
     }
@@ -197,7 +234,7 @@ public final class PersonRegistryTest {
                 return;
             }
             assert new PersonRegistry(root).active() == null;
-            assert !Files.isSymbolicLink(link.toPath());
+            assert Files.isSymbolicLink(link.toPath());
             assert java.util.Arrays.equals(retained, Files.readAllBytes(outside.toPath()));
         } finally { remove(root); Files.deleteIfExists(outside.toPath()); }
     }

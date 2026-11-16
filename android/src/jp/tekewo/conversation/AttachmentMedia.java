@@ -51,12 +51,26 @@ final class AttachmentMedia {
                 return AttachmentFiles.save(person, name, ext, new ByteArrayInputStream(data));
             }
             AttachmentFiles.Ref ref = AttachmentFiles.save(person, name, ext, input);
-            try (MediaMetadataRetriever video = new MediaMetadataRetriever()) {
-                video.setDataSource(AttachmentFiles.resolve(person, ref.fileName).getPath());
+            try (MediaMetadataRetriever video = video(person,ref)) {
                 if (video.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION) == null) throw new IOException("動画を読み込めませんでした。");
             }
             return ref;
         }
+    }
+    static MediaMetadataRetriever video(File person,AttachmentFiles.Ref ref) throws Exception {
+        byte[] data=AttachmentFiles.read(person,ref);
+        MediaMetadataRetriever video=new MediaMetadataRetriever();
+        try {
+            video.setDataSource(new android.media.MediaDataSource() {
+                public int readAt(long position,byte[] output,int offset,int size) {
+                    if(position<0||position>=data.length) return -1;
+                    int count=(int)Math.min((long)size,data.length-position);
+                    System.arraycopy(data,(int)position,output,offset,count); return count;
+                }
+                public long getSize() { return data.length; }
+                public void close() { java.util.Arrays.fill(data,(byte)0); }
+            }); return video;
+        } catch(Exception error) { video.close(); java.util.Arrays.fill(data,(byte)0); throw error; }
     }
     static AttachmentFiles.Ref saveBitmap(File person, String name, Bitmap bitmap) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
@@ -94,9 +108,7 @@ final class AttachmentMedia {
                     try { parts.put(image(bitmap)); } finally { bitmap.recycle(); }
                     remainingImages--;
                 } else if (ref.video() && remainingImages >= 4) {
-                    File file = AttachmentFiles.resolve(person, ref.fileName); AttachmentFiles.verify(file);
-                    try (MediaMetadataRetriever video = new MediaMetadataRetriever()) {
-                        video.setDataSource(file.getPath());
+                    try (MediaMetadataRetriever video = video(person,ref)) {
                         long duration = Long.parseLong(video.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION));
                         parts.put(new JSONObject().put("type", "input_text").put("text", "動画の長さ: " + duration / 1000.0 + "秒。以下は4枚の代表フレームです。音声は含みません。"));
                         for (int frame = 0; frame < 4; frame++) {

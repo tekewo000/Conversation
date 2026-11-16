@@ -60,7 +60,7 @@ class SemanticMemoryTest {
         try {
             open(directory, source).use { assertEquals(1L, it.search("土砂降りならどう過ごす？")[0]) }
             open(directory, source).use { assertEquals(1L, it.search("土砂降りならどう過ごす？")[0]) }
-            android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(File(directory, ".semantic-cache.sqlite3"), null).use {
+            EncryptedDatabase.open(directory,File(directory,".semantic-cache.sqlite3"),false).use {
                 it.execSQL("UPDATE vectors SET vector=zeroblob(1024)")
             }
             open(directory, source).use { assertEquals(1L, it.search("土砂降りならどう過ごす？")[0]) }

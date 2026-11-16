@@ -2,7 +2,7 @@ package jp.tekewo.conversation;
 
 import android.content.ContentValues;
 import android.database.Cursor;
-import android.database.sqlite.SQLiteDatabase;
+import net.zetetic.database.sqlcipher.SQLiteDatabase;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -30,18 +30,18 @@ final class MemoryRebuild {
     boolean isPending() { return file.isFile(); }
     private SQLiteDatabase open() throws IOException {
         if (!file.isFile() || Files.isSymbolicLink(file.toPath())) throw invalid();
-        return SQLiteDatabase.openDatabase(file.getPath(), null, SQLiteDatabase.OPEN_READWRITE);
+        return EncryptedDatabase.open(file.getParentFile(),file,false);
     }
     void request(long boundary) throws Exception {
         if (boundary < 1) throw new IOException("整理する過去の会話がまだありません。");
         synchronized (MemoryRebuild.class) {
             if (file.isFile()) {
                 try (SQLiteDatabase db = open()) { validate(db); return; }
-                catch (Exception invalidCache) { if (!SQLiteDatabase.deleteDatabase(file)) throw invalid(); }
+                catch (Exception invalidCache) { if(invalidCache instanceof EncryptedDatabase.Failure) throw invalidCache; if (!SQLiteDatabase.deleteDatabase(file)) throw invalid(); }
             }
             File temporary = new File(file.getParentFile(), FILE + "." + UUID.randomUUID() + ".tmp");
             try {
-                try (SQLiteDatabase db = SQLiteDatabase.openOrCreateDatabase(temporary, null)) {
+                try (SQLiteDatabase db = EncryptedDatabase.open(temporary.getParentFile(),temporary,false)) {
                     db.beginTransaction();
                     try {
                         db.execSQL("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
@@ -57,7 +57,7 @@ final class MemoryRebuild {
     }
     String status() throws Exception {
         if (!file.isFile()) return "";
-        try (SQLiteDatabase db = SQLiteDatabase.openDatabase(file.getPath(), null, SQLiteDatabase.OPEN_READONLY)) {
+        try (SQLiteDatabase db = EncryptedDatabase.open(file.getParentFile(),file,true)) {
             validate(db);
             String phase = "実行を待っています", error = "";
             try (Cursor rows = db.rawQuery("SELECT key,value FROM meta WHERE key IN ('phase','error')", null)) {
@@ -65,7 +65,10 @@ final class MemoryRebuild {
             }
             return "過去の記憶を階層に整理中\n" + meta(db, "cursor") + " / " + meta(db, "boundary") + " 発言\n" + phase
                     + (error.isEmpty() ? "" : "\n" + error);
-        } catch (Exception invalidCache) { return file.isFile() ? "過去の記憶の作業データを再作成して続けます。現在の記憶は保持しています。" : ""; }
+        } catch (Exception invalidCache) {
+            if(invalidCache instanceof EncryptedDatabase.Failure) return "整理中のデータを復号できません。原本と作業データを保持して停止しています。復元キーを確認してください。";
+            return file.isFile() ? "過去の記憶の作業データを再作成して続けます。現在の記憶は保持しています。" : "";
+        }
     }
     void phase(String message) { report(message, ""); }
     void failed(String message) { report("再試行待ちです", message); }
@@ -111,6 +114,7 @@ final class MemoryRebuild {
                         .put("parent_key", rows.getString(1)).put("depth", rows.getInt(2)));
             }
         } catch (Exception invalidCache) {
+            if(invalidCache instanceof EncryptedDatabase.Failure) throw invalidCache;
             if (!file.isFile()) return false;
             if (!SQLiteDatabase.deleteDatabase(file)) throw invalid();
             request(latest);

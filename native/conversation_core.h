@@ -7,6 +7,7 @@ extern "C" {
 // Serialize all calls. Borrowed JSON/text buffers survive until the next call
 // returning JSON; window strings survive until load_window/add/init/close.
 bool conversation_init(const char* storage_dir);
+bool conversation_init_database(const char* storage_dir, void* database);
 bool conversation_send(const char* utf8);
 int64_t conversation_add_message(const char* role, const char* utf8);
 int64_t conversation_add_note(const char* kind, const char* utf8);
@@ -46,6 +47,8 @@ const char* conversation_archive_delta(int64_t after_cursor);
 // Replay into a fresh or matching DB; rejects conflicting owners/cursors atomically.
 bool conversation_apply_archive(const char* delta_json);
 bool conversation_export(const char* output_dir);
+typedef bool (*conversation_export_writer)(void* user, const char* logical_path, const uint8_t* data, int32_t size);
+bool conversation_export_with_writer(conversation_export_writer writer, void* user);
 // Legacy read compatibility. Pin modification is retired (returns false).
 bool conversation_remember(int32_t index);
 int32_t conversation_memory_count(void);

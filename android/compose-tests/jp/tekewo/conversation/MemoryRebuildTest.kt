@@ -1,6 +1,6 @@
 package jp.tekewo.conversation
 
-import android.database.sqlite.SQLiteDatabase
+import net.zetetic.database.sqlcipher.SQLiteDatabase
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.json.JSONArray
@@ -38,7 +38,7 @@ class MemoryRebuildTest {
             rebuild.step(source) { _, _, _ -> first.toString() }
             rebuild.step(source) { _, _, _ -> result(node("trip", "旅行の続き", 3)) }
             rebuild.step(source) { _, _, _ -> """{"memories":[],"continuity":{"threads":[],"episodes":[]}}""" }
-            SQLiteDatabase.openDatabase(File(directory, MemoryRebuild.FILE).path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+            EncryptedDatabase.open(directory,File(directory,MemoryRebuild.FILE),true).use { db ->
                 db.rawQuery("SELECT value FROM meta WHERE key='roots'", null).use { rows ->
                     rows.moveToFirst(); val roots = JSONArray(rows.getString(0)); assertEquals(2, roots.length())
                     assertEquals("旅行の続き", roots.getJSONObject(0).getString("scene"))
@@ -62,7 +62,7 @@ class MemoryRebuildTest {
             val payload = JSONObject(result(node("trip-0", "旅0", 1)))
             for (index in 1..30) payload.getJSONObject("continuity").getJSONArray("episodes").put(node("trip-$index", "旅$index", 1))
             rebuild.step(source) { _, _, _ -> payload.toString() }
-            SQLiteDatabase.openDatabase(File(directory, MemoryRebuild.FILE).path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+            EncryptedDatabase.open(directory,File(directory,MemoryRebuild.FILE),true).use { db ->
                 db.rawQuery("SELECT value FROM meta WHERE key='roots'", null).use { rows -> rows.moveToFirst(); assertEquals(30, JSONArray(rows.getString(0)).length()) }
                 db.rawQuery("SELECT count(*) FROM nodes", null).use { rows -> rows.moveToFirst(); assertEquals(31, rows.getInt(0)) }
             }
@@ -156,7 +156,7 @@ class MemoryRebuildTest {
                         .put("content", "京都旅行の原文$id").put("created_at", "2026-11-15T00:00:00Z"))
                     return JSONObject().put("messages", messages).put("through_id", end).put("boundary_id", through)
                 }
-                override fun publish(): Boolean = SQLiteDatabase.openDatabase(File(directory, MemoryRebuild.FILE).path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+                override fun publish(): Boolean = EncryptedDatabase.open(directory,File(directory,MemoryRebuild.FILE),true).use { db ->
                     db.rawQuery("SELECT value FROM meta WHERE key='boundary'", null).use { rows -> rows.moveToFirst(); rows.getString(0).toLong() == total }
                 }
             }
@@ -174,7 +174,7 @@ class MemoryRebuildTest {
             assertTrue(MemoryRebuild(directory).status().contains("2 / 4"))
             val revised = node("trip", "京都旅行", 3)
             assertTrue(MemoryRebuild(directory).step(source) { _, _, _ -> result(revised) })
-            SQLiteDatabase.openDatabase(File(directory, MemoryRebuild.FILE).path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+            EncryptedDatabase.open(directory,File(directory,MemoryRebuild.FILE),true).use { db ->
                 db.rawQuery("SELECT count(*) FROM nodes WHERE key='day1'", null).use { rows -> rows.moveToFirst(); assertEquals(1, rows.getInt(0)) }
             }
             total = 6
@@ -193,7 +193,7 @@ class MemoryRebuildTest {
             SQLiteDatabase.deleteDatabase(File(directory, MemoryRebuild.FILE))
             assertEquals("", rebuild.status())
             assertFalse(MemoryRebuild.pending(directory))
-            SQLiteDatabase.openOrCreateDatabase(File(directory, MemoryRebuild.FILE), null).close()
+            EncryptedDatabase.open(directory,File(directory,MemoryRebuild.FILE),false).close()
             rebuild.request(2)
             assertTrue(rebuild.status().contains("0 / 2"))
         } finally { directory.deleteRecursively() }
@@ -203,14 +203,14 @@ class MemoryRebuildTest {
         val directory = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "rebuild-committed-${UUID.randomUUID()}").apply { mkdirs() }
         try {
             val rebuild = MemoryRebuild(directory); rebuild.request(2)
-            SQLiteDatabase.openDatabase(File(directory, MemoryRebuild.FILE).path, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
+            EncryptedDatabase.open(directory,File(directory,MemoryRebuild.FILE),false).use { db ->
                 db.execSQL("UPDATE meta SET value='2' WHERE key='cursor'")
             }
             val source = object : MemoryRebuild.Native {
                 override fun context() = JSONObject().put("memory_progress", JSONObject().put("total_messages", 3))
                 override fun batch(after: Long, through: Long): JSONObject = throw AssertionError("Committed work must not read or replay newer messages")
                 override fun publish(): Boolean {
-                    SQLiteDatabase.openDatabase(File(directory, MemoryRebuild.FILE).path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+                    EncryptedDatabase.open(directory,File(directory,MemoryRebuild.FILE),true).use { db ->
                         db.rawQuery("SELECT value FROM meta WHERE key='boundary'", null).use { rows -> rows.moveToFirst(); assertEquals("2", rows.getString(0)) }
                     }
                     return true

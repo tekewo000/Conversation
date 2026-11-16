@@ -53,7 +53,7 @@ final class AttachmentFiles {
         File temporary = File.createTempFile("attachment-", ".pending", directory(person));
         try {
             MessageDigest hash = MessageDigest.getInstance("SHA-256");
-            ByteArrayOutputStream image = extension.matches("jpg|png|webp|gif") ? new ByteArrayOutputStream() : null;
+            ByteArrayOutputStream image = new ByteArrayOutputStream();
             long total = 0;
             try (FileOutputStream output = new FileOutputStream(temporary)) {
                 byte[] buffer = new byte[65536]; int count;
@@ -73,18 +73,24 @@ final class AttachmentFiles {
             if (target.exists()) verify(target);
             else {
                 if (image != null) try (FileOutputStream output = new FileOutputStream(temporary)) {
-                    output.write(ImageVault.encode(person, fileName, image.toByteArray())); output.getFD().sync();
+                    output.write(ImageVault.image(fileName) ? ImageVault.encode(person, fileName, image.toByteArray())
+                            : encode(person,fileName,image.toByteArray())); output.getFD().sync();
                 }
                 Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE);
             }
             return new Ref(label(name), fileName);
         } finally { Files.deleteIfExists(temporary.toPath()); }
     }
+    private static byte[] encode(File person,String fileName,byte[] bytes) throws IOException {
+        byte[] key=ImageVault.keys.get(person,true);
+        try { return DataVault.seal(key,person.getName(),"file","media/"+fileName,bytes); }
+        finally { Arrays.fill(key,(byte)0); }
+    }
     static byte[] read(File person, Ref ref) throws Exception {
         File file = resolve(person, ref.fileName);
-        if (!file.isFile() || file.length() == 0 || file.length() > MAX_BYTES + (ref.image() ? ImageVault.OVERHEAD : 0))
+        if (!file.isFile() || file.length() == 0 || file.length() > MAX_BYTES + DataVault.OVERHEAD)
             throw new IOException("添付ファイルが見つからないか、大きすぎます。");
-        byte[] bytes = ref.image() ? ImageVault.read(person, file) : Files.readAllBytes(file.toPath());
+        byte[] bytes = ref.image() ? ImageVault.read(person, file) : DataFiles.read(person,file);
         if (bytes.length > MAX_BYTES || !ref.fileName.startsWith(GitArchiveFiles.sha256(bytes) + "."))
             throw new IOException("添付ファイルの内容を確認できません。");
         if (ref.image()) ImageVault.protect(person, file, bytes);

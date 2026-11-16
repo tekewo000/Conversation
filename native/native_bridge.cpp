@@ -2,6 +2,8 @@
 #ifndef CONVERSATION_BRIDGE_TEST
 #include <android/log.h>
 #include <jni.h>
+#include "sqlite3.h"
+extern "C" int sqlite3_key(sqlite3*, const void*, int);
 #endif
 #include <algorithm>
 #include <exception>
@@ -15,6 +17,7 @@ constexpr int kPageSize = 80;
 std::mutex mutex;
 bool core_ready = false;
 std::string storage_path;
+std::vector<unsigned char> storage_key;
 std::string error;
 
 #ifndef CONVERSATION_BRIDGE_TEST
@@ -63,23 +66,41 @@ void core_error() {
 #endif
 }
 
-bool switch_person(std::string requested_path, const std::string& payload) {
-    if ((requested_path.empty() && !payload.empty()) || requested_path.find('\0') != std::string::npos || payload.find('\0') != std::string::npos) {
+#ifndef CONVERSATION_BRIDGE_TEST
+bool init_person_database(const std::string& path, const std::vector<unsigned char>& key) {
+    sqlite3* handle = nullptr;
+    if (sqlite3_open_v2((path + "/conversation.sqlite3").c_str(), &handle, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) != SQLITE_OK) {
+        if (handle) sqlite3_close(handle);
+        error = "暗号化DBを開けません。"; return false;
+    }
+    if (sqlite3_key(handle, key.data(), static_cast<int>(key.size())) != SQLITE_OK ||
+        sqlite3_exec(handle, "PRAGMA temp_store=MEMORY", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        sqlite3_close(handle); error = "暗号化DBの鍵を確認してください。"; return false;
+    }
+    return conversation_init_database(path.c_str(), handle);
+}
+#else
+bool init_person_database(const std::string&, const std::vector<unsigned char>&);
+#endif
+bool switch_person(std::string requested_path, const std::string& payload, const std::vector<unsigned char>& key) {
+    if ((!requested_path.empty() && key.size() != 44) || (requested_path.empty() && !key.empty()) || (requested_path.empty() && !payload.empty()) || requested_path.find('\0') != std::string::npos || payload.find('\0') != std::string::npos) {
         error = "人物の保存先・資料が無効です。";
         return false;
     }
-    if (core_ready && requested_path == storage_path && payload.empty()) { error.clear(); return true; }
+    if (core_ready && requested_path == storage_path && key == storage_key && payload.empty()) { error.clear(); return true; }
     const bool had_previous = core_ready;
     auto restore_previous = [&] {
         conversation_close();
-        core_ready = had_previous && conversation_init(storage_path.c_str());
+        core_ready = had_previous && init_person_database(storage_path, storage_key);
     };
     conversation_close();
     core_ready = false;
     try {
-        if (requested_path.empty() || (conversation_init(requested_path.c_str()) &&
+        if (requested_path.empty() || (init_person_database(requested_path, key) &&
                 (payload.empty() || conversation_import_person(payload.c_str())))) {
             storage_path.swap(requested_path);
+            std::fill(storage_key.begin(), storage_key.end(), 0);
+            storage_key = key;
             core_ready = !storage_path.empty();
             error.clear();
             return true;
@@ -169,7 +190,7 @@ Java_jp_tekewo_conversation_MainActivity_nativeInit(JNIEnv* env, jclass, jbyteAr
     try {
         std::string requested_path;
         if (!read_text(env, path, requested_path)) return java_string(env, "保存先が無効です。");
-        return java_string(env, switch_person(std::move(requested_path), "") ? "" : error);
+        return java_string(env, switch_person(std::move(requested_path), "", {}) ? "" : error);
     } catch (const std::exception&) {
         return java_string(env, "初期化に必要なメモリを確保できませんでした。");
     }
@@ -194,15 +215,18 @@ Java_jp_tekewo_conversation_MainActivity_nativeEmotion(JNIEnv* env, jclass) {
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_jp_tekewo_conversation_MainActivity_nativeSwitchPerson(JNIEnv* env, jclass, jbyteArray path, jbyteArray payload) {
+Java_jp_tekewo_conversation_MainActivity_nativeSwitchPerson(JNIEnv* env, jclass, jbyteArray path, jbyteArray payload, jbyteArray key_bytes) {
     std::lock_guard<std::mutex> lock(mutex);
     try {
         std::string requested_path, text;
-        if (!read_text(env, path, requested_path) || (payload && !read_text(env, payload, text))) {
+        std::vector<unsigned char> key;
+        if (!read_text(env, path, requested_path) || !read_bytes(env, key_bytes, key) || (payload && !read_text(env, payload, text))) {
             error = "人物の保存先・資料が無効です。";
             return java_string(env, error);
         }
-        return java_string(env, switch_person(std::move(requested_path), text) ? "" : error);
+        bool success = switch_person(std::move(requested_path), text, key);
+        std::fill(key.begin(), key.end(), 0);
+        return java_string(env, success ? "" : error);
     } catch (const std::exception&) {
         error = "人物を切り替えるためのメモリを確保できませんでした。";
         return java_string(env, error);
@@ -420,15 +444,33 @@ Java_jp_tekewo_conversation_MainActivity_nativeMemories(JNIEnv* env, jclass, jby
     } catch (const std::exception&) { error = "記憶を読み込めませんでした。"; return java_string(env, ""); }
 }
 
+struct ExportCall { JNIEnv* env; jobject writer; jmethodID method; };
+bool write_encrypted_export(void* user, const char* path, const uint8_t* data, int32_t size) {
+    auto& call=*static_cast<ExportCall*>(user);
+    if (size<0 || size>16777216 || call.env->ExceptionCheck()) return false;
+    jbyteArray bytes=call.env->NewByteArray(size);
+    jstring name=java_string(call.env,path);
+    if (!bytes || !name) return false;
+    call.env->SetByteArrayRegion(bytes,0,size,reinterpret_cast<const jbyte*>(data));
+    if (!call.env->ExceptionCheck()) call.env->CallVoidMethod(call.writer,call.method,name,bytes);
+    call.env->DeleteLocalRef(bytes); call.env->DeleteLocalRef(name);
+    return !call.env->ExceptionCheck();
+}
 extern "C" JNIEXPORT jstring JNICALL
-Java_jp_tekewo_conversation_MainActivity_nativeExport(JNIEnv* env, jclass) {
+Java_jp_tekewo_conversation_MainActivity_nativeExport(JNIEnv* env, jclass, jobject writer) {
     std::lock_guard<std::mutex> lock(mutex);
     try {
-        if (!core_ready) return java_string(env, "保存先を初期化できていません。");
-        if (!conversation_export((storage_path + "/export").c_str())) { core_error(); return java_string(env, error); }
-        error.clear();
-        return java_string(env, "");
-    } catch (const std::exception&) { return java_string(env, "書き出しに失敗しました。"); }
+        if (!core_ready || !writer) return java_string(env,"保存先を初期化できていません。");
+        jclass type=env->GetObjectClass(writer);
+        jmethodID method=env->GetMethodID(type,"writeChunk","(Ljava/lang/String;[B)V");
+        env->DeleteLocalRef(type);
+        if (!method || env->ExceptionCheck()) return nullptr;
+        ExportCall call{env,writer,method};
+        bool success=conversation_export_with_writer(write_encrypted_export,&call);
+        if (env->ExceptionCheck()) return nullptr;
+        if (!success) { core_error(); return java_string(env,error); }
+        error.clear(); return java_string(env,"");
+    } catch(const std::exception&) { return java_string(env,"暗号化バックアップを書き出せませんでした。"); }
 }
 
 extern "C" JNIEXPORT jstring JNICALL

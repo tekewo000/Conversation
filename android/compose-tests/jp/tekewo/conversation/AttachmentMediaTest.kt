@@ -238,10 +238,17 @@ class AttachmentMediaTest {
         assertTrue(prepared.toString().toByteArray().size < 16 * 1024 * 1024)
     }
     @Test fun videoOpensAndClosesItsPlayer() {
-        val ref = video()
+        val original = video()
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val people = PersonRegistry(context.filesDir)
+        val previous = people.active()?.id
+        val actual = people.stage(PersonDocument.named("Video playback fixture"),null)
+        people.commit(actual)
+        try {
+        val ref = AttachmentFiles.save(actual.directory,"video.mp4","mp4",ByteArrayInputStream(AttachmentFiles.read(person,original)))
         compose.runOnUiThread {
             val ui = ComposeUi(compose.activity, {}, {}, {})
-            ui.mediaDirectory = person
+            ui.mediaDirectory = actual.directory
             ui.setMessages(JSONObject().put("first", 0).put("total", 1).put("messages", JSONArray()
                 .put(JSONObject().put("id", 1).put("role", "user").put("text", ref.markdown()))).toString())
         }
@@ -251,5 +258,6 @@ class AttachmentMediaTest {
         compose.waitUntil(10_000) { android.view.inspector.WindowInspector.getGlobalWindowViews().any { playing(it) } }
         compose.onNodeWithText("閉じる").assertIsDisplayed().performClick()
         compose.onNodeWithContentDescription("動画を再生").assertIsDisplayed()
+        } finally { people.delete(actual.id); (context.applicationContext as ConversationApplication).deleteKeys(actual.id); if(previous!=null) people.activate(previous) }
     }
 }

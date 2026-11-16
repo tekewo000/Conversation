@@ -39,9 +39,17 @@ public final class MainActivity extends ComponentActivity {
     static native String nativeApplyPersona(long throughId, byte[] payload);
     private static native String nativeMemories(byte[] query);
     private static native String nativeEpisodeChildren(byte[] query);
-    private static native String nativeExport();
+    private static native String nativeExport(BackupArchive writer);
     private static native String nativeRecentTranscript();
-    static native String nativeSwitchPerson(byte[] directory, byte[] payload);
+    static native String nativeSwitchPerson(byte[] directory, byte[] payload, byte[] key);
+    static String nativeSwitchPerson(byte[] directory, byte[] payload) {
+        byte[] key = null;
+        try {
+            key = directory.length == 0 ? new byte[0] : EncryptedDatabase.key(new File(new String(directory,StandardCharsets.UTF_8)),true);
+            return nativeSwitchPerson(directory,payload,key);
+        } catch(Exception error) { return error.getMessage(); }
+        finally { if(key!=null) java.util.Arrays.fill(key,(byte)0); }
+    }
     private static native String nativeArchiveDelta(long cursor);
 
     private static native String nativeMessages(int first);
@@ -113,23 +121,28 @@ public final class MainActivity extends ComponentActivity {
         });
         applyTypography();
         compose.setOnAttach(this::showAttachments);
+        compose.setEnabled(false);
+        if(!DataMigration.needed(this)) { initializeConversation(); return; }
+        worker.execute(() -> {
+            try { DataMigration.ensure(this); ui(this::initializeConversation); }
+            catch(Exception error) { ui(() -> showRecovery(safeError(error))); }
+        });
+    }
+    private void initializeConversation() {
         try {
             System.loadLibrary("conversation");
             synchronized (storeGate) {
                 requireSuccess(nativeSwitchPerson(bytes(""), bytes("")));
                 people = new PersonRegistry(getFilesDir());
                 activePerson = people.active();
-                if (!getPreferences(MODE_PRIVATE).edit().remove("draft").commit())
-                    throw new java.io.IOException("以前の下書きを削除できませんでした。");
-                requireSuccess(nativeInit(bytes(activePerson == null ? "" : activePerson.directory.getAbsolutePath()),
-                        new byte[0], new byte[0]));
+                requireSuccess(nativeSwitchPerson(bytes(activePerson == null ? "" : activePerson.directory.getAbsolutePath()),new byte[0]));
                 ready = true;
             }
         } catch (Exception | UnsatisfiedLinkError error) {
-            compose.setFailure("起動できませんでした。\n" + error.getMessage());
+            showRecovery(error.getMessage());
             return;
         }
-        if (activePerson != null) compose.setDraft(getPreferences(MODE_PRIVATE).getString(draftKey(), ""));
+        if (activePerson != null) compose.setDraft(readPersonState().optString("draft"));
         worker.execute(() -> {
             List<Exception> failures = new ArrayList<>();
             for (PersonRegistry.Person person : people.list()) {
@@ -139,7 +152,7 @@ public final class MainActivity extends ComponentActivity {
             }
             if (!failures.isEmpty()) ui(() -> showError("一部の既存画像を暗号化できませんでした。対象のデータは保持し、ほかの画像の移行は続けました。データを消さずに再試行してください。\n" + safeError(failures.get(0))));
         });
-        if (activePerson != null) compose.setAttachments(getPreferences(MODE_PRIVATE).getString("attachments_" + activePerson.id, ""));
+        if (activePerson != null) compose.setAttachments(readPersonState().optString("attachments"));
         if (activePerson != null) compose.setGenerateImages(getPreferences(MODE_PRIVATE).getBoolean("image_mode_" + activePerson.id, false));
         compose.setPersonName(activePerson == null ? "" : activePerson.name);
         compose.setOnIcon(this::showMemory);
@@ -295,11 +308,21 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private String draftKey() { return "draft_" + activePerson.id; }
+    private JSONObject readPersonState() {
+        try { return PersonState.load(activePerson.directory); }
+        catch(Exception error) { ready=false; showError(safeError(error)); return new JSONObject(); }
+    }
+    private void clearDraft(PersonRegistry.Person person) {
+        try { PersonState.put(person.directory,"draft",""); PersonState.put(person.directory,"attachments",""); }
+        catch(java.io.IOException error) { ready=false; showError(safeError(error)); }
+    }
     private void saveDraft() {
-        if (!changingPerson && compose != null && activePerson != null) getPreferences(MODE_PRIVATE).edit()
-                .putString(draftKey(), compose.getDraft())
-                .putBoolean("image_mode_" + activePerson.id, compose.getGenerateImages())
-                .putString("attachments_" + activePerson.id, compose.getAttachments()).commit();
+        if (!changingPerson && compose != null && activePerson != null) try {
+            JSONObject state=PersonState.load(activePerson.directory);
+            state.put("draft",compose.getDraft()).put("attachments",compose.getAttachments());
+            PersonState.save(activePerson.directory,state);
+            getPreferences(MODE_PRIVATE).edit().putBoolean("image_mode_"+activePerson.id,compose.getGenerateImages()).apply();
+        } catch(Exception error) { ready=false; showError(safeError(error)); }
     }
 
     private void setBusy(boolean value) {
@@ -391,7 +414,7 @@ public final class MainActivity extends ComponentActivity {
                 ui(() -> {
                     if (compose.getDraft().equals(text)) {
                         compose.setDraft("");
-                        getPreferences(MODE_PRIVATE).edit().remove(draftKey()).apply();
+                        try { PersonState.put(activePerson.directory,"draft",""); } catch(java.io.IOException error) { ready=false; showError(safeError(error)); }
                     }
                     pageFirst = -1; scrollOnRefresh = true;
                     refreshMessages(); scheduleGitSync();
@@ -432,7 +455,8 @@ public final class MainActivity extends ComponentActivity {
                             if (draftMessage().equals(text)) {
                                 compose.setDraft("");
                                 compose.setAttachments(""); compose.setGenerateImages(false);
-                                getPreferences(MODE_PRIVATE).edit().remove(draftKey()).remove("attachments_" + person.id).remove("image_mode_" + person.id).apply();
+                                clearDraft(person);
+                                getPreferences(MODE_PRIVATE).edit().remove("image_mode_" + person.id).apply();
                             }
                             refreshMessages();
                         });
@@ -488,6 +512,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void showHistoryMenu() {
+        if(!ready||people==null) { showRecovery("保存データを開いてから利用してください。");return; }
         if (!ready) return;
         ComposeUi.Panel menu = page("管理", "management", true);
         menu.message = "会話の相手と記憶、アプリの設定を管理します。";
@@ -532,6 +557,12 @@ public final class MainActivity extends ComponentActivity {
         panel.rows.add(entry("モデルと応答", "モデル・Effort・Fast", 0, this::showResponseSettings));
         panel.rows.add(entry("画像生成API", "画像生成だけに使う、有料APIの接続", 3, this::showImageApiSettings));
         panel.rows.add(entry("表示設定", "文字サイズ・メッセージの間隔", 4, this::showDisplaySettings));
+        panel.rows.add(new ComposeUi.Row("ライセンス",()->{
+            ComposeUi.Panel licenses=page("ライセンス","licenses",false);
+            try(java.io.InputStream input=getAssets().open("data-encryption-licenses.txt")) { licenses.message=new String(AttachmentMedia.bounded(input,65536),StandardCharsets.UTF_8); }
+            catch(Exception error) { licenses.message="ライセンスを読み込めませんでした。"; }
+            compose.showPage(licenses);
+        }));
         compose.showPage(panel);
     }
 
@@ -1127,11 +1158,12 @@ public final class MainActivity extends ComponentActivity {
                 synchronized (storeGate) { requireOpen(); staged = people.stage(document, repository); }
                 if (repository != null) {
                     if (token.isEmpty()) throw new java.io.IOException("GitHubトークンを入力してください。");
-                    GitHubBackup client = new GitHubBackup(new GitHubBackup.HttpTransport(token));
-                    GitHubBackup.Repository remote = client.verifyIdentity(new GitHubBackup.PersonIdentity(staged.id), repository);
-                    synchronized (storeGate) {
-                        requireOpen(); people.bindRemoteId(staged.id, remote.repoId);
-                        new GitHubTokenStore(this, staged.id).set(token);
+                    try(GitHubBackup client = new GitHubBackup(new GitHubBackup.HttpTransport(token),ImageVault.keys.get(staged.directory,false))) {
+                        GitHubBackup.Repository remote = client.verifyIdentity(new GitHubBackup.PersonIdentity(staged.id), repository);
+                        synchronized (storeGate) {
+                            requireOpen(); people.bindRemoteId(staged.id, remote.repoId);
+                            new GitHubTokenStore(this, staged.id).set(token);
+                        }
                     }
                 }
                 synchronized (storeGate) {
@@ -1175,10 +1207,12 @@ public final class MainActivity extends ComponentActivity {
             panel.rows.add(new ComposeUi.Row("今すぐ保存", () -> queueGitSync(true), 1));
             panel.rows.add(new ComposeUi.Row("GitHubトークンを設定", this::editGitToken, 4));
         }
+        panel.rows.add(new ComposeUi.Row("別のGit保存先へ移行",this::showGitMigration));
+        panel.rows.add(new ComposeUi.Row("データの復元キーを読み込む",this::chooseRecovery));
         panel.rows.add(entry("端末からZIPを書き出す", "会話・記憶・人物のデータをまとめて保管", 1, this::exportArchive));
-        panel.blocks.add(new ComposeUi.Block("画像の保護", "添付写真・生成画像・人物アイコンは暗号化して保存します。画像のバックアップには復元キーの書き出しが必要です。キーは画像と別の安全な場所に保管してください。会話の文章・動画・PDFは、この画像暗号化の対象外です。"));
+        panel.blocks.add(new ComposeUi.Block("データの保護", "会話・記憶・人物情報・下書き・全添付・バックアップを暗号化して保存します。写真で使っていた復元キーを引き続き使います。キーはバックアップと別の安全な場所に保管してください。"));
         panel.blocks.add(new ComposeUi.Block("画像の送信と書き出し", "会話で参照する画像はOpenAIに送信します。生成時は指示文をOpenAIに送信します。画像の「保存」はダウンロードへの通常画像の書き出しです。以前のGit履歴や書き出し済みファイルは今回の暗号化では消えません。"));
-        panel.rows.add(entry("画像の復元キーを書き出す", "紛失すると、端末を失った際に画像を復元できません", 4, this::exportImageRecovery));
+        panel.rows.add(entry("データの復元キーを書き出す", "紛失すると、端末を失った際にデータを復元できません", 4, this::exportImageRecovery));
         compose.showPage(panel);
     }
 
@@ -1186,7 +1220,7 @@ public final class MainActivity extends ComponentActivity {
         if (activePerson == null) return;
         pendingRecoveryPersonId = activePerson.id;
         Intent destination = new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/octet-stream")
-                .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE, "Conversation-" + activePerson.id + "-images.key");
+                .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE, "Conversation-" + activePerson.id + "-data.key");
         startActivityForResult(destination, 85);
     }
 
@@ -1211,6 +1245,75 @@ public final class MainActivity extends ComponentActivity {
         compose.show(panel);
     }
 
+    private void chooseRecovery() {
+        startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE),86);
+    }
+    private void showRecovery(String message) {
+        ready=false;compose.setEnabled(false);
+        ComposeUi.Panel panel=new ComposeUi.Panel("保存データを開けません");panel.secure=true;
+        panel.message=message+"\n元のデータは保持しています。写真で使っていた復元キーも読み込めます。";
+        panel.rows.add(new ComposeUi.Row("復元キーを読み込む",this::chooseRecovery));
+        panel.rows.add(new ComposeUi.Row("再試行",this::recreate));compose.show(panel);
+    }
+    private void showGitMigration() {
+        if(activePerson==null||busy||MemoryWork.isRunning()) { showError("現在の処理が終わってから移行してください。");return; }
+        ComposeUi.Panel panel=new ComposeUi.Panel("Git保存先の移行");panel.secure=true;
+        panel.message="PCの migrate-git-backup.ps1 で全履歴の移行を完了してから、新しい非公開リポジトリを指定してください。途中で止まった移行も同じ保存先で再開できます。元のGitは削除しません。";
+        ComposeUi.Field repo=new ComposeUi.Field("移行先リポジトリ",false), token=new ComposeUi.Field("移行先のGitHubトークン",true);
+        try { File pending=new File(activePerson.directory,".git-rebind.json");if(pending.exists()) repo.setValue(new JSONObject(new String(DataFiles.read(activePerson.directory,pending),StandardCharsets.UTF_8)).getString("repo")); }
+        catch(Exception error) { showError(safeError(error));return; }
+        panel.fields.add(repo);panel.fields.add(token);panel.confirmLabel="検証して移行・再開";
+        panel.confirm=()->{String target=repo.getValue().trim(),credential=token.getValue().trim();token.setValue("");compose.hide();moveGit(target,credential);};
+        compose.show(panel);
+    }
+    private void moveGit(String input,String credential) {
+        final PersonRegistry.Person person=activePerson;
+        if(person==null||busy||MemoryWork.isRunning()) return;
+        final String target;
+        try { target=PersonRegistry.normalizeRepository(input); } catch(Exception error) { showError(safeError(error));return; }
+        saveDraft();changingPerson=true;setBusy(true);syncTimer.removeCallbacks(autoSync);
+        worker.execute(()->{
+            File pending=new File(person.directory,".git-rebind.json");
+            ConnectionStore temporary=new ConnectionStore(this,"git-move-"+person.id);
+            try {
+                synchronized(syncingPeople) { if(syncingPeople.contains(person.id)) throw new java.io.IOException("現在のGit保存が終わってから移行してください。"); }
+                ImageVault.keys.requireRecovery(person.directory);
+                if(!credential.isEmpty()) temporary.save(new JSONObject().put("token",credential));
+                String token=temporary.load().optString("token");
+                if(token.isEmpty()&&target.equals(person.repository)) token=new GitHubTokenStore(this,person.id).get();
+                if(token.isEmpty()) throw new java.io.IOException("移行先のGitHubトークンを設定してください。");
+                JSONObject state=pending.exists()?new JSONObject(new String(DataFiles.read(person.directory,pending),StandardCharsets.UTF_8)):new JSONObject();
+                if(state.has("repo")&&!target.equals(state.getString("repo"))) throw new java.io.IOException("別の保存先への移行が途中です。同じ保存先で再開してください。");
+                try(GitHubBackup client=new GitHubBackup(new GitHubBackup.HttpTransport(token),ImageVault.keys.get(person.directory,false))) {
+                    GitHubBackup.SyncState prior;
+                    if(state.has("sync")) prior=GitHubBackup.SyncState.fromJson(state.getJSONObject("sync"));
+                    else {
+                        prior=client.verifyMigration(new GitHubBackup.PersonIdentity(person.id),target,person.remoteId);
+                        state.put("repo",target).put("old_repository_id",person.remoteId).put("sync",prior.toJson());
+                        DataFiles.write(person.directory,pending,bytes(state.toString()));
+                    }
+                    while(true) {
+                        JSONObject delta;
+                        synchronized(storeGate) { requireOpen();delta=new JSONObject(nativeArchiveDelta(prior.cursor)); }
+                        byte[] icon=people.icon(person.id);
+                        if(icon.length>0) delta.put("encrypted_icon_base64",java.util.Base64.getEncoder().encodeToString(ImageVault.backup(person.directory,new File(person.directory,"icon.png"))));
+                        AttachmentFiles.addToDelta(person.directory,delta);
+                        GitHubBackup.SyncResult saved=client.sync(new GitHubBackup.PersonIdentity(person.id),target,person.rawMarkdown,delta,prior,prior.repoId);
+                        prior=saved;state.put("sync",saved.toJson());DataFiles.write(person.directory,pending,bytes(state.toString()));
+                        if(!delta.optBoolean("has_more")&&saved.cursor>=delta.getLong("through_cursor")) break;
+                    }
+                    synchronized(storeGate) {
+                        requireOpen();new GitHubTokenStore(this,person.id).set(token);
+                        people.rebindRepository(person.id,target,prior.repoId);
+                        DataFiles.write(person.directory,new File(person.directory,".git-sync.json"),bytes(prior.toJson().toString()));
+                        temporary.delete();Files.delete(pending.toPath());
+                    }
+                }
+                ui(()->{changingPerson=false;recreate();});
+            } catch(Exception error) { ui(()->{changingPerson=false;setBusy(false);showError(safeError(error)+"\n元のデータと移行状態は保持しています。");}); }
+        });
+    }
+
     private void scheduleGitSync() {
         syncTimer.removeCallbacks(autoSync);
         if (!closed && !changingPerson && activePerson != null && activePerson.repository != null) syncTimer.postDelayed(autoSync, 120_000);
@@ -1219,6 +1322,7 @@ public final class MainActivity extends ComponentActivity {
     private void queueGitSync(boolean report) {
         if (!ready || closed || changingPerson || activePerson == null || activePerson.repository == null || isDestroyed()) return;
         final PersonRegistry.Person person = activePerson;
+        if(new File(person.directory,".git-rebind.json").exists()) { gitStatus="Git保存先の移行を再開してください。";if(report) showError(gitStatus);return; }
         gitStatus = "Gitに保存しています";
         refreshManagementStatus();
         // Capture on the chat worker; network work must never read the subsequently active database.
@@ -1233,10 +1337,11 @@ public final class MainActivity extends ComponentActivity {
                 synchronized (storeGate) { requireCurrentPerson(); }
                 String token = new GitHubTokenStore(this, person.id).get();
                 if (token.isEmpty()) throw new java.io.IOException("GitHubトークンの設定待ちです。会話は端末に保存されています。");
+                ImageVault.keys.requireRecovery(person.directory);
                 File stateFile = new File(person.directory, ".git-sync.json");
                 if (stateFile.length() > 16384) throw new java.io.IOException("Git保存の状態ファイルが不正です。");
                 GitHubBackup.SyncState prior = stateFile.exists() ? GitHubBackup.SyncState.fromJson(new JSONObject(
-                        new String(Files.readAllBytes(stateFile.toPath()), StandardCharsets.UTF_8))) : GitHubBackup.SyncState.empty();
+                        new String(DataFiles.read(person.directory,stateFile), StandardCharsets.UTF_8))) : GitHubBackup.SyncState.empty();
                 JSONObject delta;
                 synchronized (storeGate) { requireCurrentPerson(); delta = new JSONObject(nativeArchiveDelta(prior.cursor)); }
                 if (delta.has("error")) throw new java.io.IOException("保存する履歴を読み出せませんでした。");
@@ -1246,15 +1351,10 @@ public final class MainActivity extends ComponentActivity {
                 AttachmentFiles.addToDelta(person.directory, delta);
                 gitWorker.execute(() -> {
                     boolean more = false;
-                    try {
-                        GitHubBackup.SyncResult result = new GitHubBackup(new GitHubBackup.HttpTransport(token))
-                                .sync(new GitHubBackup.PersonIdentity(person.id), person.repository, person.rawMarkdown, delta, prior, person.remoteId);
+                    try(GitHubBackup client=new GitHubBackup(new GitHubBackup.HttpTransport(token),ImageVault.keys.get(person.directory,false))) {
+                        GitHubBackup.SyncResult result=client.sync(new GitHubBackup.PersonIdentity(person.id), person.repository, person.rawMarkdown, delta, prior, person.remoteId);
                         if (result.repoId != person.remoteId) throw new java.io.IOException("保存先のリポジトリIDが一致しません。");
-                        File pending = new File(person.directory, ".git-sync.pending");
-                        try (java.io.FileOutputStream stream = new java.io.FileOutputStream(pending)) {
-                            stream.write(bytes(result.toJson().toString())); stream.getFD().sync();
-                        }
-                        Files.move(pending.toPath(), stateFile.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                        DataFiles.write(person.directory,stateFile,bytes(result.toJson().toString()));
                         more = delta.optBoolean("has_more") || result.cursor < delta.optLong("through_cursor");
                         final boolean remaining = more;
                         ui(() -> {
@@ -1285,27 +1385,36 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void exportArchive() {
-        final PersonRegistry.Person person = activePerson;
-        final File exportDirectory = new File(activePerson.directory, "export");
+        final PersonRegistry.Person person=activePerson;
+        if(person==null) return;
         worker.execute(() -> {
-            String error = nativeExport();
-            if (error.isEmpty()) {
-                try { BackupArchive.addIcon(person.directory, exportDirectory, people.icon(person.id)); AttachmentFiles.backup(person.directory, exportDirectory); }
-                catch (Exception failure) { error = safeError(failure); }
-            }
-            final String exportError = error;
+            final File completed;
+            try(BackupArchive writer=new BackupArchive(person.directory,new File(person.directory,"export"))) {
+                synchronized(storeGate) { requireCurrentPerson(); requireSuccess(nativeExport(writer)); }
+                writer.finish(); completed=writer.directory;
+            } catch(Exception error) { ui(() -> showError(safeError(error))); return; }
             ui(() -> {
-                if (!exportError.isEmpty()) { showError(exportError); return; }
-                pendingExportDirectory = exportDirectory;
-                Intent destination = new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/zip")
-                        .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE, "Conversation-backup.zip");
-                startActivityForResult(destination, 81);
+                pendingExportDirectory=completed;
+                Intent destination=new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/zip")
+                    .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE,"Conversation-backup.zip");
+                startActivityForResult(destination,81);
             });
         });
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if(request==86) {
+            if(result!=RESULT_OK||data==null||data.getData()==null) return;
+            final Uri uri=data.getData();
+            worker.execute(()->{
+                try(java.io.InputStream input=getContentResolver().openInputStream(uri)) {
+                    byte[] bytes=AttachmentMedia.bounded(input,4096);
+                    java.util.Properties recovery=new java.util.Properties();recovery.load(new java.io.ByteArrayInputStream(bytes));
+                    ((ConversationApplication)getApplication()).importRecovery(recovery);ui(this::recreate);
+                } catch(Exception error) { ui(()->showRecovery(safeError(error))); }
+            });return;
+        }
         if (request == 85) {
             final String id = pendingRecoveryPersonId; pendingRecoveryPersonId = "";
             if (result != RESULT_OK || data == null || data.getData() == null) return;
@@ -1315,7 +1424,7 @@ public final class MainActivity extends ComponentActivity {
             worker.execute(() -> {
                 try {
                     ((ConversationApplication)getApplication()).writeRecovery(person.directory, getContentResolver().openOutputStream(destination, "w"));
-                    ui(() -> { showError("画像の復元キーを書き出しました。画像のバックアップと別の場所に保管してください。"); scheduleGitSync(); });
+                    ui(() -> { showError("データの復元キーを書き出しました。バックアップと別の場所に保管してください。"); scheduleGitSync(); });
                 } catch (Exception error) { ui(() -> showError(safeError(error))); }
             });
             return;
