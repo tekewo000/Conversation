@@ -270,13 +270,15 @@ final class PersonRegistry {
             finally { java.util.Arrays.fill(key,(byte)0); }
         }
         json.put("version",2).put("people",encrypted);
-        writeAtomic(index,json.toString()); return json;
+        byte[] encoded=json.toString().getBytes(StandardCharsets.UTF_8);
+        if(encoded.length>1024*1024) throw new IOException("暗号化した人物一覧が保存上限を超えます。元の一覧を保持しています。");
+        writeAtomic(index,encoded); return json;
     }
     private static String read(File file) throws IOException { return new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8); }
     private static void writeAtomic(File file, String text) throws IOException {
         writeAtomic(file, text.getBytes(StandardCharsets.UTF_8));
     }
-    private static void writeAtomic(File file, byte[] data) throws IOException {
+    private static synchronized void writeAtomic(File file, byte[] data) throws IOException {
         File temporary = new File(file.getParentFile(), file.getName() + ".tmp");
         if (Files.isSymbolicLink(temporary.toPath())) throw new IOException("保存用ファイルの場所が不正です。");
         try {

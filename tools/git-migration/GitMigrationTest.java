@@ -17,6 +17,17 @@ public final class GitMigrationTest {
         File root=Files.createTempDirectory("git-encrypted-migration-").toFile(); byte[] key=new byte[32];
         String person="aa000000-0000-0000-0000-000000000001";
         try {
+            File jobFolder=new File(root,"job-state");assert jobFolder.mkdir();File job=new File(jobFolder,"job.enc");
+            JSONObject oldJob=new JSONObject().put("input","source").put("destination","destination").put("packed",false);
+            GitMigration.saveJob(job,key,person,oldJob);byte[] originalJob=Files.readAllBytes(job.toPath());
+            File blocked=new File(jobFolder,"job.enc.tmp");assert blocked.mkdir();
+            rejected(()->GitMigration.saveJob(job,key,person,new JSONObject(oldJob.toString()).put("packed",true)));
+            assert Arrays.equals(originalJob,Files.readAllBytes(job.toPath()));assert blocked.delete();
+            JSONObject newer=new JSONObject(oldJob.toString()).put("packed",true);
+            Files.write(blocked.toPath(),DataVault.seal(key,person,"history","job",newer.toString().getBytes("UTF-8")));
+            assert GitMigration.loadJob(job,key,person).getBoolean("packed");assert !blocked.exists();
+            Files.write(blocked.toPath(),new byte[]{1,2,3});
+            assert GitMigration.loadJob(job,key,person).getBoolean("packed");
             File source=new File(root,"source"); assert source.mkdir(); git(source,"init","-b","main");
             Files.writeString(new File(source,"secret.txt").toPath(),"private-history-canary-first"); git(source,"add","."); git(source,"commit","-m","private-history-message"); git(source,"tag","-a","v1","-m","private tag");
             git(source,"checkout","-b","dev"); Files.writeString(new File(source,"feature.txt").toPath(),"private-history-canary-feature"); git(source,"add","."); git(source,"commit","-m","feature");

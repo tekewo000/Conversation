@@ -361,6 +361,37 @@ class MainActivityComposeTest {
         } finally { if (saved.length() == 0) keys.delete() else keys.save(saved) }
     }
 
+    @Test fun failedDraftSaveKeepsCurrentPersonAndEditor() {
+        createManagementPerson()
+        compose.waitUntil(10_000) { !MemoryWork.isRunning() }
+        val currentField=MainActivity::class.java.getDeclaredField("activePerson").apply { isAccessible=true }
+        val first=currentField.get(compose.activity) as PersonRegistry.Person
+        val registry=MainActivity::class.java.getDeclaredField("people").apply { isAccessible=true }.get(compose.activity) as PersonRegistry
+        val second=registry.stage(PersonDocument.named("Switch failure fixture-${UUID.randomUUID()}"),null)
+        registry.commit(second);registry.activate(first.id)
+        val ui=MainActivity::class.java.getDeclaredField("compose").apply { isAccessible=true }.get(compose.activity) as ComposeUi
+        val attachment=AttachmentFiles.save(first.directory,"draft.txt","txt",java.io.ByteArrayInputStream("draft attachment".toByteArray()))
+        val blocked=java.io.File(first.directory,"state.json.tmp")
+        try {
+            compose.onNodeWithContentDescription("メッセージ入力").performTextInput("unsaved transition canary")
+            compose.runOnUiThread { ui.attachments=attachment.markdown() }
+            check(blocked.mkdir());java.io.File(blocked,"hold").writeText("fixture")
+            val switch=MainActivity::class.java.getDeclaredMethod("switchPerson",PersonRegistry.Person::class.java).apply { isAccessible=true }
+            val executor=MainActivity::class.java.getDeclaredField("worker").apply { isAccessible=true }.get(compose.activity) as java.util.concurrent.ExecutorService
+            compose.runOnUiThread { switch.invoke(compose.activity,second) }
+            try { executor.submit {}.get(10,java.util.concurrent.TimeUnit.SECONDS) } catch(_:java.util.concurrent.CancellationException) { }
+            compose.waitForIdle()
+            assertEquals(first.id,PersonRegistry(context.filesDir).active()!!.id)
+            assertEquals("unsaved transition canary",ui.draft)
+            assertEquals(attachment.markdown(),ui.attachments)
+        } finally {
+            java.io.File(blocked,"hold").delete();blocked.delete()
+            val latest=PersonRegistry(context.filesDir)
+            if(latest.list().any { it.id==second.id }) latest.delete(second.id)
+            (context.applicationContext as ConversationApplication).deleteKeys(second.id)
+        }
+    }
+
     @Test fun pickedImageAndImageModeSurviveActivityRecreation() {
         val people = PersonRegistry(context.filesDir)
         previousPerson = people.active()?.id

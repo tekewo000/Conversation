@@ -8,19 +8,44 @@ import java.util.*;
 import org.json.JSONObject;
 
 final class DataMigration {
+    private static final String[] LEGACY={"conversation.sqlite3","conversation.sqlite3-wal","conversation.sqlite3-shm","conversation.sqlite3-journal","notebook.json","export"};
+    private static Set<String> roster(File root) throws Exception {
+        File index=new File(root,"people-registry.json");Set<String> ids=new LinkedHashSet<>();
+        if(!index.exists()) return ids;
+        if(!index.isFile()||Files.isSymbolicLink(index.toPath())||index.length()>1024*1024) throw new IOException("人物一覧が不正です。");
+        JSONObject json=new JSONObject(new String(Files.readAllBytes(index.toPath()),java.nio.charset.StandardCharsets.UTF_8));
+        if(json.getInt("version")!=1&&json.getInt("version")!=2) throw new IOException("未知の人物一覧です。");
+        org.json.JSONArray people=json.getJSONArray("people");
+        for(int i=0;i<people.length();i++) {
+            String id=people.getJSONObject(i).getString("id");
+            if(!UUID.fromString(id).toString().equals(id)||!ids.add(id)) throw new IOException("人物IDが不正です。");
+        }
+        return ids;
+    }
+    private static void inventory(File root,Set<String> ids) throws IOException {
+        File folder=new File(root,"people");
+        if(!folder.exists()) { if(!ids.isEmpty()) throw new IOException("人物の保存先がありません。");return; }
+        if(!folder.isDirectory()||Files.isSymbolicLink(folder.toPath())) throw new IOException("人物の保存先が不正です。");
+        File[] entries=folder.listFiles();if(entries==null) throw new IOException("人物の保存先を確認できません。");
+        for(File entry:entries) if(!entry.isDirectory()||Files.isSymbolicLink(entry.toPath())||!ids.contains(entry.getName()))
+            throw new IOException("未登録の旧人物データがあります。内容を保持して移行を停止しました。");
+    }
     static boolean needed(Context context) {
         try {
             File root=context.getFilesDir(), index=new File(root,"people-registry.json");
             for(String key:context.getSharedPreferences("MainActivity",Context.MODE_PRIVATE).getAll().keySet())
                 if(key.equals("draft")||key.startsWith("draft_")||key.startsWith("attachments_")||key.equals("memory_status")||key.equals("memory_phase")||key.equals("persona_status")) return true;
-            for(String name:new String[]{"conversation.sqlite3","notebook.json","export"}) if(new File(root,name).exists()) return true;
+            for(String name:LEGACY) if(new File(root,name).exists()) return true;
+            if(new File(root,"people-registry.json.tmp").exists()) return true;
+            Set<String> ids=roster(root);inventory(root,ids);
             if(!index.exists()) return false;
-            JSONObject json=new JSONObject(new String(Files.readAllBytes(index.toPath()),java.nio.charset.StandardCharsets.UTF_8));
-            if(json.getInt("version")!=2) return true;
-            org.json.JSONArray people=json.getJSONArray("people");
-            for(int i=0;i<people.length();i++) {
-                String id=people.getJSONObject(i).getString("id");
-                if(!java.util.UUID.fromString(id).toString().equals(id) || !new File(root,"people/"+id+"/.data-migrated-v1").isFile()) return true;
+            JSONObject json=new JSONObject(new String(Files.readAllBytes(index.toPath()),java.nio.charset.StandardCharsets.UTF_8));if(json.getInt("version")!=2) return true;
+            for(String id:ids) {
+                File person=new File(root,"people/"+id);
+                if(!new File(person,".data-migrated-v1").isFile()) return true;
+                try(java.util.stream.Stream<Path> paths=Files.walk(person.toPath())) {
+                    if(paths.anyMatch(path->path.getFileName().toString().endsWith(".tmp")||path.getFileName().toString().matches("image-[A-Za-z0-9-]+\\.pending"))) return true;
+                }
             }
             return false;
         } catch(Exception error) { return true; }
@@ -28,9 +53,21 @@ final class DataMigration {
     static void ensure(Context context) throws Exception {
         synchronized(MainActivity.storeGate) {
             File root=context.getFilesDir();
-            for(String name:new String[]{"conversation.sqlite3","notebook.json","export"})
+            for(String name:LEGACY)
                 if(new File(root,name).exists()) throw new IOException("人物に紐づかない旧データが残っています。データを保持して移行を停止しました。");
-            PersonRegistry people=new PersonRegistry(root);
+            PersonRegistry people;
+            synchronized(PersonRegistry.class) {
+                Set<String> ids=roster(root);inventory(root,ids);
+                File index=new File(root,"people-registry.json"),temporary=new File(root,"people-registry.json.tmp");
+                if(!index.exists()&&temporary.exists()) throw new IOException("未確定の旧人物一覧があります。原本を保持して停止しました。");
+                for(String id:ids) DataFiles.recoverInterrupted(new File(root,"people/"+id));
+                people=new PersonRegistry(root);
+                if(temporary.exists()) {
+                    if(!temporary.isFile()||Files.isSymbolicLink(temporary.toPath())||temporary.length()>1024*1024) throw new IOException("未確定の人物一覧を確認できません。");
+                    // The committed registry is valid and every person directory is accounted for.
+                    Files.delete(temporary.toPath());
+                }
+            }
             SharedPreferences preferences=context.getSharedPreferences("MainActivity",Context.MODE_PRIVATE);
             if(people.active()==null) {
                 for(String key:new String[]{"draft","memory_status","memory_phase","persona_status"})

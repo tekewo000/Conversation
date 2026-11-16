@@ -24,11 +24,12 @@ final class EncryptedDatabase {
         } finally { Arrays.fill(root,(byte)0); if(derived!=null) Arrays.fill(derived,(byte)0); }
     }
     static SQLiteDatabase open(File person, File file, boolean readOnly) throws IOException {
-        if(Files.isSymbolicLink(file.toPath()) || !file.getCanonicalFile().getParentFile().equals(person.getCanonicalFile()))
-            throw new IOException("DBの保存先が不正です。");
-        byte[] password = key(person,!file.exists());
+        byte[] password = null;
         SQLiteDatabase database = null;
         try {
+            if(Files.isSymbolicLink(file.toPath()) || !file.getCanonicalFile().getParentFile().equals(person.getCanonicalFile()))
+                throw new IOException("DBの保存先が不正です。");
+            password=key(person,!file.exists());
             // SQLCipher retains this array for pooled connections during the database lifetime.
             database = SQLiteDatabase.openDatabase(file.getPath(),password.clone(),null,
                     readOnly ? SQLiteDatabase.OPEN_READONLY : SQLiteDatabase.CREATE_IF_NECESSARY,
@@ -39,7 +40,7 @@ final class EncryptedDatabase {
             database.rawExecSQL("PRAGMA temp_store=MEMORY");
             return database;
         } catch(Exception error) { if(database!=null) database.close(); throw new Failure(error); }
-        finally { Arrays.fill(password,(byte)0); }
+        finally { if(password!=null) Arrays.fill(password,(byte)0); }
     }
     static boolean plain(File file) throws IOException {
         if(!file.isFile()) return false;

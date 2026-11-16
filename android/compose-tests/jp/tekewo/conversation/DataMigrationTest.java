@@ -12,6 +12,65 @@ import static org.junit.Assert.*;
 
 @RunWith(AndroidJUnit4.class)
 public class DataMigrationTest {
+    @Test public void authenticatedTemporaryWritesResumeBeforeMigration() throws Exception {
+        Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();
+        PersonRegistry people=new PersonRegistry(context.getFilesDir());String previous=people.active()==null?"":people.active().id;
+        PersonRegistry.Person person=people.stage(PersonDocument.named("Interrupted file fixture"),null);people.commit(person);
+        try {
+            Files.delete(new File(person.directory,".data-migrated-v1").toPath());
+            byte[] root=ImageVault.keys.get(person.directory,false);
+            Files.write(new File(person.directory,"state.json.tmp").toPath(),DataVault.seal(root,person.id,"file","state.json","{\"draft\":\"interrupted draft\"}".getBytes("UTF-8")));
+            Files.write(new File(person.directory,".data-migrated-v1.tmp").toPath(),DataVault.seal(root,person.id,"file",".data-migrated-v1",new byte[]{1}));
+            byte[] png=java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=");
+            Files.write(new File(person.directory,"icon.png").toPath(),png);
+            Files.write(new File(person.directory,"image-123.pending").toPath(),ImageVault.seal(root,person.id,"icon.png",png));
+            DataMigration.ensure(context);
+            assertEquals("interrupted draft",PersonState.load(person.directory).getString("draft"));
+            assertArrayEquals(png,ImageVault.read(person.directory,new File(person.directory,"icon.png")));
+            assertFalse(new File(person.directory,"state.json.tmp").exists());assertFalse(new File(person.directory,"image-123.pending").exists());
+        } finally { people.delete(person.id);((ConversationApplication)context.getApplicationContext()).deleteKeys(person.id);if(!previous.isEmpty()) people.activate(previous); }
+    }
+    @Test public void missingKeysNeverDeleteEncryptedWorkingDatabases() throws Exception {
+        Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();
+        File person=Files.createTempDirectory(context.getCacheDir().toPath(),"missing-key-").toFile();
+        ImageVault.Keys previous=ImageVault.keys;
+        File working=new File(person,MemoryRebuild.FILE),cache=new File(person,".semantic-cache.sqlite3");
+        try {
+            MemoryRebuild rebuild=new MemoryRebuild(person);rebuild.request(4);
+            try(net.zetetic.database.sqlcipher.SQLiteDatabase db=EncryptedDatabase.open(person,cache,false)) { db.execSQL("CREATE TABLE vectors(id INTEGER PRIMARY KEY,vector BLOB)"); }
+            byte[] before=Files.readAllBytes(working.toPath()),cached=Files.readAllBytes(cache.toPath());
+            ImageVault.keys=new ImageVault.Keys() {
+                public byte[] get(File directory,boolean create) throws IOException { throw new IOException("Test key unavailable"); }
+                public void requireRecovery(File directory) { }
+            };
+            try { rebuild.request(4);fail("missing key accepted"); } catch(IOException expected) { }
+            assertTrue("Encrypted rebuild was deleted",working.isFile());assertArrayEquals(before,Files.readAllBytes(working.toPath()));
+            try { EncryptedDatabase.open(person,cache,false);fail("missing key accepted"); } catch(EncryptedDatabase.Failure expected) { }
+            assertArrayEquals(cached,Files.readAllBytes(cache.toPath()));
+        } finally {
+            ImageVault.keys=previous;((ConversationApplication)context.getApplicationContext()).deleteKeys(person.getName());
+            try(java.util.stream.Stream<Path> paths=Files.walk(person.toPath())) { for(Path path:(Iterable<Path>)paths.sorted(java.util.Comparator.reverseOrder())::iterator) Files.delete(path); }
+        }
+    }
+    @Test public void unidentifiedLegacyPeopleAndRootTemporariesStopStartup() throws Exception {
+        Context base=InstrumentationRegistry.getInstrumentation().getTargetContext();
+        for(int variant=0;variant<3;variant++) {
+            File root=Files.createTempDirectory(base.getCacheDir().toPath(),"orphan-data-").toFile();
+            Context isolated=new android.content.ContextWrapper(base) {
+                @Override public File getFilesDir() { return root; }
+                @Override public android.content.SharedPreferences getSharedPreferences(String name,int mode) { return base.getSharedPreferences(root.getName()+name,mode); }
+            };
+            File retained;
+            if(variant==0) { retained=new File(root,"people/"+java.util.UUID.randomUUID()+"/person.md");retained.getParentFile().mkdirs(); }
+            else retained=new File(root,variant==1?"people-registry.json.tmp":"conversation.sqlite3-wal");
+            byte[] body="unregistered private canary".getBytes("UTF-8");Files.write(retained.toPath(),body);
+            try {
+                assertTrue("Unidentified data was excluded from inventory",DataMigration.needed(isolated));
+                try { DataMigration.ensure(isolated);fail("unidentified data accepted"); } catch(IOException expected) { }
+                assertArrayEquals(body,Files.readAllBytes(retained.toPath()));
+            } finally { try(java.util.stream.Stream<Path> paths=Files.walk(root.toPath())) { for(Path path:(Iterable<Path>)paths.sorted(java.util.Comparator.reverseOrder())::iterator) Files.delete(path); } }
+        }
+    }
     @Test public void legacyPreferencesMigrateEvenWhenThePersonAlreadyUsesEncryption() throws Exception {
         Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();
         PersonRegistry people=new PersonRegistry(context.getFilesDir());String previous=people.active()==null?"":people.active().id;

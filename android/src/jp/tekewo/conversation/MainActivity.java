@@ -316,13 +316,15 @@ public final class MainActivity extends ComponentActivity {
         try { PersonState.put(person.directory,"draft",""); PersonState.put(person.directory,"attachments",""); }
         catch(java.io.IOException error) { ready=false; showError(safeError(error)); }
     }
-    private void saveDraft() {
-        if (!changingPerson && compose != null && activePerson != null) try {
+    private boolean saveDraft() {
+        if(changingPerson||compose==null||activePerson==null) return true;
+        try {
             JSONObject state=PersonState.load(activePerson.directory);
             state.put("draft",compose.getDraft()).put("attachments",compose.getAttachments());
             PersonState.save(activePerson.directory,state);
             getPreferences(MODE_PRIVATE).edit().putBoolean("image_mode_"+activePerson.id,compose.getGenerateImages()).apply();
-        } catch(Exception error) { ready=false; showError(safeError(error)); }
+            return true;
+        } catch(Exception error) { showError("下書きを保存できません。入力はこの画面に保持しています。\n"+safeError(error));return false; }
     }
 
     private void setBusy(boolean value) {
@@ -1048,7 +1050,7 @@ public final class MainActivity extends ComponentActivity {
 
     private void deletePerson(PersonRegistry.Person person) {
         if (busy || MemoryWork.isRunning()) return;
-        saveDraft(); changingPerson = true; setBusy(true);
+        if(!saveDraft()) return; changingPerson = true; setBusy(true);
         syncTimer.removeCallbacks(autoSync);
         worker.execute(() -> {
             Exception failure = null;
@@ -1099,7 +1101,7 @@ public final class MainActivity extends ComponentActivity {
 
     private void switchPerson(PersonRegistry.Person person) {
         if ((activePerson != null && person.id.equals(activePerson.id)) || busy || MemoryWork.isRunning()) return;
-        saveDraft(); changingPerson = true; setBusy(true);
+        if(!saveDraft()) return; changingPerson = true; setBusy(true);
         syncTimer.removeCallbacks(autoSync);
         worker.execute(() -> {
             try {
@@ -1147,7 +1149,7 @@ public final class MainActivity extends ComponentActivity {
 
     private void createPerson(PersonDocument document, String repository, String suppliedToken) {
         if (busy || MemoryWork.isRunning()) return;
-        saveDraft(); changingPerson = true; setBusy(true);
+        if(!saveDraft()) return; changingPerson = true; setBusy(true);
         syncTimer.removeCallbacks(autoSync);
         worker.execute(() -> {
             PersonRegistry.Person staged = null;
@@ -1271,7 +1273,7 @@ public final class MainActivity extends ComponentActivity {
         if(person==null||busy||MemoryWork.isRunning()) return;
         final String target;
         try { target=PersonRegistry.normalizeRepository(input); } catch(Exception error) { showError(safeError(error));return; }
-        saveDraft();changingPerson=true;setBusy(true);syncTimer.removeCallbacks(autoSync);
+        if(!saveDraft()) return;changingPerson=true;setBusy(true);syncTimer.removeCallbacks(autoSync);
         worker.execute(()->{
             File pending=new File(person.directory,".git-rebind.json");
             ConnectionStore temporary=new ConnectionStore(this,"git-move-"+person.id);

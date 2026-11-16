@@ -200,6 +200,30 @@ public final class GitMigration {
         }
     }
     static String repository(String value) { return PersonRegistry.normalizeRepository(value); }
+    static JSONObject readJob(File file,byte[] key,String person) throws Exception {
+        if(!file.isFile()||Files.isSymbolicLink(file.toPath())||file.length()>DataVault.MAX_BYTES+DataVault.OVERHEAD) throw new IOException("Invalid migration state");
+        return new JSONObject(new String(DataVault.open(key,person,"history","job",Files.readAllBytes(file.toPath())),StandardCharsets.UTF_8));
+    }
+    static void saveJob(File file,byte[] key,String person,JSONObject state) throws Exception {
+        File temporary=new File(file.getPath()+".tmp");
+        if(Files.isSymbolicLink(file.toPath())||Files.isSymbolicLink(temporary.toPath())||(temporary.exists()&&!temporary.isFile())) throw new IOException("Invalid migration state path");
+        byte[] encoded=DataVault.seal(key,person,"history","job",state.toString().getBytes(StandardCharsets.UTF_8));
+        try(FileOutputStream output=new FileOutputStream(temporary)) { output.write(encoded);output.getFD().sync(); }
+        readJob(temporary,key,person);
+        Files.move(temporary.toPath(),file.toPath(),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
+    }
+    static JSONObject loadJob(File file,byte[] key,String person) throws Exception {
+        File temporary=new File(file.getPath()+".tmp");JSONObject committed=file.exists()?readJob(file,key,person):null;
+        if(temporary.exists()) {
+            JSONObject pending;
+            try { pending=readJob(temporary,key,person); }
+            catch(Exception incomplete) { if(committed!=null) return committed;throw incomplete; }
+            if(committed!=null&&(!committed.getString("input").equals(pending.getString("input"))||!committed.getString("destination").equals(pending.getString("destination")))) throw new IOException("Conflicting pending migration state");
+            try(RandomAccessFile output=new RandomAccessFile(temporary,"rw")) { output.getFD().sync(); }
+            Files.move(temporary.toPath(),file.toPath(),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);return pending;
+        }
+        if(committed==null) throw new IOException("Migration state missing");return committed;
+    }
     static void validateSource(File mirror,byte[] key,String person,long repositoryId) throws Exception {
         boolean encrypted;
         try { git(mirror,"cat-file","-e","HEAD:archive.enc");encrypted=true; } catch(IOException absent) { encrypted=false; }
@@ -247,14 +271,21 @@ public final class GitMigration {
         if(Files.isSymbolicLink(work.toPath())) throw new IOException("Invalid migration work directory");
         File job=new File(work,"job.enc"),mirror=new File(work,"source.git"),encrypted=new File(work,"encrypted"),download=new File(work,"download"),verification=new File(work,"verification");
         JSONObject state;
-        if(job.exists()) {
-            if(job.length()>DataVault.MAX_BYTES+DataVault.OVERHEAD||Files.isSymbolicLink(job.toPath())) throw new IOException("Invalid migration state");
-            state=new JSONObject(new String(DataVault.open(key,person,"history","job",Files.readAllBytes(job.toPath())),StandardCharsets.UTF_8));
+        File pendingJob=new File(job.getPath()+".tmp");
+        if(job.exists()||pendingJob.exists()) {
+            try { state=loadJob(job,key,person); }
+            catch(Exception failure) {
+                File[] contents=work.listFiles();
+                if(job.exists()||contents==null||contents.length!=1||!contents[0].equals(pendingJob)||Files.isSymbolicLink(pendingJob.toPath())) throw failure;
+                // No clone or upload can precede the first state commit; retain its incomplete bytes and retry.
+                Files.move(pendingJob.toPath(),new File(work,"incomplete-job-"+UUID.randomUUID()+".enc").toPath(),StandardCopyOption.ATOMIC_MOVE);
+                state=new JSONObject().put("destination",dest).put("input",source).put("packed",false);saveJob(job,key,person,state);
+            }
             if(!dest.equals(state.getString("destination"))||!source.equals(state.getString("input"))) throw new IOException("Resume inputs do not match the original migration");
         } else {
             if(work.list().length!=0) throw new IOException("Use an empty migration work directory");
             state=new JSONObject().put("destination",dest).put("input",source).put("packed",false);
-            Files.write(job.toPath(),DataVault.seal(key,person,"history","job",state.toString().getBytes(StandardCharsets.UTF_8)),StandardOpenOption.CREATE_NEW);
+            saveJob(job,key,person,state);
         }
         String token=credential(work,dest);
         try(GitHubBackup api=new GitHubBackup(new GitHubBackup.HttpTransport(token),key.clone())) {
@@ -264,8 +295,12 @@ public final class GitMigration {
                 String origin;
                 if(supplied.isDirectory()) { mirror=supplied.getCanonicalFile();origin=text(mirror,"remote","get-url","origin"); }
                 else {
-                    if(mirror.exists()) removeOwned(work,mirror);
-                    origin="https://github.com/"+repository(source)+".git";git(work,"clone","--mirror","--",origin,mirror.getPath());
+                    origin="https://github.com/"+repository(source)+".git";
+                    if(mirror.exists()) {
+                        try { describe(mirror);git(mirror,"fsck","--full","--no-reflogs"); }
+                        catch(Exception incomplete) { removeOwned(work,mirror); }
+                    }
+                    if(!mirror.exists()) git(work,"clone","--mirror","--",origin,mirror.getPath());
                 }
                 String sourceRepo=repository(origin);
                 GitHubBackup.Repository original=api.verifyRepository(sourceRepo);
@@ -273,10 +308,20 @@ public final class GitMigration {
                 validateSource(mirror,key,person,original.repoId);
                 if(!lfsPointers(mirror).isEmpty()&&!supplied.isDirectory())
                     git(mirror,"-c","lfs.url=https://github.com/"+sourceRepo+".git/info/lfs","-c","remote.origin.lfsurl=https://github.com/"+sourceRepo+".git/info/lfs","-c","lfs.basictransfersonly=true","-c","lfs.standalonetransferagent=","lfs","fetch","--all","origin");
-                if(encrypted.exists()) removeOwned(work,encrypted);
-                pack(mirror,encrypted,key,person,new JSONObject().put("repository",sourceRepo).put("repository_id",original.repoId));
+                JSONObject existing=null;
+                if(new File(encrypted,"history/index.enc").exists()) {
+                    try { existing=index(encrypted,key,person); }
+                    catch(IOException|JSONException incompleteIndex) { removeOwned(work,encrypted); }
+                }
+                if(existing!=null) {
+                    if(!existing.getJSONObject("source").getString("repository").equals(sourceRepo)||existing.getJSONObject("source").getLong("repository_id")!=original.repoId
+                            ||!GitArchiveFiles.canonical(existing.getJSONObject("original")).equals(GitArchiveFiles.canonical(describe(mirror)))) throw new IOException("Packed source snapshot changed; originals were retained");
+                } else {
+                    if(encrypted.exists()) removeOwned(work,encrypted);
+                    pack(mirror,encrypted,key,person,new JSONObject().put("repository",sourceRepo).put("repository_id",original.repoId));
+                }
                 state.put("packed",true).put("index_sha256",sha(new File(encrypted,"history/index.enc"))).put("repository_id",remote.repoId).put("branch",remote.branch);
-                Files.write(job.toPath(),DataVault.seal(key,person,"history","job",state.toString().getBytes(StandardCharsets.UTF_8)));
+                saveJob(job,key,person,state);
             }
             if(state.getLong("repository_id")!=remote.repoId||!sha(new File(encrypted,"history/index.enc")).equals(state.getString("index_sha256"))) throw new IOException("Migration work data or destination changed");
             String url="https://github.com/"+dest+".git";
