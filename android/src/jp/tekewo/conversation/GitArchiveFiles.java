@@ -42,6 +42,12 @@ final class GitArchiveFiles {
         if (name.isEmpty() || utf8(name).length > 256) throw new IOException("Invalid person name.");
         JSONObject persona = new JSONObject().put("format", 1).put("id", personId)
                 .put("name", name).put("profile", profile).put("source_sha256", sha256(source));
+        String displayName=null;
+        if(delta.has("display_name")) {
+            try { displayName=PersonDocument.named(delta.getString("display_name")).name; }
+            catch(IllegalArgumentException error) { throw new IOException("Invalid person display name.",error); }
+        }
+        if(displayName!=null) persona.put("display_name",displayName);
         if (delta.has("icon_png_base64")) throw new IOException("Unencrypted person icons cannot be backed up.");
         if (delta.has("encrypted_icon_base64")) {
             String encoded = delta.getString("encrypted_icon_base64");
@@ -68,6 +74,7 @@ final class GitArchiveFiles {
         Map<String, byte[]> files = new LinkedHashMap<>();
         files.put("person.md", source);
         files.put("persona.json", settings);
+        if(displayName!=null) files.put("display-name.json",utf8(canonical(new JSONObject().put("format",1).put("name",displayName))+"\n"));
         if (delta.has("encrypted_icon_base64")) files.put("icon.png.enc", java.util.Base64.getDecoder().decode(delta.getString("encrypted_icon_base64")));
         JSONObject attachments = delta.optJSONObject("attachment_files");
         java.util.Iterator<String> attachmentKeys = attachments == null ? java.util.Collections.emptyIterator() : attachments.keys();

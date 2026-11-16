@@ -83,6 +83,11 @@ public final class DataSecurityProbe extends Instrumentation {
                 JSONObject baseline=new JSONObject(new String(Files.readAllBytes(record.toPath()),StandardCharsets.UTF_8));String id=baseline.getString("id");
                 File directory=new File(context.getFilesDir(),"people/"+id);
                 call(type("DataMigration"),"ensure",new Class<?>[]{Context.class},context);
+                Object labelRegistry=people(context),originalPerson=call(labelRegistry,"active",new Class<?>[]{});
+                String originalName=(String)field(originalPerson,"name");
+                call(labelRegistry,"setDisplayName",new Class<?>[]{String.class,String.class},id,"Release display-name fixture");
+                Object renamed=call(people(context),"active",new Class<?>[]{});
+                if(!"Release display-name fixture".equals(field(renamed,"displayName"))||!originalName.equals(field(renamed,"name"))||!id.equals(field(renamed,"id"))) throw new AssertionError("Display-name update changed the original person");
                 byte[] root=(byte[])call(app,"get",new Class<?>[]{File.class,boolean.class},directory,false);
                 if(!hash(root).equals(baseline.getString("key_sha256"))) throw new AssertionError("Existing image key changed during upgrade");Arrays.fill(root,(byte)0);
                 JSONObject state=(JSONObject)call(type("PersonState"),"load",new Class<?>[]{File.class},directory);
@@ -115,7 +120,7 @@ public final class DataSecurityProbe extends Instrumentation {
                 Object registry=people(context);call(registry,"delete",new Class<?>[]{String.class},id);call(app,"deleteKeys",new Class<?>[]{String.class},id);
                 if(!baseline.getString("previous").isEmpty()) call(registry,"activate",new Class<?>[]{String.class},baseline.getString("previous"));
                 Files.delete(record.toPath());
-                result.putString("stream","DATA_SECURITY_RELEASE_PASS: signed upgrade preserved image key/messages/draft, ciphertext files and native ZIP verified\n");
+                result.putString("stream","DATA_SECURITY_RELEASE_PASS: signed upgrade preserved key/messages/draft, display name and encrypted native ZIP verified\n");
             }
         } catch(Throwable error) {
             StringWriter trace=new StringWriter();error.printStackTrace(new PrintWriter(trace));result.putString("stream","DATA_SECURITY_FAIL\n"+trace);code=Activity.RESULT_CANCELED;

@@ -20,6 +20,13 @@ public final class GitArchiveFilesTest {
     }
 
     public static void main(String[] args) throws Exception {
+        JSONObject renamed=delta(0,0).put("display_name","さき");
+        GitArchiveFiles.Batch renamedBatch=GitArchiveFiles.build(ID,42,RAW,renamed);
+        JSONObject renamedPersona=new JSONObject(new String(renamedBatch.files.get("persona.json"),StandardCharsets.UTF_8));
+        assert renamedPersona.getString("name").equals("青")&&renamedPersona.getString("display_name").equals("さき");
+        assert new JSONObject(new String(renamedBatch.files.get("display-name.json"),StandardCharsets.UTF_8)).getString("name").equals("さき");
+        assert !renamedBatch.manifest.getString("persona_sha256").equals(GitArchiveFiles.build(ID,42,RAW,delta(0,0)).manifest.getString("persona_sha256"));
+        reject(()->GitArchiveFiles.build(ID,42,RAW,delta(0,0).put("display_name","bad\nname")));
         GitArchiveFiles.Batch first = GitArchiveFiles.build(ID, 42, RAW, delta(0, 2));
         assert Arrays.equals(first.files.get("person.md"), RAW.getBytes(StandardCharsets.UTF_8));
         assert first.files.size() == 4;

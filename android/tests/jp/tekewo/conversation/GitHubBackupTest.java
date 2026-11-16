@@ -138,6 +138,14 @@ public final class GitHubBackupTest {
     }
     public static void main(String[] args) throws Exception {
         checkMigrationProof();
+        Fake labelBackup=new Fake();
+        GitHubBackup.SyncResult labelFirst=sync(labelBackup,delta(0,1),GitHubBackup.SyncState.empty());
+        JSONObject labelDelta=delta(1,1).put("display_name","さき");
+        GitHubBackup.SyncResult labelSaved=sync(labelBackup,labelDelta,labelFirst);
+        assert labelSaved.cursor==1&&labelSaved.status.equals("synced");
+        assert new JSONObject(new String(labelBackup.logical("display-name.json"),StandardCharsets.UTF_8)).getString("name").equals("さき");
+        int labelWrites=labelBackup.writes;
+        assert sync(labelBackup,labelDelta,labelSaved).status.equals("unchanged")&&labelBackup.writes==labelWrites;
         Fake iconBackup = new Fake();
         GitHubBackup.SyncResult withoutIcon = sync(iconBackup, delta(0, 1), GitHubBackup.SyncState.empty());
         JSONObject iconOnly = delta(1, 1).put("encrypted_icon_base64", java.util.Base64.getEncoder().encodeToString(

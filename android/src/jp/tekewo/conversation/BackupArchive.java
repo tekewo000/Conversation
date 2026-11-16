@@ -31,7 +31,7 @@ final class BackupArchive implements AutoCloseable {
         for(String name:attachments) writeChunk("media/"+name,AttachmentFiles.read(person,new AttachmentFiles.Ref("",name)));
         File icon=new File(person,"icon.png");
         if(icon.exists()) writeChunk("icon.png",ImageVault.read(person,icon));
-        for(String name:new String[]{"person.md","profile.md","person.json"}) {
+        for(String name:new String[]{"person.md","profile.md","person.json","display-name.json"}) {
             File file=new File(person,name); if(file.exists()) writeChunk(name,DataFiles.read(person,file));
         }
         manifest.put("complete",true);

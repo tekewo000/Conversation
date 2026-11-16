@@ -32,16 +32,17 @@ final class PersonRegistry {
     static final class Person {
         final String id;
         final String name;
+        volatile String displayName;
         final String repository;
         final File directory;
         final String rawMarkdown;
         final String profile;
         long remoteId;
         private Person(String id, String name, String repository, File directory, String raw, String profile, long remoteId) {
-            this.id = id; this.name = name; this.repository = repository; this.directory = directory;
+            this.id = id; this.name = name; this.displayName = name; this.repository = repository; this.directory = directory;
             rawMarkdown = raw; this.profile = profile; this.remoteId = remoteId;
         }
-        @Override public String toString() { return name; }
+        @Override public String toString() { return displayName; }
     }
 
     PersonRegistry(File directory) throws IOException {
@@ -76,7 +77,14 @@ final class PersonRegistry {
                 if (rawFile.length() > PersonDocument.MAX_BYTES + DataVault.OVERHEAD || Files.isSymbolicLink(rawFile.toPath())) throw new IOException("人物ファイルが不正です。");
                 PersonDocument doc = PersonDocument.parse(DataFiles.read(personDirectory,rawFile));
                 if (!record.getString("name").equals(doc.name)) throw new IOException("人物名と保存した資料が一致しません。");
-                people.put(id, new Person(id, doc.name, repository, personDirectory, doc.rawMarkdown, doc.profile, remoteId));
+                Person person=new Person(id,doc.name,repository,personDirectory,doc.rawMarkdown,doc.profile,remoteId);
+                File label=new File(personDirectory,"display-name.json");
+                if(label.exists()) {
+                    JSONObject stored=new JSONObject(new String(DataFiles.read(personDirectory,label),StandardCharsets.UTF_8));
+                    if(stored.getInt("format")!=1) throw new IOException("表示名の形式に対応していません。");
+                    person.displayName=PersonDocument.named(stored.getString("name")).name;
+                }
+                people.put(id,person);
             }
             activeId = json.getString("active_id");
             if (activeId.equals("legacy")) activeId = "";
@@ -87,6 +95,16 @@ final class PersonRegistry {
 
     synchronized List<Person> list() { return new ArrayList<>(people.values()); }
     synchronized Person active() { return people.get(activeId); }
+
+    synchronized void setDisplayName(String id,String input) throws IOException {
+        Person person=people.get(id);if(person==null) throw new IOException("人物が見つかりません。");
+        String name=PersonDocument.named(input).name;
+        try {
+            byte[] bytes=new JSONObject().put("format",1).put("name",name).toString().getBytes(StandardCharsets.UTF_8);
+            DataFiles.write(person.directory,new File(person.directory,"display-name.json"),bytes);
+            person.displayName=name;
+        } catch(JSONException error) { throw new IOException("表示名を保存できません。",error); }
+    }
 
     synchronized byte[] icon(String id) throws IOException {
         if (!people.containsKey(id)) throw new IOException("人物が見つかりません。");
@@ -187,6 +205,7 @@ final class PersonRegistry {
         if(previous==null||remoteId<=0) throw new IOException("移行する人物が見つかりません。");
         String normalized=normalizeRepository(repository);ensureAvailable(normalized,remoteId,personId);
         Person replacement=new Person(previous.id,previous.name,normalized,previous.directory,previous.rawMarkdown,previous.profile,remoteId);
+        replacement.displayName=previous.displayName;
         Map<String,Person> updated=new LinkedHashMap<>(people);updated.put(personId,replacement);
         persist(updated,activeId);people.put(personId,replacement);
     }

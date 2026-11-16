@@ -154,7 +154,7 @@ public final class MainActivity extends ComponentActivity {
         });
         if (activePerson != null) compose.setAttachments(readPersonState().optString("attachments"));
         if (activePerson != null) compose.setGenerateImages(getPreferences(MODE_PRIVATE).getBoolean("image_mode_" + activePerson.id, false));
-        compose.setPersonName(activePerson == null ? "" : activePerson.name);
+        compose.setPersonName(activePerson == null ? "" : activePerson.displayName);
         compose.setOnIcon(this::showMemory);
         compose.setOnSendNote(this::showNoteMenu);
         refreshPersonIcon();
@@ -535,7 +535,7 @@ public final class MainActivity extends ComponentActivity {
     private ComposeUi.Panel page(String title, String key, boolean person) {
         ComposeUi.Panel panel = new ComposeUi.Panel(title);
         panel.key = key;
-        panel.subtitle = person ? activePerson == null ? "人物が選択されていません" : activePerson.name : "アプリ共通";
+        panel.subtitle = person ? activePerson == null ? "人物が選択されていません" : activePerson.displayName : "アプリ共通";
         return panel;
     }
 
@@ -763,13 +763,14 @@ public final class MainActivity extends ComponentActivity {
         ComposeUi.Panel panel = page("人物", "people", true);
         panel.onResume = this::showPeople;
         panel.message = "話す相手を選ぶと、その人物の会話と下書きに切り替わります。";
+        if(activePerson!=null) panel.rows.add(new ComposeUi.Row("名前を編集",this::showEditDisplayName,4));
         if (activePerson != null) panel.rows.add(new ComposeUi.Row("人物アイコンを設定", this::showPersonIcon, 2));
         panel.rows.add(new ComposeUi.Row("人物を追加", () -> {
             if (busy || MemoryWork.isRunning()) { showError("応答と記憶の整理が終わってから追加してください。"); return; }
             showNewPerson();
         }, 2));
         for (PersonRegistry.Person person : people.list()) {
-            ComposeUi.Row row = new ComposeUi.Row(person.name, () -> {
+            ComposeUi.Row row = new ComposeUi.Row(person.displayName, () -> {
                 if (busy || MemoryWork.isRunning()) { showError("応答と記憶の整理が終わってから人物を切り替えてください。"); return; }
                 switchPerson(person);
             }, 5);
@@ -785,6 +786,34 @@ public final class MainActivity extends ComponentActivity {
         }, 6));
         panel.rows.get(panel.rows.size() - 1).destructive = !people.list().isEmpty();
         compose.showPage(panel);
+    }
+
+    private void showEditDisplayName() {
+        final PersonRegistry.Person person=activePerson;
+        if(person==null||changingPerson) return;
+        ComposeUi.Panel panel=new ComposeUi.Panel("名前を編集");panel.secure=true;
+        panel.message="人物欄や会話画面に表示する名前を変更します。";
+        ComposeUi.Field name=new ComposeUi.Field("表示名",false);name.setValue(person.displayName);panel.fields.add(name);
+        panel.confirmLabel="保存";
+        panel.confirm=()->{
+            final String value;
+            try { value=PersonDocument.named(name.getValue()).name; }
+            catch(IllegalArgumentException error) { showError(error.getMessage());return; }
+            compose.hide();
+            final int version=compose.getPageVersion();
+            worker.execute(()->{
+                try {
+                    synchronized(storeGate) { requireCurrentPerson();if(!person.id.equals(activePerson.id)) throw new java.io.IOException("人物が変わりました。");people.setDisplayName(person.id,value); }
+                    ui(()->{
+                        if(activePerson==null||!person.id.equals(activePerson.id)) return;
+                        compose.setPersonName(person.displayName);
+                        if(compose.isPageVisible("people",version)) showPeople();
+                        queueGitSync(false);
+                    });
+                } catch(Exception error) { ui(()->showError(safeError(error))); }
+            });
+        };
+        compose.show(panel);
     }
 
     private void refreshPersonIcon() {
@@ -933,7 +962,7 @@ public final class MainActivity extends ComponentActivity {
                 } else {
                     boolean user = entry.optString("role").equals("user");
                     String annotation = entry.optString("annotation");
-                    String speaker = annotation.equals("scene") ? "情景（返信なし）" : annotation.equals("meta") ? "メタ（返信なし）" : user ? "あなた" : person.name;
+                    String speaker = annotation.equals("scene") ? "情景（返信なし）" : annotation.equals("meta") ? "メタ（返信なし）" : user ? "あなた" : person.displayName;
                     String content = entry.optString("content");
                     String body = user ? content : ReplyText.visible(content, true);
                     if (entry.optBoolean("truncated")) body += "\n（長文のため一部を表示）";
@@ -1037,8 +1066,8 @@ public final class MainActivity extends ComponentActivity {
     private void showDeletePeople() {
         ComposeUi.Panel panel = page("削除する人物", "delete-people", false);
         panel.message = "削除する人物を選ぶと、削除内容を確認できます。";
-        for (PersonRegistry.Person person : people.list()) panel.rows.add(new ComposeUi.Row(person.name, () -> {
-            ComposeUi.Panel confirm = new ComposeUi.Panel(person.name + "を削除しますか？");
+        for (PersonRegistry.Person person : people.list()) panel.rows.add(new ComposeUi.Row(person.displayName, () -> {
+            ComposeUi.Panel confirm = new ComposeUi.Panel(person.displayName + "を削除しますか？");
             confirm.message = "この端末の人物・会話・記憶・下書きを削除します。元には戻せません。\nGitHub上のバックアップと、書き出したZIPは残ります。";
             confirm.dismissOnClickOutside = false;
             confirm.confirmLabel = "人物を削除";
@@ -1297,6 +1326,7 @@ public final class MainActivity extends ComponentActivity {
                     while(true) {
                         JSONObject delta;
                         synchronized(storeGate) { requireOpen();delta=new JSONObject(nativeArchiveDelta(prior.cursor)); }
+                        if(new File(person.directory,"display-name.json").isFile()) delta.put("display_name",person.displayName);
                         byte[] icon=people.icon(person.id);
                         if(icon.length>0) delta.put("encrypted_icon_base64",java.util.Base64.getEncoder().encodeToString(ImageVault.backup(person.directory,new File(person.directory,"icon.png"))));
                         AttachmentFiles.addToDelta(person.directory,delta);
@@ -1347,6 +1377,7 @@ public final class MainActivity extends ComponentActivity {
                 JSONObject delta;
                 synchronized (storeGate) { requireCurrentPerson(); delta = new JSONObject(nativeArchiveDelta(prior.cursor)); }
                 if (delta.has("error")) throw new java.io.IOException("保存する履歴を読み出せませんでした。");
+                if(new File(person.directory,"display-name.json").isFile()) delta.put("display_name",person.displayName);
                 byte[] icon = people.icon(person.id);
                 if (icon.length > 0) delta.put("encrypted_icon_base64", java.util.Base64.getEncoder().encodeToString(
                         ImageVault.backup(person.directory, new File(person.directory, "icon.png"))));

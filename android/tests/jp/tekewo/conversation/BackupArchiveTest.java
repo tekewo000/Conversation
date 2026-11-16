@@ -9,6 +9,7 @@ public final class BackupArchiveTest {
   ImageVaultTest.install(); File person=Files.createTempDirectory("encrypted-zip-").toFile();
   try {
    ImageVault.keys.get(person,true);
+   DataFiles.write(person,new File(person,"display-name.json"),"{\"format\":1,\"name\":\"さき\"}".getBytes("UTF-8"));
    BackupArchive writer=new BackupArchive(person,new File(person,"export"));
    String original="{\"content\":\"こんにちは private archive canary\"}\n";
    writer.writeChunk("messages-000001.jsonl",original.getBytes("UTF-8")); writer.finish();
@@ -27,6 +28,7 @@ public final class BackupArchiveTest {
    byte[] root=ImageVault.keys.get(person,false);
    BackupRestore.restore(root,person.getName(),writer.directory,restored);
    assert new String(Files.readAllBytes(new File(restored,"messages-000001.jsonl").toPath()),"UTF-8").equals(original);
+   assert new JSONObject(new String(Files.readAllBytes(new File(restored,"display-name.json").toPath()),"UTF-8")).getString("name").equals("さき");
    DataVaultTest.rejects(()->BackupRestore.restore(root,person.getName(),writer.directory,restored));
    byte[] before=Files.readAllBytes(new File(writer.directory,"archive.enc").toPath()); before[before.length-1]^=1;
    Files.write(new File(writer.directory,"archive.enc").toPath(),before);

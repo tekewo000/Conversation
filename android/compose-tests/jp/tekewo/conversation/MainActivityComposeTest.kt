@@ -19,6 +19,7 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextClearance
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.After
@@ -58,6 +59,29 @@ class MainActivityComposeTest {
         previousGap = preferences.getInt("message_gap", 12)
         people.commit(people.stage(PersonDocument.named(name), null))
         compose.activityRule.scenario.recreate()
+    }
+
+    @Test fun displayNameCanBeEditedWithoutReplacingThePersonOrDraft() {
+        createManagementPerson()
+        val before=PersonRegistry(context.filesDir).active()!!
+        val key=(context.applicationContext as ConversationApplication).get(before.directory,false)
+        val add=MainActivity::class.java.getDeclaredMethod("nativeAddMessage",ByteArray::class.java,ByteArray::class.java).apply { isAccessible=true }
+        compose.runOnUiThread { assertTrue((add.invoke(null,"assistant".toByteArray(),"表示名テストの返信".toByteArray()) as Long)>0) }
+        compose.onNodeWithContentDescription("メッセージ入力").performTextInput("名前変更中の下書き")
+        compose.onNodeWithContentDescription("メニュー").performClick()
+        compose.onNodeWithText("人物").performClick()
+        compose.onNodeWithText("名前を編集").performClick()
+        compose.onNodeWithContentDescription("表示名").performTextClearance()
+        compose.onNodeWithContentDescription("表示名").performTextInput("短い表示名 😀")
+        compose.onNodeWithText("保存").performClick()
+        compose.waitUntil(10_000) { PersonRegistry(context.filesDir).active()?.displayName=="短い表示名 😀" }
+        compose.onNodeWithText("短い表示名 😀").assertExists()
+        compose.activityRule.scenario.recreate()
+        compose.onNodeWithContentDescription("短い表示名 😀の記憶を見る").assertExists()
+        compose.onNodeWithContentDescription("メッセージ入力").assertTextContains("名前変更中の下書き")
+        val after=PersonRegistry(context.filesDir).active()!!
+        assertEquals(before.id,after.id);assertEquals(before.name,after.name)
+        org.junit.Assert.assertArrayEquals(key,(context.applicationContext as ConversationApplication).get(after.directory,false))
     }
 
     private fun openConnectionPage(): ComposeUi {

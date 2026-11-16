@@ -8,6 +8,7 @@ import java.nio.file.Files;
 public final class PersonRegistryTest {
     public static void main(String[] args) throws Exception {
         ImageVaultTest.install();
+        checkDisplayName();
         checkLegacyUpgrade();
         checkRepositoryRebind();
         File root = Files.createTempDirectory("conversation-people-").toFile();
@@ -60,6 +61,37 @@ public final class PersonRegistryTest {
             checkCleanupSymlink();
             checkPersonIcons();
             System.out.println("PASS: person registry no selection, exact legacy cleanup, isolation, canonical repo and remote ID uniqueness");
+        } finally { remove(root); }
+    }
+    private static void checkDisplayName() throws Exception {
+        File root=Files.createTempDirectory("display-name-").toFile();
+        try {
+            PersonRegistry people=new PersonRegistry(root);
+            PersonDocument doc=PersonDocument.named("Original profile name");
+            PersonRegistry.Person person=people.stage(doc,"owner/original");people.bindRemoteId(person.id,123);people.commit(person);
+            byte[] source=Files.readAllBytes(new File(person.directory,"person.md").toPath());
+            byte[] key=ImageVault.keys.get(person.directory,false);
+            assert person.displayName.equals(doc.name);
+            people.setDisplayName(person.id,"  さき 😀  ");
+            PersonRegistry.Person loaded=new PersonRegistry(root).active();
+            assert loaded.displayName.equals("さき 😀")&&loaded.name.equals(doc.name);
+            assert loaded.id.equals(person.id)&&loaded.repository.equals("owner/original")&&loaded.remoteId==123;
+            assert java.util.Arrays.equals(source,Files.readAllBytes(new File(person.directory,"person.md").toPath()));
+            assert java.util.Arrays.equals(key,ImageVault.keys.get(person.directory,false));
+            File alias=new File(person.directory,"display-name.json");
+            assert DataVault.encrypted(Files.readAllBytes(alias.toPath()));
+            assert !new String(Files.readAllBytes(alias.toPath()),StandardCharsets.UTF_8).contains("さき");
+            expectFailure(()->people.setDisplayName(person.id," "));
+            expectFailure(()->people.setDisplayName(person.id,"two\nlines"));
+            expectFailure(()->people.setDisplayName(person.id,new String(new char[257]).replace('\0','a')));
+            File blocked=new File(person.directory,"display-name.json.tmp");assert blocked.mkdir();
+            expectFailure(()->people.setDisplayName(person.id,"lost"));
+            assert person.displayName.equals("さき 😀")&&new PersonRegistry(root).active().displayName.equals("さき 😀");
+            assert blocked.delete();
+            people.rebindRepository(person.id,"owner/new",456);
+            assert people.active().displayName.equals("さき 😀")&&new PersonRegistry(root).active().displayName.equals("さき 😀");
+            byte[] damaged=Files.readAllBytes(alias.toPath());damaged[damaged.length-1]^=1;Files.write(alias.toPath(),damaged);
+            expectFailure(()->new PersonRegistry(root));
         } finally { remove(root); }
     }
     private static void checkRepositoryRebind() throws Exception {
