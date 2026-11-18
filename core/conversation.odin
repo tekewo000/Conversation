@@ -668,6 +668,18 @@ CONTEXT_JSON :: `WITH RECURSIVE query_grams(i,token) AS (
  SELECT json_object('id',id,'kind',kind,'actor',actor,'subject',subject,'key',key,'text',substr(text,1,512),'scope',scope,'certainty',certainty,'status',status,'valid_from',valid_from,'supersedes_id',supersedes_id,'current',json(CASE WHEN current THEN 'true' ELSE 'false' END),'hierarchy',json(`+EPISODE_HIERARCHY_JSON+`),'truncated',json(CASE WHEN length(text)>512 THEN 'true' ELSE 'false' END),'imported_sources',json(` + IMPORTED_SOURCES_JSON + `),'source_ids',json((SELECT json_group_array(message_id) FROM memory_sources WHERE memory_id=m.id))) AS row FROM selected m
 ), memory_budget AS (
  SELECT row,sum(length(CAST(row AS BLOB))+1) OVER(ROWS UNBOUNDED PRECEDING) AS bytes FROM memory_rows
+), quote_sources AS (
+ SELECT s.message_id AS id,min(p.score) AS score FROM selected m
+ JOIN prioritized p ON p.id=m.id AND p.priority=0
+ JOIN memory_sources s ON s.memory_id=m.id
+ WHERE (m.kind='promise' OR (m.kind='event' AND m.subject='quote'))
+ AND NOT EXISTS(SELECT 1 FROM message_annotations WHERE message_id=s.message_id)
+ GROUP BY s.message_id ORDER BY score,s.message_id DESC LIMIT 4
+), quote_rows AS (
+ SELECT q.id,q.score,json_object('id',q.id,'role',m.role,'content',m.content) AS row
+ FROM quote_sources q CROSS JOIN messages m ON m.id=q.id
+), quote_budget AS (
+ SELECT row,sum(length(CAST(row AS BLOB))+1) OVER(ORDER BY score,id DESC ROWS UNBOUNDED PRECEDING) AS bytes FROM quote_rows
 ), past_messages AS MATERIALIZED (
  SELECT rowid AS id,substr(snippet(messages_fts,0,'','',char(8230),64),1,512) AS excerpt FROM messages_fts WHERE messages_fts MATCH ?2 ORDER BY rank LIMIT 4
 ), recent_messages AS (
@@ -698,7 +710,7 @@ CONTEXT_JSON :: `WITH RECURSIVE query_grams(i,token) AS (
 ), message_budget AS (
  SELECT id,category,row,sum(length(CAST(row AS BLOB))+1) OVER(PARTITION BY category ORDER BY priority,id DESC ROWS UNBOUNDED PRECEDING) AS bytes FROM message_rows
 )
-SELECT json_object('person',json(` + PERSON_JSON + `),'persona',json(` + PERSONA_JSON + `),'continuity',json(` + CONTINUITY_JSON + `),'memory_progress',`+MEMORY_PROGRESS_JSON+`,'messages',json((SELECT json_group_array(json(row)) FROM (SELECT row FROM message_budget WHERE bytes<=CASE category WHEN 0 THEN 786432 ELSE 20000 END ORDER BY id))),'memories',json((SELECT json_group_array(json(row)) FROM memory_budget WHERE bytes<=10000)))`
+SELECT json_object('person',json(` + PERSON_JSON + `),'persona',json(` + PERSONA_JSON + `),'continuity',json(` + CONTINUITY_JSON + `),'memory_progress',`+MEMORY_PROGRESS_JSON+`,'messages',json((SELECT json_group_array(json(row)) FROM (SELECT row FROM message_budget WHERE bytes<=CASE category WHEN 0 THEN 786432 ELSE 20000 END ORDER BY id))),'memories',json((SELECT json_group_array(json(row)) FROM memory_budget WHERE bytes<=10000)),'quotes',json((SELECT json_group_array(json(row)) FROM quote_budget WHERE bytes<=400000)))`
 
 @(export)
 conversation_context :: proc "c" (query: cstring) -> cstring {

@@ -61,6 +61,7 @@ public final class ChatSessionTest {
         incompleteReplyStateCannotCommitAReply();
         missingReplyStateKeepsTheAnswerAndPreviousFeeling();
         replyRetrievalReceivesFullTextWithoutChangingExtraction();
+        importantWordsReachTheReplyAsOriginalReferenceText();
         assistantFeelingAndOldEvidenceReachReplyAndExtraction();
         relationshipAndOldEvidenceReachUnrelatedReplyAndExtraction();
         reflectionReceivesRelationshipAndItsOriginalEvidence();
@@ -436,6 +437,23 @@ public final class ChatSessionTest {
         };
         new ChatSession(store).reply(text, true, (instructions, input, delta) -> reply("返答"), new Listener());
         assert retrieved[0] : "Replies must use the semantic retrieval hook with full input";
+    }
+
+    private static void importantWordsReachTheReplyAsOriginalReferenceText() throws Exception {
+        String original = "『いつでも味方だよ』\n　最後まで、ずっと。";
+        Store store = new Store() {
+            @Override public JSONObject context(String query) throws Exception {
+                return super.context(query).put("quotes", new JSONArray().put(new JSONObject().put("id", 1)
+                        .put("role", "assistant").put("content", original)));
+            }
+        };
+        new ChatSession(store).reply("あのとき何て言ったっけ？", true, (instructions, input, delta) -> {
+            JSONObject reference = new JSONObject(input.getJSONObject(0).getString("content").replaceFirst("^[^\\n]*\\n", ""));
+            JSONObject quote = reference.getJSONArray("quotes").getJSONObject(0);
+            assert quote.getString("content").equals(original);
+            assert quote.getString("role").equals("assistant");
+            return reply("ずっと味方だよ");
+        }, new Listener());
     }
 
     private static void replyAndOrganize(ChatSession session, String text, boolean persistUser,

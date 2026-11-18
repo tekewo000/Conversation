@@ -263,6 +263,49 @@ escaped_source_snippets_keep_job_and_context_byte_budgets :: proc(t: ^testing.T)
 }
 
 @(test)
+relevant_quote_keeps_the_complete_original_turn :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-quote-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ filler:=strings.repeat("あ",2500)
+ defer delete(filler)
+ full:=fmt.aprintf("『青葉珈琲』で言ったこと。\n%s\n　最後の一字まで、覚えてて！",filler)
+ defer delete(full)
+ full_c:=strings.clone_to_cstring(full)
+ defer delete(full_c)
+ assert(conversation_add_message("user",full_c)==1)
+ assert(conversation_add_message("assistant","うん、覚えておくよ。") == 2)
+ assert(conversation_apply_job(1,`{"memories":[{"kind":"event","actor":"user","subject":"quote","key":"青葉珈琲","text":"青葉珈琲で交わした大切な言葉","scope":"shared","certainty":"explicit","source_ids":[1]}]}`),string(conversation_error()))
+ for _ in 0..<32 {
+  assert(conversation_add_message("user","今日は晴れ")>0)
+  assert(conversation_add_message("assistant","散歩日和だね")>0)
+ }
+ cases := [?]struct{query,candidates:cstring,expected:int}{
+  {"青葉珈琲",nil,1},
+  {"qzxvjjk","[1]",1},
+  {"qzxvjjk","[]",0},
+ }
+ for tc in cases {
+  raw:=string(conversation_context(tc.query) if tc.candidates==nil else conversation_context_semantic(tc.query,tc.candidates))
+  result,ok:=parse_json(transmute([]byte)raw)
+  assert(ok)
+  defer json.destroy_value(result)
+  quotes,has_quotes:=result.(json.Object)["quotes"].(json.Array)
+  if !testing.expect(t,has_quotes,"Reply context must expose complete source quotes.") do return
+  if !testing.expect_value(t,len(quotes),tc.expected) do return
+  if tc.expected==0 do continue
+  quote:=quotes[0].(json.Object)
+  testing.expect_value(t,i64(quote["id"].(json.Integer)),1)
+  testing.expect_value(t,string(quote["content"].(json.String)),full)
+ }
+}
+
+@(test)
 promise_versions_and_partial_job_rollback :: proc(t: ^testing.T) {
  dir,e:=os.make_directory_temp("","conversation-promise-*",context.allocator)
  assert(e==nil)
