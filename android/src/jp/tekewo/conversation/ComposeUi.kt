@@ -53,7 +53,6 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.Role
@@ -76,8 +75,6 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.unit.LayoutDirection
-import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
@@ -91,12 +88,17 @@ import com.mikepenz.markdown.model.markdownAnnotator
 import com.mikepenz.markdown.model.markdownAnnotatorConfig
 import java.util.function.IntConsumer
 import java.util.function.Consumer
-import kotlin.math.roundToInt
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 private val chatFont = FontFamily(Font(R.font.noto_sans_jp_regular))
+
+// ImGui sizes Noto's 1448-unit ascent/descent; Compose sizes its 1000-unit em.
+internal fun chatTextStyle(textSize: Int) = TextStyle(
+    color = Color.White, fontSize = (textSize * (1000f / 1448f)).sp,
+    fontFamily = chatFont, lineHeight = textSize.sp, letterSpacing = 0.sp
+)
 
 /** Observable UI only; the activity retains storage, authentication and network work. */
 class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
@@ -141,6 +143,8 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         @JvmField var loading = false
         @JvmField var onResume: Runnable? = null
         @JvmField val blocks = mutableListOf<Block>()
+        @JvmField var memoryState: MemoryState? = null
+        @JvmField val featuredRows = mutableListOf<Row>()
         internal var scroll = ScrollState(0)
         @JvmField var sheet = false
         @JvmField var choices = false
@@ -156,6 +160,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         @JvmField var preview = false
     }
     class Block(@JvmField val title: String, @JvmField val text: String)
+    class MemoryState(val emotion: String, val reason: String, val situation: String)
     class Row @JvmOverloads constructor(@JvmField val label: String, @JvmField val action: Runnable,
                                        @JvmField val icon: Int = -1) {
         @JvmField var checked = false
@@ -257,7 +262,9 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         Box(Modifier.fillMaxSize()) {
             ChatHost()
             PageHost()
-            PanelHost()
+            MaterialTheme(colorScheme = if (pages.isEmpty()) MaterialTheme.colorScheme else managementColors) {
+                PanelHost()
+            }
         }
     }
 
@@ -276,31 +283,9 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
             if (panel == null) { keyboard?.hide(); focus.clearFocus(); backFocus.requestFocus() }
         }
         BackHandler(enabled = panel == null, onBack = ::back)
-        Surface(Modifier.fillMaxSize().then(if (panel != null) Modifier.clearAndSetSemantics { } else Modifier)
-            .pointerInput(Unit) { detectTapGestures { } }, color = MaterialTheme.colorScheme.background) {
-            Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()
-                .focusProperties { onExit = { cancelFocusChange() } }.focusGroup()
-                .semantics { paneTitle = value.title }) {
-                Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 20.dp, top = 8.dp, bottom = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = ::back, modifier = Modifier.size(48.dp).focusRequester(backFocus)) {
-                        Icon(ConversationIcons.Back, contentDescription = "戻る", tint = MaterialTheme.colorScheme.primary)
-                    }
-                    Column(Modifier.weight(1f).padding(start = 8.dp)) {
-                        Text(value.title, fontSize = 25.sp, fontWeight = FontWeight.Medium,
-                            modifier = Modifier.semantics { heading() })
-                        if (value.subtitle.isNotEmpty()) Text(value.subtitle, fontSize = 14.sp,
-                            color = Color(0xFFADBBC4), modifier = Modifier.padding(top = 4.dp))
-                    }
-                }
-                HorizontalDivider(color = Color(0xFF303B44))
-                key(value.key) {
-                    Column(Modifier.weight(1f).verticalScroll(value.scroll).padding(horizontal = 20.dp, vertical = 16.dp)) {
-                        PanelBody(value, page = true)
-                        Spacer(Modifier.height(24.dp))
-                    }
-                }
-            }
+        ManagementPage(value, backFocus, ::back, personIcon.takeIf { value.subtitle == personName },
+            textSize, messageGap, Modifier.then(if (panel != null) Modifier.clearAndSetSemantics { } else Modifier)) {
+            PanelFields(value.fields)
         }
     }
 
@@ -481,10 +466,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
             else text
         }
         val body = remember(rendered) { AttachmentFiles.withoutReferences(rendered) }
-        // ImGui sizes Noto's 1448-unit ascent/descent; Compose sizes its 1000-unit em.
-        val style = TextStyle(color = Color.White, fontSize = (textSize * (1000f / 1448f)).sp,
-            fontFamily = chatFont,
-            lineHeight = textSize.sp, letterSpacing = 0.sp)
+        val style = chatTextStyle(textSize)
         if (body.isNotEmpty()) Markdown(
             markdownState = rememberMarkdownState(body, retainState = true),
             modifier = Modifier,
@@ -543,10 +525,12 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable private fun PanelSurface(value: Panel, modifier: Modifier = Modifier, closeFocus: FocusRequester? = null) {
         val maxHeight = LocalConfiguration.current.screenHeightDp.dp * 0.85f
+        val managed = pages.isNotEmpty()
+        val colors = MaterialTheme.colorScheme
         Surface(modifier.fillMaxWidth(if (value.sheet) 1f else 0.88f).heightIn(max = maxHeight)
             .pointerInput(Unit) { detectTapGestures { } },
             shape = if (value.sheet) RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
-                    else RoundedCornerShape(28.dp), color = Color(0xFF1C2229)) {
+                    else RoundedCornerShape(28.dp), color = colors.surface) {
         Column(Modifier.then(if (value.sheet) Modifier.navigationBarsPadding() else Modifier)
             .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 20.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -556,7 +540,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 if (value.sheet) IconButton(onClick = ::dismiss, modifier = Modifier.size(48.dp)
                     .then(if (closeFocus == null) Modifier else Modifier
                         .focusProperties { canFocus = true }.focusRequester(closeFocus))) {
-                    Icon(ConversationIcons.menu(6), contentDescription = "閉じる", tint = Color(0xFFA6C4BC),
+                    Icon(ConversationIcons.menu(6), contentDescription = "閉じる", tint = colors.primary,
                         modifier = Modifier.size(20.dp))
                 }
             }
@@ -568,22 +552,21 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                     Text(if (value.confirmLabel.isEmpty()) "閉じる" else "キャンセル", fontSize = 14.sp, letterSpacing = 0.sp)
                 }
                 if (value.confirmLabel.isNotEmpty()) TextButton(onClick = { value.confirm?.run() },
-                    modifier = Modifier.padding(4.dp).background(Color(0xFF36594B), RoundedCornerShape(16.dp))) {
-                    Text(value.confirmLabel, fontSize = 14.sp, color = Color(0xFFE6EEF2))
+                    modifier = Modifier.padding(4.dp).background(
+                        if (managed) colors.primary else Color(0xFF36594B), RoundedCornerShape(16.dp))) {
+                    Text(value.confirmLabel, fontSize = 14.sp, color = if (managed) colors.onPrimary else colors.onSurface)
                 }
             }
         }
     }
     }
-    @OptIn(ExperimentalMaterial3Api::class)
-    @Composable private fun PanelBody(value: Panel, page: Boolean = false) {
+    @Composable private fun PanelBody(value: Panel) {
         if (value.loading) {
             LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 12.dp))
         }
         if (value.message.isNotEmpty()) SelectionContainer {
             Text(value.message, Modifier.padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 20.dp),
-                fontSize = if (page) 16.sp else 17.sp, lineHeight = if (page) 26.sp else TextUnit.Unspecified,
-                letterSpacing = 0.sp, color = if (page) Color(0xFFC6D2DA) else MaterialTheme.colorScheme.onSurface)
+                fontSize = 17.sp, letterSpacing = 0.sp, color = MaterialTheme.colorScheme.onSurface)
         }
         value.blocks.forEach { block ->
             Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 12.dp)) {
@@ -594,10 +577,42 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 }
             }
         }
-        if (value.preview) Text("こんにちは。\n今日の続きから話そう。", fontSize = textSize.sp,
-            modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 20.dp)
-                .background(Color(0xFF273139), RoundedCornerShape(16.dp)).fillMaxWidth().padding(16.dp))
-        value.fields.forEach { field ->
+        PanelFields(value.fields)
+        value.rows.forEachIndexed { index, row ->
+            if (row.section.isNotEmpty() && (index == 0 || row.section != value.rows[index - 1].section)) {
+                Text(row.section, color = MaterialTheme.colorScheme.primary, fontSize = 14.sp,
+                    modifier = Modifier.padding(start = 12.dp, top = 24.dp, bottom = 8.dp).semantics { heading() })
+            }
+            Row(Modifier.fillMaxWidth().semantics {
+                    if (value.choices) { role = Role.RadioButton; selected = row.checked }
+                }.clickable {
+                    if (row.dismiss) hide()
+                    row.action.run()
+                }.heightIn(min = 56.dp).padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                if (value.sheet && row.icon >= 0) {
+                    Icon(ConversationIcons.menu(row.icon), contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
+                    Spacer(Modifier.width(20.dp))
+                }
+                if (value.choices) {
+                    RadioButton(selected = row.checked, onClick = null)
+                    Spacer(Modifier.width(16.dp))
+                }
+                Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
+                    Text(row.label + (if (row.checked && !value.choices) "  ✓" else ""),
+                        color = if (row.destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                        fontSize = if (!value.sheet) 16.sp else maxOf(18, textSize - 2).sp, letterSpacing = 0.sp)
+                    if (row.description.isNotEmpty()) Text(row.description, fontSize = 13.sp, lineHeight = 20.sp,
+                        color = Color(0xFFADBBC4), modifier = Modifier.padding(top = 4.dp))
+                }
+            }
+        }
+    }
+
+    @Composable private fun PanelFields(fields: List<Field>) {
+        val colors = MaterialTheme.colorScheme
+        fields.forEach { field ->
             key(field) {
                 Text(field.label, fontSize = 14.sp, color = Color(0xFFC6D2DA),
                     modifier = Modifier.padding(start = 4.dp, top = 12.dp, bottom = 4.dp))
@@ -606,12 +621,12 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 BasicTextField(field.value, onValueChange = { field.value = it; field.error = "" },
                     singleLine = true, interactionSource = interactions,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
-                        .background(Color(0xFF13171C), RoundedCornerShape(16.dp))
-                        .border(1.dp, if (focused) Color(0xFFA6C4BC) else Color(0xFF39434D), RoundedCornerShape(16.dp))
+                        .background(colors.background, RoundedCornerShape(16.dp))
+                        .border(1.dp, if (focused) colors.primary else Color(0xFF39434D), RoundedCornerShape(16.dp))
                         .heightIn(min = 52.dp).semantics { contentDescription = field.label }
                         .padding(horizontal = 16.dp, vertical = 12.dp),
-                    textStyle = TextStyle(color = Color(0xFFE6EEF2), fontSize = 16.sp),
-                    cursorBrush = SolidColor(Color(0xFFA6C4BC)),
+                    textStyle = TextStyle(color = colors.onSurface, fontSize = 16.sp),
+                    cursorBrush = SolidColor(colors.primary),
                     decorationBox = { inner -> Box(contentAlignment = Alignment.CenterStart) {
                         if (field.value.isEmpty()) Text(if (field.secret) "入力してください" else field.label, color = Color(0xFF9CABB5), fontSize = 16.sp,
                             letterSpacing = 0.sp)
@@ -622,59 +637,6 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 if (field.error.isNotEmpty()) Text(field.error, color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(horizontal = 8.dp), fontSize = 14.sp)
             }
-        }
-        value.sliders.forEach { setting ->
-            val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
-            Text("${setting.label}  ${setting.value}", Modifier.padding(start = 12.dp, top = 10.dp, bottom = 4.dp),
-                fontSize = 17.sp, letterSpacing = 0.sp)
-            Slider(setting.value.toFloat(), onValueChange = {
-                setting.value = it.roundToInt(); setting.change.accept(setting.value)
-            }, valueRange = setting.min.toFloat()..setting.max.toFloat(),
-                steps = setting.max - setting.min - 1,
-                modifier = Modifier.padding(horizontal = 12.dp).height(48.dp)
-                    .semantics { contentDescription = setting.label },
-                thumb = { Box(Modifier.size(12.dp).background(Color(0xFFA6C4BC), CircleShape)) },
-                track = { Canvas(Modifier.fillMaxWidth().height(2.dp)) {
-                    val start = Offset(if (rtl) size.width else 0f, center.y)
-                    val end = Offset(if (rtl) 0f else size.width, center.y)
-                    val fraction = (setting.value - setting.min).toFloat() / (setting.max - setting.min)
-                    drawLine(Color(0xFF4B5258), start, end, strokeWidth = size.height)
-                    drawLine(Color(0xFFA6C4BC), start, Offset(start.x + (end.x - start.x) * fraction, center.y),
-                        strokeWidth = size.height)
-                } })
-        }
-        value.rows.forEachIndexed { index, row ->
-            if (row.section.isNotEmpty() && (index == 0 || row.section != value.rows[index - 1].section)) {
-                Text(row.section, color = MaterialTheme.colorScheme.primary, fontSize = 14.sp,
-                    modifier = Modifier.padding(start = 12.dp, top = 24.dp, bottom = 8.dp).semantics { heading() })
-            }
-            Row(Modifier.fillMaxWidth().semantics {
-                    if (value.choices) { role = Role.RadioButton; selected = row.checked }
-                }.clickable {
-                    if (row.dismiss && !page) hide()
-                    row.action.run()
-                }.heightIn(min = 56.dp).padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                if ((page || value.sheet) && row.icon >= 0) {
-                    Icon(ConversationIcons.menu(row.icon), contentDescription = null,
-                        tint = Color(0xFFA6C4BC), modifier = Modifier.size(24.dp))
-                    Spacer(Modifier.width(20.dp))
-                }
-                if (value.choices) {
-                    RadioButton(selected = row.checked, onClick = null)
-                    Spacer(Modifier.width(16.dp))
-                }
-                Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
-                    Text(row.label + (if (row.checked && !value.choices) "  ✓" else ""),
-                        color = if (row.destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-                        fontSize = if (page || !value.sheet) 16.sp else maxOf(18, textSize - 2).sp, letterSpacing = 0.sp)
-                    if (row.description.isNotEmpty()) Text(row.description, fontSize = 13.sp, lineHeight = 20.sp,
-                        color = Color(0xFFADBBC4), modifier = Modifier.padding(top = 4.dp))
-                }
-                if (page && !value.choices) Icon(ConversationIcons.Chevron, contentDescription = null,
-                    modifier = Modifier.padding(start = 12.dp).size(18.dp), tint = Color(0xFFADBBC4))
-            }
-            if (page) HorizontalDivider(color = Color(0xFF28333C), modifier = Modifier.padding(horizontal = 12.dp))
         }
     }
 

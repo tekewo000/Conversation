@@ -16,6 +16,23 @@ internal object ConversationIcons {
     val Chevron = strokeVector("ConversationChevron", 1.65f) {
         moveTo(9f, 6f); lineTo(15f, 12f); lineTo(9f, 18f)
     }
+    val Check = strokeVector("ConversationCheck", 1.8f) {
+        moveTo(5f, 12f); lineTo(10f, 17f); lineTo(19f, 7f)
+    }
+    val Person = strokeVector("ConversationPerson", 1.65f) {
+        circle(12f, 7.5f, 3.5f)
+        moveTo(4.5f, 20f); curveTo(4.5f, 12f, 19.5f, 12f, 19.5f, 20f)
+    }
+    val Link = strokeVector("ConversationLink", 1.65f) {
+        moveTo(10f, 8f); lineTo(13f, 5f); curveTo(17f, 1f, 23f, 7f, 19f, 11f); lineTo(16f, 14f)
+        moveTo(8f, 10f); lineTo(5f, 13f); curveTo(1f, 17f, 7f, 23f, 11f, 19f); lineTo(14f, 16f)
+        moveTo(9f, 15f); lineTo(15f, 9f)
+    }
+    val Picture = strokeVector("ConversationPicture", 1.65f) {
+        moveTo(4f, 4f); lineTo(20f, 4f); lineTo(20f, 20f); lineTo(4f, 20f); close()
+        circle(9f, 9f, 1.5f)
+        moveTo(4f, 18f); lineTo(10f, 13f); lineTo(13f, 16f); lineTo(16f, 12f); lineTo(20f, 16f)
+    }
     val Add = strokeVector("ConversationAdd", 1.8f) {
         moveTo(5f, 12f); lineTo(19f, 12f)
         moveTo(12f, 5f); lineTo(12f, 19f)

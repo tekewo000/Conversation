@@ -53,6 +53,15 @@ class ComposeUiTest {
         ui = ComposeUi(compose.activity, { menus++ }, { sends++ }, { pages.add(it) })
     }
 
+    @Test fun displayPreviewShowsBothSidesOfTheConversation() {
+        compose.runOnUiThread {
+            install()
+            ui.showRoot(ComposeUi.Panel("表示設定").apply { key = "display"; preview = true })
+        }
+        compose.onNodeWithText("おかえり。今日どうだった？").assertIsDisplayed()
+        compose.onNodeWithText("聞いてほしいことがあるよ。").assertIsDisplayed()
+    }
+
     @Test fun returningFromPagePreservesParentScrollAndTheChatDraft() {
         compose.runOnUiThread {
             install(); ui.enabled = true; ui.draft = "保存しておく下書き"
