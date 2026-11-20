@@ -93,7 +93,6 @@ public final class MainActivity extends ComponentActivity {
     private static final int DEFAULT_TEXT_SIZE = 16;
     private int textSize = DEFAULT_TEXT_SIZE;
     private int messageGap = 12;
-    private static final int BACKGROUND = 0xff13171c;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -106,8 +105,9 @@ public final class MainActivity extends ComponentActivity {
         if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
         else getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                 | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
-        getWindow().setStatusBarColor(BACKGROUND);
-        getWindow().setNavigationBarColor(BACKGROUND);
+        int windowBackground = getColor(R.color.conversation_window_background);
+        getWindow().setStatusBarColor(windowBackground);
+        getWindow().setNavigationBarColor(windowBackground);
         getWindow().setNavigationBarContrastEnforced(false);
         getWindow().getDecorView().setSystemUiVisibility(getWindow().getDecorView().getSystemUiVisibility()
                 & ~(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR));
@@ -518,16 +518,22 @@ public final class MainActivity extends ComponentActivity {
         if (!ready) return;
         ComposeUi.Panel menu = page("管理", "management", true);
         menu.onResume = this::showHistoryMenu;
-        menu.featuredRows.add(entry("記憶", MemoryWork.isRunning() ? "会話を整理しています" : "最近の会話と、体験の記録", 3, this::showMemory));
+        menu.rows.add(entry("記憶", MemoryWork.isRunning() ? "会話を整理しています" : "最近の会話と、体験の記録", 3, this::showMemory));
         menu.rows.add(entry("人物", activePerson == null ? "名前だけでも始められます" : "切り替え・アイコン・追加と読み込み", 2, this::showPeople));
         menu.rows.add(entry("設定", connection.hasSession() ? "ChatGPT接続済み · 応答・表示・画像生成" : "ChatGPTの接続・応答・表示・画像生成", 4, this::showSettings));
         menu.rows.add(entry("バックアップ", activePerson == null || activePerson.repository == null ? "端末の保存データ・ZIP書き出し" : "GitHubへの保存・ZIP書き出し", 1, this::showGitBackup));
-        menu.rows.add(entry("最新の会話へ", "チャットの最新の発言を表示", 0, () -> {
+        ComposeUi.Row latest = entry("最新の会話へ", "チャットの最新の発言を表示", 0, () -> {
             compose.closePages(); pageFirst = -1; scrollOnRefresh = true; refreshMessages();
-        }));
-        if (busy) menu.rows.add(new ComposeUi.Row("応答を停止", () -> {
-            session.cancel(); connection.cancelReply(); imageApi.cancel(); compose.cancelReply(); refreshMessages();
-        }, 6));
+        });
+        latest.section = "会話";
+        menu.rows.add(latest);
+        if (busy) {
+            ComposeUi.Row stop = new ComposeUi.Row("応答を停止", () -> {
+                session.cancel(); connection.cancelReply(); imageApi.cancel(); compose.cancelReply(); refreshMessages();
+            }, 6);
+            stop.section = latest.section;
+            menu.rows.add(stop);
+        }
         compose.showRoot(menu);
     }
 

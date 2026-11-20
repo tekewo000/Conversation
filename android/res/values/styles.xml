@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <color name="conversation_window_background">#101821</color>
     <style name="ConversationTheme" parent="@android:style/Theme.Material.NoActionBar">
-        <item name="android:windowBackground">#13171C</item>
-        <item name="android:colorBackground">#13171C</item>
-        <item name="android:textColorPrimary">#E6EEF2</item>
-        <item name="android:colorAccent">#A8D5C5</item>
+        <item name="android:windowBackground">@color/conversation_window_background</item>
+        <item name="android:colorBackground">@color/conversation_window_background</item>
+        <item name="android:textColorPrimary">#F4F1EB</item>
+        <item name="android:colorAccent">#F4CE91</item>
         <item name="android:fontFamily">sans-serif</item>
     </style>
 </resources>

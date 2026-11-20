@@ -99,7 +99,7 @@ internal fun AttachmentPreview(person: File?, ref: AttachmentFiles.Ref, modifier
     }
     if (expanded && person != null) Dialog(onDismissRequest = { expanded = false },
         properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(Modifier.fillMaxSize().background(Color(0xFF13171C)).safeDrawingPadding()) {
+        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding()) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 if (remove == null && ref.image()) TextButton(onClick = ::saveImage, enabled = !saving && !failed,
                     modifier = Modifier.semantics { contentDescription = "${ref.name}の元画像を保存" }) {

@@ -184,6 +184,19 @@ class ComposeUiTest {
         assertTrue(attach.center.x < root.center.x && attach.center.y > root.center.y)
     }
 
+    @Test fun chatHeaderShowsThePersonAndOpensMemoryBeforeAnyReplies() {
+        var memoryOpens = 0
+        compose.runOnUiThread {
+            install()
+            ui.personName = "小春"
+            ui.enabled = true
+            ui.onIcon = Runnable { memoryOpens++ }
+        }
+        compose.onNodeWithText("小春").assertIsDisplayed()
+        compose.onNodeWithContentDescription("会話相手の記憶を開く").performClick()
+        compose.runOnIdle { assertEquals(1, memoryOpens) }
+    }
+
     @Test fun markdownRendersForUserAssistantAndStreamingReply() {
         compose.runOnUiThread {
             install()

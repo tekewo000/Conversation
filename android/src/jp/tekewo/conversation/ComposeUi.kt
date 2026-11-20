@@ -43,13 +43,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
@@ -195,11 +195,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
 
     init {
         activity.setContent {
-            MaterialTheme(colorScheme = darkColorScheme(
-                background = Color(0xFF13171C), surface = Color(0xFF1C2229),
-                primary = Color(0xFFA6C4BC), onPrimary = Color(0xFF13171C),
-                onBackground = Color(0xFFE6EEF2), onSurface = Color(0xFFE6EEF2)
-            )) { Content() }
+            MaterialTheme(colorScheme = conversationColors) { Content() }
         }
     }
 
@@ -275,9 +271,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         Box(Modifier.fillMaxSize()) {
             ChatHost()
             PageHost()
-            MaterialTheme(colorScheme = if (pages.isEmpty()) MaterialTheme.colorScheme else managementColors) {
-                PanelHost()
-            }
+            PanelHost()
         }
     }
 
@@ -303,8 +297,6 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     }
 
     @Composable private fun ChatContent() {
-        val keyboard = LocalSoftwareKeyboardController.current
-        val focus = LocalFocusManager.current
         val list = rememberLazyListState()
         LaunchedEffect(scrollRequest) { if (scrollRequest > 0) list.scrollToItem(scrollTarget) }
         // A reply follows the bottom only while the reader is already there.
@@ -313,76 +305,145 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         }
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.End) {
-                    IconButton(onClick = { keyboard?.hide(); focus.clearFocus(); attachmentMenu = false; onMenu.run() },
-                        modifier = Modifier.size(48.dp).focusRequester(menuFocus)) {
-                        Icon(ConversationIcons.Menu, contentDescription = "メニュー", tint = Color(0xFFDEE8EF))
-                    }
-                }
-                if (failure.isNotEmpty()) Text(failure, Modifier.padding(20.dp), color = MaterialTheme.colorScheme.error)
-                BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-                val bubbleWidth = minOf((maxWidth - 32.dp).coerceAtLeast(0.dp) * 0.86f, 600.dp)
-                val latest = first + messages.size >= total
-                val latestAssistant = messages.lastOrNull { it.role == "assistant" }?.id
-                val pending = latest && (replying || streaming.isNotEmpty())
-                val visible = if (pending) listOf(Message(-1, "assistant", streaming, if (replying) replyKey else Long.MIN_VALUE)) + messages.asReversed()
-                    else messages.asReversed()
-                LazyColumn(Modifier.fillMaxSize(), state = list, reverseLayout = true,
-                    contentPadding = PaddingValues(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(messageGap.dp)) {
-                    if (first + messages.size < total) item("newer") {
-                        TextButton(onClick = {
-                            pageDirection = 1
-                            onPage.accept((first + 80).coerceAtMost((total - 80).coerceAtLeast(0)))
-                        }) {
-                            Text("新しい会話へ")
+                ChatHeader()
+                if (failure.isNotEmpty()) Text(failure, Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                    color = MaterialTheme.colorScheme.error)
+                BoxWithConstraints(Modifier.weight(1f).widthIn(max = 680.dp).fillMaxWidth().align(Alignment.CenterHorizontally)) {
+                    val bubbleWidth = (maxWidth - 32.dp).coerceAtLeast(0.dp) * 0.88f
+                    val latest = first + messages.size >= total
+                    val latestAssistant = messages.lastOrNull { it.role == "assistant" }?.id
+                    val pending = latest && (replying || streaming.isNotEmpty())
+                    val visible = if (pending) {
+                        listOf(Message(-1, "assistant", streaming, if (replying) replyKey else Long.MIN_VALUE)) + messages.asReversed()
+                    } else messages.asReversed()
+                    LazyColumn(Modifier.fillMaxSize(), state = list, reverseLayout = true,
+                        contentPadding = PaddingValues(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(messageGap.dp)) {
+                        if (!latest) item("newer") {
+                            TextButton(onClick = {
+                                pageDirection = 1
+                                onPage.accept((first + 80).coerceAtMost((total - 80).coerceAtLeast(0)))
+                            }) { Text("新しい会話へ") }
+                        }
+                        items(visible, key = { it.key }) { message ->
+                            MessageText(message.text, message.role == "user", bubbleWidth,
+                                if (latest && (message.id == -1L || !pending && message.id == latestAssistant)) feeling else "",
+                                typing = message.id == -1L && message.text.isEmpty(), annotation = message.annotation)
+                        }
+                        if (first > 0) item("older") {
+                            TextButton(onClick = {
+                                pageDirection = -1
+                                onPage.accept((first - 80).coerceAtLeast(0))
+                            }) { Text("以前の会話を読む") }
                         }
                     }
-                    items(visible, key = { it.key }) { message ->
-                        MessageText(message.text, message.role == "user", bubbleWidth,
-                            if (latest && (message.id == -1L || !pending && message.id == latestAssistant)) feeling else "",
-                            typing = message.id == -1L && message.text.isEmpty(), annotation = message.annotation)
-                    }
-                    if (first > 0) item("older") {
-                        TextButton(onClick = {
-                            pageDirection = -1; onPage.accept((first - 80).coerceAtLeast(0))
-                        }) { Text("以前の会話を読む") }
+                }
+                ComposerDock()
+            }
+        }
+    }
+
+    @Composable private fun ChatHeader() {
+        val keyboard = LocalSoftwareKeyboardController.current
+        val focus = LocalFocusManager.current
+        val colors = MaterialTheme.colorScheme
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Row(Modifier.widthIn(max = 680.dp).fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                PersonPortrait(Modifier.size(40.dp))
+                Text(personName.ifBlank { "会話" }, Modifier.weight(1f).semantics { heading() },
+                    color = colors.onSurface, style = MaterialTheme.typography.titleLarge,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (enabled && personName.isNotBlank() && onIcon != null) {
+                    TextButton(onClick = { onIcon?.run() }, modifier = Modifier.heightIn(min = 48.dp)
+                        .semantics { contentDescription = "会話相手の記憶を開く" }) {
+                        Text("記憶")
                     }
                 }
+                IconButton(onClick = { keyboard?.hide(); focus.clearFocus(); attachmentMenu = false; onMenu.run() },
+                    modifier = Modifier.size(48.dp).focusRequester(menuFocus)) {
+                    Icon(ConversationIcons.Menu, contentDescription = "メニュー", tint = colors.onSurfaceVariant)
                 }
-                if (attachments.isNotBlank()) Row(Modifier.fillMaxWidth().heightIn(max = 180.dp)
-                    .horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            }
+            HorizontalDivider(color = colors.outlineVariant)
+        }
+    }
+
+    @Composable private fun PersonPortrait(modifier: Modifier) {
+        val colors = MaterialTheme.colorScheme
+        Box(modifier.background(colors.surfaceVariant, CircleShape), contentAlignment = Alignment.Center) {
+            val bitmap = personIcon
+            when {
+                bitmap != null -> Image(remember(bitmap) { bitmap.asImageBitmap() }, contentDescription = null,
+                    contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize().clip(CircleShape))
+                personName.isNotBlank() -> Text(personName.substring(0, personName.offsetByCodePoints(0, 1)),
+                    modifier = Modifier.clearAndSetSemantics { }, color = colors.primary,
+                    style = MaterialTheme.typography.titleMedium)
+                else -> Icon(ConversationIcons.Person, contentDescription = null, tint = colors.onSurfaceVariant)
+            }
+        }
+    }
+
+    @Composable private fun ComposerDock() {
+        val keyboard = LocalSoftwareKeyboardController.current
+        val focus = LocalFocusManager.current
+        val colors = MaterialTheme.colorScheme
+        val fieldInteractions = remember { MutableInteractionSource() }
+        val focused by fieldInteractions.collectIsFocusedAsState()
+        val fieldShape = RoundedCornerShape(16.dp)
+        val canSend = enabled && !sending && (hasDraft || attachments.isNotBlank())
+        Column(Modifier.fillMaxWidth().background(colors.surface), horizontalAlignment = Alignment.CenterHorizontally) {
+            HorizontalDivider(color = colors.outlineVariant)
+            if (attachments.isNotBlank()) {
+                Row(Modifier.widthIn(max = 680.dp).fillMaxWidth().heightIn(max = 180.dp)
+                    .horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     AttachmentFiles.references(attachments).forEach { ref ->
                         AttachmentPreview(mediaDirectory, ref, Modifier.width(160.dp), remove = {
-                            attachments = AttachmentFiles.references(attachments).filter { it.fileName != ref.fileName }.joinToString("\n") { it.markdown() }
+                            attachments = AttachmentFiles.references(attachments)
+                                .filter { it.fileName != ref.fileName }.joinToString("\n") { it.markdown() }
                         })
                     }
                 }
-                if (generateImages) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("画像生成・有料API（説明文から1枚）", Modifier.weight(1f), color = MaterialTheme.colorScheme.primary)
+            }
+            if (generateImages) {
+                Row(Modifier.widthIn(max = 680.dp).fillMaxWidth().padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text("画像生成・有料API（説明文から1枚）", Modifier.weight(1f), color = colors.primary)
                     TextButton(onClick = { generateImages = false }) { Text("解除") }
                 }
-                Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 12.dp, bottom = 10.dp, top = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = { keyboard?.hide(); focus.clearFocus(); attachmentMenu = true; onAttach?.run() },
-                        enabled = enabled && !sending, modifier = Modifier.size(48.dp).focusRequester(attachmentFocus)) {
-                        Icon(ConversationIcons.Add, contentDescription = "添付ファイルを追加", tint = Color(0xFFDEE8EF))
-                    }
-                    BasicTextField(state = draftField, enabled = enabled,
-                        modifier = Modifier.weight(1f).background(Color(0xFF1C2229), RoundedCornerShape(24.dp))
-                            .heightIn(min = 48.dp).semantics { contentDescription = "メッセージ入力" }
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                        textStyle = TextStyle(color = Color(0xFFE6EEF2), fontSize = 16.sp),
-                        cursorBrush = SolidColor(Color(0xFFA6C4BC)), lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = 5),
-                        decorator = { inner -> Box(contentAlignment = Alignment.CenterStart) { inner() } })
-                    Spacer(Modifier.width(8.dp))
-                    Box(Modifier.size(48.dp).alpha(if (sending) 0.45f else 1f)
-                            .background(Color(0xFF36594B), RoundedCornerShape(24.dp))
-                            .combinedClickable(enabled = enabled && !sending && (hasDraft || attachments.isNotBlank()),
-                                role = Role.Button, onClick = { onSend.run() }, onLongClickLabel = "情景・メタ発言として送る",
-                                onLongClick = { onSendNote?.run() }), contentAlignment = Alignment.Center) {
-                        Icon(ConversationIcons.Send, contentDescription = "送信", tint = Color(0xFFDEE8EF))
-                    }
+            }
+            Row(Modifier.widthIn(max = 680.dp).fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Bottom) {
+                FilledTonalIconButton(
+                    onClick = { keyboard?.hide(); focus.clearFocus(); attachmentMenu = true; onAttach?.run() },
+                    enabled = enabled && !sending, modifier = Modifier.size(48.dp).focusRequester(attachmentFocus),
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = colors.surfaceVariant, contentColor = colors.onSurfaceVariant)) {
+                    Icon(ConversationIcons.Add, contentDescription = "添付ファイルを追加")
+                }
+                BasicTextField(state = draftField, enabled = enabled, interactionSource = fieldInteractions,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp).background(colors.background, fieldShape)
+                        .border(1.dp, if (focused) colors.primary else colors.outline.copy(alpha = 0.75f), fieldShape)
+                        .semantics { contentDescription = "メッセージ入力" }.padding(horizontal = 14.dp, vertical = 10.dp),
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
+                    cursorBrush = SolidColor(colors.primary), lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = 5),
+                    decorator = { inner ->
+                        Box(contentAlignment = Alignment.CenterStart) {
+                            val empty by remember { derivedStateOf(structuralEqualityPolicy()) { draftField.text.isEmpty() } }
+                            if (empty) Text("メッセージを書く", Modifier.clearAndSetSemantics { },
+                                color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyLarge,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            inner()
+                        }
+                    })
+                Box(Modifier.size(48.dp).clip(CircleShape)
+                    .background(if (canSend) colors.primary else colors.surfaceVariant)
+                    .combinedClickable(enabled = canSend, role = Role.Button, onClick = { onSend.run() },
+                        onLongClickLabel = "情景・メタ発言として送る", onLongClick = { onSendNote?.run() }),
+                    contentAlignment = Alignment.Center) {
+                    Icon(ConversationIcons.Send, contentDescription = "送信",
+                        tint = if (canSend) colors.onPrimary else colors.onSurfaceVariant.copy(alpha = 0.55f))
                 }
             }
         }
@@ -430,17 +491,10 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
             verticalAlignment = Alignment.Top) {
             if (!user) {
                 Column(Modifier.width(56.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Box(Modifier.size(48.dp).clip(CircleShape)
+                    PersonPortrait(Modifier.size(48.dp).clip(CircleShape)
                         .clickable(enabled = onIcon != null, role = Role.Button) { onIcon?.run() }
                         .semantics { contentDescription = "${personName.ifEmpty { "人物" }}の記憶を見る" }
-                        .padding(4.dp).background(MaterialTheme.colorScheme.surfaceVariant, CircleShape),
-                        contentAlignment = Alignment.Center) {
-                        val bitmap = personIcon
-                        if (bitmap != null) Image(remember(bitmap) { bitmap.asImageBitmap() }, contentDescription = null,
-                            modifier = Modifier.fillMaxSize().clip(CircleShape))
-                        else Text(if (personName.isEmpty()) "?" else personName.substring(0, personName.offsetByCodePoints(0, 1)),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 18.sp)
-                    }
+                        .padding(4.dp))
                     if (emotion.isNotEmpty()) Text(emotion, fontSize = 11.sp, lineHeight = 15.sp,
                         color = MaterialTheme.colorScheme.primary, textAlign = TextAlign.Center,
                         maxLines = 3, overflow = TextOverflow.Ellipsis,
@@ -449,11 +503,11 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 Spacer(Modifier.width(8.dp))
             }
             SelectionContainer(Modifier.widthIn(max = if (user) bubbleWidth else (bubbleWidth - 64.dp).coerceAtLeast(48.dp))
-                .background(if (user) Color(0xFF2D4434) else Color(0xFF533643), RoundedCornerShape(16.dp))
+                .background(messageBubbleColor(user), messageBubbleShape(user))
                 .padding(horizontal = 12.dp, vertical = 10.dp)) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (typing) TypingIndicator()
-                MessageBody(text)
+                    if (typing) TypingIndicator()
+                    MessageBody(text)
                 }
             }
         }
@@ -538,7 +592,6 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable private fun PanelSurface(value: Panel, modifier: Modifier = Modifier, closeFocus: FocusRequester? = null) {
         val maxHeight = LocalConfiguration.current.screenHeightDp.dp * 0.85f
-        val managed = pages.isNotEmpty()
         val colors = MaterialTheme.colorScheme
         Surface(modifier.fillMaxWidth(if (value.sheet) 1f else 0.88f).heightIn(max = maxHeight)
             .pointerInput(Unit) { detectTapGestures { } },
@@ -564,10 +617,9 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 TextButton(onClick = ::dismiss) {
                     Text(if (value.confirmLabel.isEmpty()) "閉じる" else "キャンセル", fontSize = 14.sp, letterSpacing = 0.sp)
                 }
-                if (value.confirmLabel.isNotEmpty()) TextButton(onClick = { value.confirm?.run() },
-                    modifier = Modifier.padding(4.dp).background(
-                        if (managed) colors.primary else Color(0xFF36594B), RoundedCornerShape(16.dp))) {
-                    Text(value.confirmLabel, fontSize = 14.sp, color = if (managed) colors.onPrimary else colors.onSurface)
+                if (value.confirmLabel.isNotEmpty()) Button(onClick = { value.confirm?.run() },
+                    modifier = Modifier.padding(start = 4.dp)) {
+                    Text(value.confirmLabel, fontSize = 14.sp)
                 }
             }
         }
@@ -617,7 +669,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                         color = if (row.destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
                         fontSize = if (!value.sheet) 16.sp else maxOf(18, textSize - 2).sp, letterSpacing = 0.sp)
                     if (row.description.isNotEmpty()) Text(row.description, fontSize = 13.sp, lineHeight = 20.sp,
-                        color = Color(0xFFADBBC4), modifier = Modifier.padding(top = 4.dp))
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
                 }
             }
         }
@@ -627,7 +679,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         val colors = MaterialTheme.colorScheme
         fields.forEach { field ->
             key(field) {
-                Text(field.label, fontSize = 14.sp, color = Color(0xFFC6D2DA),
+                Text(field.label, fontSize = 14.sp, color = colors.onSurfaceVariant,
                     modifier = Modifier.padding(start = 4.dp, top = 12.dp, bottom = 4.dp))
                 val interactions = remember { MutableInteractionSource() }
                 val focused by interactions.collectIsFocusedAsState()
@@ -635,13 +687,13 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                     singleLine = true, interactionSource = interactions,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
                         .background(colors.background, RoundedCornerShape(16.dp))
-                        .border(1.dp, if (focused) colors.primary else Color(0xFF39434D), RoundedCornerShape(16.dp))
+                        .border(1.dp, if (focused) colors.primary else colors.outline, RoundedCornerShape(16.dp))
                         .heightIn(min = 52.dp).semantics { contentDescription = field.label }
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                     textStyle = TextStyle(color = colors.onSurface, fontSize = 16.sp),
                     cursorBrush = SolidColor(colors.primary),
                     decorationBox = { inner -> Box(contentAlignment = Alignment.CenterStart) {
-                        if (field.value.isEmpty()) Text(if (field.secret) "入力してください" else field.label, color = Color(0xFF9CABB5), fontSize = 16.sp,
+                        if (field.value.isEmpty()) Text(if (field.secret) "入力してください" else field.label, color = colors.onSurfaceVariant, fontSize = 16.sp,
                             letterSpacing = 0.sp)
                         inner()
                     } },
