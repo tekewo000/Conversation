@@ -10,6 +10,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -32,6 +33,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
@@ -105,7 +109,16 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 private val onSend: Runnable, private val onPage: IntConsumer) {
     var enabled by mutableStateOf(false)
     var sending by mutableStateOf(false)
-    var draft by mutableStateOf("")
+    private val draftField = TextFieldState()
+    private val hasDraft by derivedStateOf(structuralEqualityPolicy()) { draftField.text.isNotBlank() }
+    var draft: String
+        get() = draftField.text.toString()
+        @OptIn(ExperimentalFoundationApi::class)
+        set(value) {
+            draftField.setTextAndPlaceCursorAtEnd(value)
+            // Draft replacement also occurs when switching people.
+            draftField.undoState.clearHistory()
+        }
     var attachments by mutableStateOf("")
     var generateImages by mutableStateOf(false)
     var mediaDirectory by mutableStateOf<File?>(null)
@@ -355,17 +368,17 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                         enabled = enabled && !sending, modifier = Modifier.size(48.dp).focusRequester(attachmentFocus)) {
                         Icon(ConversationIcons.Add, contentDescription = "添付ファイルを追加", tint = Color(0xFFDEE8EF))
                     }
-                    BasicTextField(value = draft, onValueChange = { draft = it }, enabled = enabled,
+                    BasicTextField(state = draftField, enabled = enabled,
                         modifier = Modifier.weight(1f).background(Color(0xFF1C2229), RoundedCornerShape(24.dp))
                             .heightIn(min = 48.dp).semantics { contentDescription = "メッセージ入力" }
                             .padding(horizontal = 16.dp, vertical = 10.dp),
                         textStyle = TextStyle(color = Color(0xFFE6EEF2), fontSize = 16.sp),
-                        cursorBrush = SolidColor(Color(0xFFA6C4BC)), maxLines = 5,
-                        decorationBox = { inner -> Box(contentAlignment = Alignment.CenterStart) { inner() } })
+                        cursorBrush = SolidColor(Color(0xFFA6C4BC)), lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = 5),
+                        decorator = { inner -> Box(contentAlignment = Alignment.CenterStart) { inner() } })
                     Spacer(Modifier.width(8.dp))
                     Box(Modifier.size(48.dp).alpha(if (sending) 0.45f else 1f)
                             .background(Color(0xFF36594B), RoundedCornerShape(24.dp))
-                            .combinedClickable(enabled = enabled && !sending && (draft.isNotBlank() || attachments.isNotBlank()),
+                            .combinedClickable(enabled = enabled && !sending && (hasDraft || attachments.isNotBlank()),
                                 role = Role.Button, onClick = { onSend.run() }, onLongClickLabel = "情景・メタ発言として送る",
                                 onLongClick = { onSendNote?.run() }), contentAlignment = Alignment.Center) {
                         Icon(ConversationIcons.Send, contentDescription = "送信", tint = Color(0xFFDEE8EF))

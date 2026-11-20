@@ -31,6 +31,7 @@ import android.view.View
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.view.inspector.WindowInspector
 import androidx.lifecycle.Lifecycle
 import androidx.test.platform.app.InstrumentationRegistry
@@ -282,6 +283,36 @@ class ComposeUiTest {
         }
         compose.onNodeWithContentDescription("送信").assertIsEnabled().performClick()
         compose.runOnIdle { assertEquals(1, sends) }
+    }
+
+    @Test fun rapidJapaneseImeEditsUseTheClearedDraftBeforeTheNextFrame() {
+        compose.runOnUiThread { install(); ui.enabled = true }
+        val input = compose.onNodeWithContentDescription("メッセージ入力")
+        input.performClick().assertIsFocused().performTextInput("送信済み")
+        compose.runOnIdle {
+            val connection = checkNotNull(compose.activity.currentFocus?.onCreateInputConnection(EditorInfo()))
+            ui.draft = ""
+            assertTrue(connection.setComposingText("へ", 1))
+            assertTrue(connection.setComposingText("へん", 1))
+            assertTrue(connection.setComposingText("へんかん", 1))
+            assertTrue(connection.commitText("変換", 1))
+            assertTrue(connection.commitText("できた", 1))
+            assertEquals("変換できた", ui.draft)
+        }
+    }
+
+    @OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)
+    @Test fun undoCannotRestoreAPreviousDraftAfterItIsReplaced() {
+        compose.runOnUiThread { install(); ui.enabled = true }
+        val input = compose.onNodeWithContentDescription("メッセージ入力")
+        input.performClick().performTextInput("前の人物の下書き")
+        compose.runOnIdle { ui.draft = "次の人物の下書き" }
+        input.performKeyInput {
+            keyDown(Key.CtrlLeft)
+            pressKey(Key.Z)
+            keyUp(Key.CtrlLeft)
+        }
+        compose.runOnIdle { assertEquals("次の人物の下書き", ui.draft) }
     }
 
     @Test fun whitespaceDraftCannotBeSent() {
