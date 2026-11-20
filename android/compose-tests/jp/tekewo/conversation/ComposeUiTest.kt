@@ -1,6 +1,7 @@
 package jp.tekewo.conversation
 
 import androidx.activity.ComponentActivity
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
@@ -23,10 +24,13 @@ import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.unit.sp
 import android.view.View
 import android.view.InputDevice
 import android.view.MotionEvent
@@ -54,6 +58,14 @@ class ComposeUiTest {
         ui = ComposeUi(compose.activity, { menus++ }, { sends++ }, { pages.add(it) })
     }
 
+    private fun assertFontSize(message: String, size: Int) {
+        val layouts = mutableListOf<TextLayoutResult>()
+        compose.onNodeWithText(message).performSemanticsAction(SemanticsActions.GetTextLayoutResult) {
+            assertTrue(it(layouts))
+        }
+        assertEquals(size.sp, layouts.single().layoutInput.style.fontSize)
+    }
+
     @Test fun displayPreviewShowsBothSidesOfTheConversation() {
         compose.runOnUiThread {
             install()
@@ -61,6 +73,9 @@ class ComposeUiTest {
         }
         compose.onNodeWithText("おかえり。今日どうだった？").assertIsDisplayed()
         compose.onNodeWithText("聞いてほしいことがあるよ。").assertIsDisplayed()
+        assertFontSize("おかえり。今日どうだった？", 16)
+        compose.runOnIdle { ui.textSize = 24 }
+        assertFontSize("聞いてほしいことがあるよ。", 24)
     }
 
     @Test fun returningFromPagePreservesParentScrollAndTheChatDraft() {
@@ -112,7 +127,7 @@ class ComposeUiTest {
         compose.onNodeWithContentDescription("送信").assertIsNotEnabled()
     }
 
-    @Test fun sceneAndMetaNotesAreShownWithoutAnAssistantBubbleOrTyping() {
+    @Test fun sceneAndMetaNotesAreShownWithoutAnAssistantReplyOrTyping() {
         compose.runOnUiThread {
             install()
             ui.setMessages("""{"first":0,"total":2,"messages":[{"id":1,"role":"user","text":"雨が降り始めた","annotation":"scene"},{"id":2,"role":"user","text":"静かな雰囲気で進める","annotation":"meta"}]}""")
@@ -123,7 +138,7 @@ class ComposeUiTest {
         compose.onNodeWithContentDescription("返答を入力中").assertDoesNotExist()
     }
 
-    @Test fun typingShowsThePersonBeforeTextAndKeepsTheBubbleThroughSaveAndEmotionUpdate() {
+    @Test fun typingKeepsTheReplyThroughSaveAndEmotionUpdate() {
         fun page(emotion: String, reply: Boolean) = """{"first":0,"total":${if (reply) 2 else 1},"assistant_emotion":"$emotion","messages":[{"id":1,"role":"user","text":"こんにちは"}${if (reply) ",{\"id\":2,\"role\":\"assistant\",\"text\":\"返答です\"}" else ""}]}"""
         compose.runOnUiThread {
             install()
@@ -131,7 +146,6 @@ class ComposeUiTest {
             ui.setMessages(page("穏やか", false))
             ui.beginReply()
         }
-        val icon = compose.onNodeWithContentDescription("小春の記憶を見る").fetchSemanticsNode().id
         compose.onNodeWithContentDescription("返答を入力中").assertIsDisplayed()
         compose.runOnUiThread { ui.streaming = "返答です" }
         compose.waitUntil(5_000) { compose.onAllNodes(hasText("返答です")).fetchSemanticsNodes().isNotEmpty() }
@@ -140,10 +154,9 @@ class ComposeUiTest {
         compose.runOnUiThread { ui.setMessages(page("嬉しい", true), true) }
         compose.onNodeWithText("返答です").assertIsDisplayed()
         compose.runOnIdle { assertEquals("", ui.streaming) }
-        assertEquals(icon, compose.onNodeWithContentDescription("小春の記憶を見る").fetchSemanticsNode().id)
         assertEquals(body, compose.onNodeWithText("返答です").fetchSemanticsNode().id)
         compose.runOnUiThread { ui.setMessages(page("ほっとした", true)) }
-        compose.onNodeWithText("ほっとした").assertIsDisplayed()
+        compose.onNodeWithText("ほっとした").assertDoesNotExist()
         assertEquals(body, compose.onNodeWithText("返答です").fetchSemanticsNode().id)
     }
 
@@ -177,11 +190,16 @@ class ComposeUiTest {
 
     @Test fun menuIsAtTopRightAndAttachmentButtonIsAtBottomLeft() {
         compose.runOnUiThread { install(); ui.enabled = true }
-        val menu = compose.onNodeWithContentDescription("メニュー").fetchSemanticsNode().boundsInRoot
+        val menuControl = compose.onNodeWithContentDescription("メニュー")
+        val menu = menuControl.fetchSemanticsNode().boundsInRoot
         val root = compose.onRoot().fetchSemanticsNode().boundsInRoot
         assertTrue(menu.center.x > root.center.x && menu.center.y < root.center.y)
         val attach = compose.onNodeWithContentDescription("添付ファイルを追加").fetchSemanticsNode().boundsInRoot
         assertTrue(attach.center.x < root.center.x && attach.center.y > root.center.y)
+        compose.runOnIdle { ui.personName = "長い会話相手の名前".repeat(6) }
+        assertEquals(menu.top, menuControl.fetchSemanticsNode().boundsInRoot.top, 0.5f)
+        menuControl.performClick()
+        compose.runOnIdle { assertEquals(1, menus) }
     }
 
     @Test fun chatHeaderShowsThePersonAndOpensMemoryBeforeAnyReplies() {
@@ -192,8 +210,9 @@ class ComposeUiTest {
             ui.enabled = true
             ui.onIcon = Runnable { memoryOpens++ }
         }
-        compose.onNodeWithText("小春").assertIsDisplayed()
-        compose.onNodeWithContentDescription("会話相手の記憶を開く").performClick()
+        compose.onNode(hasText("小春") and hasContentDescription("会話相手の記憶を開く"))
+            .assertIsDisplayed().performClick()
+        compose.onNodeWithText("記憶").assertDoesNotExist()
         compose.runOnIdle { assertEquals(1, memoryOpens) }
     }
 
@@ -245,28 +264,27 @@ class ComposeUiTest {
         }
     }
 
-    @Test fun latestAssistantShowsOnlyCurrentFeelingBesideItsIcon() {
-        var opened = 0
+    @Test fun chatAlignsRepliesWithoutRepeatedPortraitsOrFeelings() {
         compose.runOnUiThread {
             install()
+            ui.enabled = true
             ui.personName = "小春"
-            ui.onIcon = Runnable { opened++ }
+            ui.onIcon = Runnable {}
             ui.setMessages("""{"first":0,"total":4,"assistant_emotion":"ほっとして嬉しい","messages":[{"id":1,"role":"user","text":"試合が終わったよ"},{"id":2,"role":"assistant","text":"お疲れさま"},{"id":3,"role":"user","text":"ありがとう"},{"id":4,"role":"assistant","text":"一緒に喜べて嬉しいよ"}]}""")
         }
-        compose.onNodeWithText("ほっとして嬉しい").assertIsDisplayed()
-        compose.onAllNodes(hasText("ほっとして嬉しい")).fetchSemanticsNodes().let { assertEquals(1, it.size) }
-        compose.onNodeWithText("一緒に喜べて嬉しいよ").assertIsDisplayed()
-        compose.onAllNodes(hasContentDescription("小春の記憶を見る")).fetchSemanticsNodes().let { assertEquals(2, it.size) }
+        compose.onNodeWithText("ほっとして嬉しい").assertDoesNotExist()
+        compose.onNodeWithContentDescription("小春の記憶を見る").assertDoesNotExist()
+        compose.onNodeWithContentDescription("会話相手の記憶を開く").assertIsDisplayed()
+        val reply = compose.onNodeWithText("一緒に喜べて嬉しいよ").assertIsDisplayed()
+        val sent = compose.onNodeWithText("ありがとう").assertIsDisplayed()
+        val rootCenter = compose.onRoot().fetchSemanticsNode().boundsInRoot.center.x
+        assertTrue(reply.fetchSemanticsNode().boundsInRoot.center.x < rootCenter)
+        assertTrue(sent.fetchSemanticsNode().boundsInRoot.center.x > rootCenter)
+        assertFontSize("一緒に喜べて嬉しいよ", 16)
         InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(
             "screencap -p /data/local/tmp/conversation-avatar-chat.png").use {
             java.io.FileInputStream(it.fileDescriptor).readBytes()
         }
-        compose.onAllNodes(hasContentDescription("小春の記憶を見る"))[0].performClick()
-        compose.runOnIdle { assertEquals(1, opened) }
-        compose.runOnUiThread {
-            ui.setMessages("""{"first":0,"total":1,"assistant_emotion":"","messages":[{"id":1,"role":"assistant","text":"続けよう"}]}""")
-        }
-        compose.onNodeWithText("ほっとして嬉しい").assertDoesNotExist()
     }
 
     @Test fun noPersonDisablesComposerButLeavesMenuAvailable() {
@@ -444,6 +462,9 @@ class ComposeUiTest {
         compose.onNodeWithText("人物の選択").assertIsDisplayed()
         compose.onNodeWithContentDescription("メッセージ入力").assertDoesNotExist()
         compose.onNodeWithContentDescription("送信").assertDoesNotExist()
+        compose.onNodeWithContentDescription("メニュー").assertDoesNotExist()
+        compose.onNodeWithContentDescription("閉じる").performClick()
+        compose.onNodeWithContentDescription("メニュー").assertIsDisplayed()
     }
 
     @OptIn(androidx.compose.ui.test.ExperimentalTestApi::class)

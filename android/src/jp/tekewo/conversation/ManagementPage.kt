@@ -62,7 +62,7 @@ internal fun ManagementPage(
             Row(Modifier.widthIn(max = 640.dp).fillMaxWidth().heightIn(min = 60.dp).padding(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack, modifier = Modifier.size(48.dp).focusRequester(backFocus)) {
-                    Icon(ConversationIcons.Back, contentDescription = "戻る", tint = pageAccent)
+                    Icon(ConversationIcons.Back, contentDescription = "戻る", tint = pageMuted)
                 }
                 Text(if (episode) "体験" else panel.title, Modifier.weight(1f).semantics { heading() },
                     style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
@@ -79,10 +79,14 @@ internal fun ManagementPage(
                         Text(panel.message, Modifier.padding(bottom = 20.dp), color = pageMuted,
                             style = MaterialTheme.typography.bodyLarge)
                     }
+                    val memoryLinks = panel.key == "memory" && panel.featuredRows.isNotEmpty()
+                    if (memoryLinks) HorizontalDivider(color = pageRule)
                     panel.featuredRows.forEach { row ->
-                        FeatureRow(row)
-                        Spacer(Modifier.height(8.dp))
+                        FeatureRow(row, ruled = memoryLinks)
+                        if (memoryLinks) HorizontalDivider(color = pageRule)
+                        else Spacer(Modifier.height(8.dp))
                     }
+                    if (memoryLinks) Spacer(Modifier.height(8.dp))
                     panel.memoryState?.let { CurrentMemory(it) }
                     if (panel.key == "recent" && panel.blocks.isNotEmpty()) Transcript(panel.blocks)
                     else panel.blocks.forEach { block -> PageBlock(block) }
@@ -99,7 +103,7 @@ internal fun ManagementPage(
 @Composable
 private fun PageIdentity(name: String, portrait: Bitmap?, prominent: Boolean) {
     Row(Modifier.fillMaxWidth().padding(bottom = 16.dp)
-        .then(if (prominent) Modifier.background(pageSurface, pageShape).padding(14.dp) else Modifier),
+        .then(if (prominent) Modifier.background(pageSurface, pageShape).padding(12.dp) else Modifier),
         horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(if (prominent) 48.dp else 28.dp).clip(CircleShape)
             .background(conversationColors.surfaceVariant), contentAlignment = Alignment.Center) {
@@ -115,14 +119,15 @@ private fun PageIdentity(name: String, portrait: Bitmap?, prominent: Boolean) {
 }
 
 @Composable
-private fun FeatureRow(row: ComposeUi.Row) {
-    Row(Modifier.fillMaxWidth().clip(pageShape).background(pageSurface)
+private fun FeatureRow(row: ComposeUi.Row, ruled: Boolean) {
+    val surface = if (ruled) Modifier else Modifier.clip(pageShape).background(pageSurface)
+    Row(Modifier.fillMaxWidth().then(surface)
         .clickable(role = Role.Button) { row.action.run() }.heightIn(min = 68.dp)
-        .padding(horizontal = 16.dp, vertical = 12.dp),
+        .padding(start = 16.dp, end = if (ruled) 0.dp else 16.dp, top = 12.dp, bottom = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
         if (row.icon >= 0) {
             val icon = if (row.icon == 5) ConversationIcons.Link else ConversationIcons.menu(row.icon)
-            Icon(icon, null, tint = pageAccent, modifier = Modifier.size(22.dp))
+            Icon(icon, null, tint = pageMuted, modifier = Modifier.size(20.dp))
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(row.label, color = pageInk, style = MaterialTheme.typography.titleMedium,
@@ -138,7 +143,7 @@ private fun FeatureRow(row: ComposeUi.Row) {
 private fun CurrentMemory(state: ComposeUi.MemoryState) {
     Column(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 20.dp)
         .background(pageSurface, pageShape).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("現在の状態", Modifier.semantics { heading() }, color = pageAccent,
+        Text("現在の状態", Modifier.semantics { heading() }, color = pageMuted,
             style = MaterialTheme.typography.titleMedium)
         SelectionContainer {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -154,7 +159,7 @@ private fun CurrentMemory(state: ComposeUi.MemoryState) {
 private fun MemoryField(label: String, body: String, prominent: Boolean = false) {
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(label, color = pageMuted, style = MaterialTheme.typography.labelMedium)
-        Text(body.ifBlank { "未記録" }, color = pageInk,
+        Text(body.ifBlank { "未記録" }, color = if (prominent && body.isNotBlank()) pageAccent else pageInk,
             style = if (prominent) MaterialTheme.typography.titleLarge else MaterialTheme.typography.bodyMedium)
     }
 }
@@ -164,8 +169,8 @@ private fun Transcript(blocks: List<ComposeUi.Block>) {
     Column(Modifier.fillMaxWidth().background(pageSurface, pageShape).padding(horizontal = 16.dp)) {
         blocks.forEachIndexed { index, block ->
             if (index > 0) HorizontalDivider(color = pageRule)
-            Column(Modifier.fillMaxWidth().padding(vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(block.title, Modifier.semantics { heading() }, color = pageAccent,
+            Column(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(block.title, Modifier.semantics { heading() }, color = pageMuted,
                     style = MaterialTheme.typography.labelLarge)
                 SelectionContainer { Text(block.text, style = MaterialTheme.typography.bodyLarge) }
             }
@@ -178,7 +183,7 @@ private fun PageBlock(block: ComposeUi.Block) {
     HorizontalDivider(color = pageRule)
     Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(block.title, Modifier.semantics { heading() }, color = pageAccent,
+        Text(block.title, Modifier.semantics { heading() }, color = pageMuted,
             style = MaterialTheme.typography.titleSmall)
         SelectionContainer { Text(block.text, color = pageInk, style = MaterialTheme.typography.bodyLarge) }
     }
@@ -191,28 +196,28 @@ private fun PageRows(panel: ComposeUi.Panel) {
         if (index == 0 || row.section != panel.rows[index - 1].section) {
             if (index > 0) Spacer(Modifier.height(16.dp))
             if (row.section.isNotEmpty()) Text(row.section, Modifier.padding(bottom = 8.dp).semantics { heading() },
-                color = pageAccent, style = MaterialTheme.typography.titleSmall)
+                color = pageMuted, style = MaterialTheme.typography.titleSmall)
         }
         HorizontalDivider(color = pageRule)
         Row(Modifier.fillMaxWidth()
             .semantics { if (panel.choices || row.checked) selected = row.checked }
             .clickable(role = if (panel.choices) Role.RadioButton else Role.Button) { row.action.run() }
-            .heightIn(min = 58.dp).padding(vertical = if (episodes) 14.dp else 10.dp),
+            .heightIn(min = 56.dp).padding(vertical = if (episodes) 16.dp else 12.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
             val ink = if (row.destructive) MaterialTheme.colorScheme.error else pageInk
             if (panel.choices) RadioButton(selected = row.checked, onClick = null)
-            else if (row.icon >= 0) Box(Modifier.size(36.dp).background(pageSurface, RoundedCornerShape(10.dp)),
+            else if (row.icon >= 0) Box(Modifier.size(36.dp).background(pageSurface, RoundedCornerShape(8.dp)),
                 contentAlignment = Alignment.Center) {
                 val icon = when {
                     row.icon == 2 || row.icon == 5 && panel.key == "people" -> ConversationIcons.Person
                     row.icon == 3 && panel.key == "settings" -> ConversationIcons.Picture
                     else -> ConversationIcons.menu(row.icon)
                 }
-                val tint = if (row.destructive) ink else pageAccent
+                val tint = if (row.destructive) ink else pageMuted
                 Icon(icon, null, tint = tint,
-                    modifier = Modifier.size(19.dp))
+                    modifier = Modifier.size(20.dp))
             }
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(row.label, color = ink,
                     style = if (episodes) MaterialTheme.typography.titleLarge else MaterialTheme.typography.titleMedium)
                 if (row.description.isNotEmpty()) Text(row.description, color = pageMuted,
@@ -228,30 +233,35 @@ private fun PageRows(panel: ComposeUi.Panel) {
 private fun DisplayPreview(textSize: Int, messageGap: Int) {
     val style = chatTextStyle(textSize)
     Column(Modifier.fillMaxWidth().padding(bottom = 20.dp).border(1.dp, pageRule, pageShape).padding(16.dp)) {
-        Text("プレビュー", color = pageAccent, style = MaterialTheme.typography.labelLarge,
+        Text("プレビュー", color = pageMuted, style = MaterialTheme.typography.labelLarge,
             modifier = Modifier.padding(bottom = 12.dp).semantics { heading() })
         Text("おかえり。今日どうだった？", style = style,
-            modifier = Modifier.widthIn(max = 360.dp)
-                .background(messageBubbleColor(false), messageBubbleShape(false)).padding(12.dp))
+            modifier = Modifier.widthIn(max = 360.dp).messageBubble(user = false))
         Spacer(Modifier.height(messageGap.dp))
         Text("聞いてほしいことがあるよ。", style = style,
             modifier = Modifier.align(Alignment.End).widthIn(max = 360.dp)
-                .background(messageBubbleColor(true), messageBubbleShape(true)).padding(12.dp))
+                .messageBubble(user = true))
     }
 }
 
 @Composable
 private fun DisplaySlider(setting: ComposeUi.Setting) {
     HorizontalDivider(color = pageRule)
-    Row(Modifier.fillMaxWidth().padding(top = 10.dp),
+    Row(Modifier.fillMaxWidth().padding(top = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(setting.label, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-        Text(setting.value.toString(), color = pageAccent, style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.background(pageSurface, CircleShape).padding(horizontal = 10.dp, vertical = 4.dp))
+        Text(setting.value.toString(), color = pageMuted, style = MaterialTheme.typography.bodyMedium)
     }
     Slider(value = setting.value.toFloat(), onValueChange = {
         setting.value = it.roundToInt()
         setting.change.accept(setting.value)
     }, valueRange = setting.min.toFloat()..setting.max.toFloat(), steps = setting.max - setting.min - 1,
+        colors = SliderDefaults.colors(
+            thumbColor = pageAccent,
+            activeTrackColor = conversationColors.outline,
+            inactiveTrackColor = conversationColors.surfaceVariant,
+            activeTickColor = pageBackground.copy(alpha = 0.45f),
+            inactiveTickColor = pageMuted.copy(alpha = 0.24f),
+        ),
         modifier = Modifier.fillMaxWidth().semantics { contentDescription = setting.label })
 }

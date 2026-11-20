@@ -1,7 +1,10 @@
 package jp.tekewo.conversation
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
@@ -23,12 +26,10 @@ internal val conversationColors = darkColorScheme(
     error = Color(0xFFFFB4AB),
 )
 
-internal fun messageBubbleColor(user: Boolean) =
-    if (user) conversationColors.secondaryContainer else conversationColors.surface
+private val assistantBubble = Color(0xFF59414D)
+private val userBubble = Color(0xFF383D45)
+private val bubbleShape = RoundedCornerShape(12.dp)
 
-internal fun messageBubbleShape(user: Boolean) = RoundedCornerShape(
-    topStart = if (user) 16.dp else 4.dp,
-    topEnd = if (user) 4.dp else 16.dp,
-    bottomStart = 16.dp,
-    bottomEnd = 16.dp,
-)
+internal fun Modifier.messageBubble(user: Boolean) =
+    background(if (user) userBubble else assistantBubble, bubbleShape)
+        .padding(horizontal = 12.dp, vertical = 8.dp)

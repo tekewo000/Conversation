@@ -519,8 +519,8 @@ public final class MainActivity extends ComponentActivity {
         ComposeUi.Panel menu = page("管理", "management", true);
         menu.onResume = this::showHistoryMenu;
         menu.rows.add(entry("記憶", MemoryWork.isRunning() ? "会話を整理しています" : "最近の会話と、体験の記録", 3, this::showMemory));
-        menu.rows.add(entry("人物", activePerson == null ? "名前だけでも始められます" : "切り替え・アイコン・追加と読み込み", 2, this::showPeople));
-        menu.rows.add(entry("設定", connection.hasSession() ? "ChatGPT接続済み · 応答・表示・画像生成" : "ChatGPTの接続・応答・表示・画像生成", 4, this::showSettings));
+        menu.rows.add(entry("人物", activePerson == null ? "名前だけでも始められます" : "会話相手の切り替え・管理", 2, this::showPeople));
+        menu.rows.add(entry("設定", connection.hasSession() ? "ChatGPT接続済み" : "接続・応答・表示・画像生成", 4, this::showSettings));
         menu.rows.add(entry("バックアップ", activePerson == null || activePerson.repository == null ? "端末の保存データ・ZIP書き出し" : "GitHubへの保存・ZIP書き出し", 1, this::showGitBackup));
         ComposeUi.Row latest = entry("最新の会話へ", "チャットの最新の発言を表示", 0, () -> {
             compose.closePages(); pageFirst = -1; scrollOnRefresh = true; refreshMessages();
@@ -1062,7 +1062,7 @@ public final class MainActivity extends ComponentActivity {
             startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*")
                     .addCategory(Intent.CATEGORY_OPENABLE), 83);
         }, 1));
-        panel.rows.add(new ComposeUi.Row("名前のアイコンに戻す", () -> {
+        panel.rows.add(new ComposeUi.Row("アイコン画像を外す", () -> {
             final PersonRegistry.Person person = activePerson;
             worker.execute(() -> {
                 try { people.setIcon(person.id, null); ui(() -> { refreshPersonIcon(); scheduleGitSync(); }); }

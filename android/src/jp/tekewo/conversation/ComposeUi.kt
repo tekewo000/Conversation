@@ -73,7 +73,6 @@ import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
@@ -98,10 +97,9 @@ import kotlinx.coroutines.withContext
 
 private val chatFont = FontFamily(Font(R.font.noto_sans_jp_regular))
 
-// ImGui sizes Noto's 1448-unit ascent/descent; Compose sizes its 1000-unit em.
 internal fun chatTextStyle(textSize: Int) = TextStyle(
-    color = Color.White, fontSize = (textSize * (1000f / 1448f)).sp,
-    fontFamily = chatFont, lineHeight = textSize.sp, letterSpacing = 0.sp
+    color = Color.White, fontSize = textSize.sp,
+    fontFamily = chatFont, lineHeight = (textSize * 1.45f).sp, letterSpacing = 0.sp
 )
 
 /** Observable UI only; the activity retains storage, authentication and network work. */
@@ -133,7 +131,6 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     var personName by mutableStateOf("")
     var personIcon by mutableStateOf<Bitmap?>(null)
     var onIcon by mutableStateOf<Runnable?>(null)
-    private var feeling by mutableStateOf("")
     private var messages by mutableStateOf(emptyList<Message>())
     private var first by mutableIntStateOf(0)
     private var total by mutableIntStateOf(0)
@@ -253,7 +250,6 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         }
         first = page.getInt("first")
         total = page.getInt("total")
-        feeling = page.optString("assistant_emotion", "")
         messages = next
         if (replySaved) cancelReply()
         if (pageDirection != 0) {
@@ -309,15 +305,14 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 if (failure.isNotEmpty()) Text(failure, Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
                     color = MaterialTheme.colorScheme.error)
                 BoxWithConstraints(Modifier.weight(1f).widthIn(max = 680.dp).fillMaxWidth().align(Alignment.CenterHorizontally)) {
-                    val bubbleWidth = (maxWidth - 32.dp).coerceAtLeast(0.dp) * 0.88f
+                    val messageWidth = (maxWidth - 40.dp).coerceAtLeast(0.dp) * 0.8f
                     val latest = first + messages.size >= total
-                    val latestAssistant = messages.lastOrNull { it.role == "assistant" }?.id
                     val pending = latest && (replying || streaming.isNotEmpty())
                     val visible = if (pending) {
                         listOf(Message(-1, "assistant", streaming, if (replying) replyKey else Long.MIN_VALUE)) + messages.asReversed()
                     } else messages.asReversed()
                     LazyColumn(Modifier.fillMaxSize(), state = list, reverseLayout = true,
-                        contentPadding = PaddingValues(16.dp),
+                        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(messageGap.dp)) {
                         if (!latest) item("newer") {
                             TextButton(onClick = {
@@ -326,8 +321,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                             }) { Text("新しい会話へ") }
                         }
                         items(visible, key = { it.key }) { message ->
-                            MessageText(message.text, message.role == "user", bubbleWidth,
-                                if (latest && (message.id == -1L || !pending && message.id == latestAssistant)) feeling else "",
+                            MessageText(message.text, message.role == "user", messageWidth,
                                 typing = message.id == -1L && message.text.isEmpty(), annotation = message.annotation)
                         }
                         if (first > 0) item("older") {
@@ -347,39 +341,34 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         val keyboard = LocalSoftwareKeyboardController.current
         val focus = LocalFocusManager.current
         val colors = MaterialTheme.colorScheme
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Row(Modifier.widthIn(max = 680.dp).fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                PersonPortrait(Modifier.size(40.dp))
-                Text(personName.ifBlank { "会話" }, Modifier.weight(1f).semantics { heading() },
-                    color = colors.onSurface, style = MaterialTheme.typography.titleLarge,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis)
-                if (enabled && personName.isNotBlank() && onIcon != null) {
-                    TextButton(onClick = { onIcon?.run() }, modifier = Modifier.heightIn(min = 48.dp)
-                        .semantics { contentDescription = "会話相手の記憶を開く" }) {
-                        Text("記憶")
+        val memoryAction = onIcon.takeIf { enabled && personName.isNotBlank() }
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+            Box(Modifier.widthIn(max = 680.dp).fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+                Row(Modifier.fillMaxWidth().padding(end = 56.dp).heightIn(min = 48.dp)
+                    .then(if (memoryAction == null) Modifier else Modifier
+                        .clickable(role = Role.Button) { memoryAction.run() }
+                        .semantics { contentDescription = "会話相手の記憶を開く" })
+                    .padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val bitmap = personIcon
+                    if (bitmap != null && personName.isNotBlank()) {
+                        Image(remember(bitmap) { bitmap.asImageBitmap() }, contentDescription = null,
+                            contentScale = ContentScale.Crop, modifier = Modifier.size(28.dp).clip(CircleShape))
                     }
+                    Text(personName.ifBlank { "会話" }, Modifier.semantics { heading() },
+                        color = colors.onSurface, style = MaterialTheme.typography.titleMedium,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
-                IconButton(onClick = { keyboard?.hide(); focus.clearFocus(); attachmentMenu = false; onMenu.run() },
-                    modifier = Modifier.size(48.dp).focusRequester(menuFocus)) {
-                    Icon(ConversationIcons.Menu, contentDescription = "メニュー", tint = colors.onSurfaceVariant)
+                SmallFloatingActionButton(
+                    onClick = { keyboard?.hide(); focus.clearFocus(); attachmentMenu = false; onMenu.run() },
+                    modifier = Modifier.align(Alignment.TopEnd).size(48.dp).focusRequester(menuFocus),
+                    shape = CircleShape,
+                    containerColor = colors.surfaceVariant,
+                    contentColor = colors.onSurfaceVariant,
+                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 2.dp),
+                ) {
+                    Icon(ConversationIcons.Menu, contentDescription = "メニュー")
                 }
-            }
-            HorizontalDivider(color = colors.outlineVariant)
-        }
-    }
-
-    @Composable private fun PersonPortrait(modifier: Modifier) {
-        val colors = MaterialTheme.colorScheme
-        Box(modifier.background(colors.surfaceVariant, CircleShape), contentAlignment = Alignment.Center) {
-            val bitmap = personIcon
-            when {
-                bitmap != null -> Image(remember(bitmap) { bitmap.asImageBitmap() }, contentDescription = null,
-                    contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize().clip(CircleShape))
-                personName.isNotBlank() -> Text(personName.substring(0, personName.offsetByCodePoints(0, 1)),
-                    modifier = Modifier.clearAndSetSemantics { }, color = colors.primary,
-                    style = MaterialTheme.typography.titleMedium)
-                else -> Icon(ConversationIcons.Person, contentDescription = null, tint = colors.onSurfaceVariant)
             }
         }
     }
@@ -390,10 +379,8 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         val colors = MaterialTheme.colorScheme
         val fieldInteractions = remember { MutableInteractionSource() }
         val focused by fieldInteractions.collectIsFocusedAsState()
-        val fieldShape = RoundedCornerShape(16.dp)
         val canSend = enabled && !sending && (hasDraft || attachments.isNotBlank())
-        Column(Modifier.fillMaxWidth().background(colors.surface), horizontalAlignment = Alignment.CenterHorizontally) {
-            HorizontalDivider(color = colors.outlineVariant)
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
             if (attachments.isNotBlank()) {
                 Row(Modifier.widthIn(max = 680.dp).fillMaxWidth().heightIn(max = 180.dp)
                     .horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 8.dp),
@@ -415,35 +402,33 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
             }
             Row(Modifier.widthIn(max = 680.dp).fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Bottom) {
-                FilledTonalIconButton(
+                IconButton(
                     onClick = { keyboard?.hide(); focus.clearFocus(); attachmentMenu = true; onAttach?.run() },
                     enabled = enabled && !sending, modifier = Modifier.size(48.dp).focusRequester(attachmentFocus),
-                    colors = IconButtonDefaults.filledTonalIconButtonColors(
-                        containerColor = colors.surfaceVariant, contentColor = colors.onSurfaceVariant)) {
+                    colors = IconButtonDefaults.iconButtonColors(contentColor = colors.onSurfaceVariant)) {
                     Icon(ConversationIcons.Add, contentDescription = "添付ファイルを追加")
                 }
                 BasicTextField(state = draftField, enabled = enabled, interactionSource = fieldInteractions,
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp).background(colors.background, fieldShape)
-                        .border(1.dp, if (focused) colors.primary else colors.outline.copy(alpha = 0.75f), fieldShape)
-                        .semantics { contentDescription = "メッセージ入力" }.padding(horizontal = 14.dp, vertical = 10.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                        .semantics { contentDescription = "メッセージ入力" }.padding(horizontal = 4.dp, vertical = 12.dp),
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
                     cursorBrush = SolidColor(colors.primary), lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = 5),
                     decorator = { inner ->
                         Box(contentAlignment = Alignment.CenterStart) {
                             val empty by remember { derivedStateOf(structuralEqualityPolicy()) { draftField.text.isEmpty() } }
-                            if (empty) Text("メッセージを書く", Modifier.clearAndSetSemantics { },
-                                color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyLarge,
+                            if (empty) Text("メッセージ", Modifier.clearAndSetSemantics { },
+                                color = if (focused) colors.onSurface else colors.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodyLarge,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                             inner()
                         }
                     })
                 Box(Modifier.size(48.dp).clip(CircleShape)
-                    .background(if (canSend) colors.primary else colors.surfaceVariant)
                     .combinedClickable(enabled = canSend, role = Role.Button, onClick = { onSend.run() },
                         onLongClickLabel = "情景・メタ発言として送る", onLongClick = { onSendNote?.run() }),
                     contentAlignment = Alignment.Center) {
                     Icon(ConversationIcons.Send, contentDescription = "送信",
-                        tint = if (canSend) colors.onPrimary else colors.onSurfaceVariant.copy(alpha = 0.55f))
+                        tint = if (canSend) colors.primary else colors.onSurfaceVariant.copy(alpha = 0.45f))
                 }
             }
         }
@@ -478,33 +463,17 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         }
     }
 
-    @Composable private fun MessageText(text: String, user: Boolean, bubbleWidth: Dp, emotion: String = "", typing: Boolean = false, annotation: String = "") {
+    @Composable private fun MessageText(text: String, user: Boolean, messageWidth: Dp, typing: Boolean = false, annotation: String = "") {
         if (annotation.isNotEmpty()) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(if (annotation == "scene") "情景 · 返信なし" else "メタ · 返信なし", fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(bottom = 4.dp))
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 4.dp))
                 SelectionContainer { MessageBody(text) }
             }
             return
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start,
-            verticalAlignment = Alignment.Top) {
-            if (!user) {
-                Column(Modifier.width(56.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    PersonPortrait(Modifier.size(48.dp).clip(CircleShape)
-                        .clickable(enabled = onIcon != null, role = Role.Button) { onIcon?.run() }
-                        .semantics { contentDescription = "${personName.ifEmpty { "人物" }}の記憶を見る" }
-                        .padding(4.dp))
-                    if (emotion.isNotEmpty()) Text(emotion, fontSize = 11.sp, lineHeight = 15.sp,
-                        color = MaterialTheme.colorScheme.primary, textAlign = TextAlign.Center,
-                        maxLines = 3, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.fillMaxWidth().padding(top = 2.dp))
-                }
-                Spacer(Modifier.width(8.dp))
-            }
-            SelectionContainer(Modifier.widthIn(max = if (user) bubbleWidth else (bubbleWidth - 64.dp).coerceAtLeast(48.dp))
-                .background(messageBubbleColor(user), messageBubbleShape(user))
-                .padding(horizontal = 12.dp, vertical = 10.dp)) {
+        Box(Modifier.fillMaxWidth(), contentAlignment = if (user) Alignment.TopEnd else Alignment.TopStart) {
+            SelectionContainer(Modifier.widthIn(max = messageWidth).messageBubble(user)) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (typing) TypingIndicator()
                     MessageBody(text)

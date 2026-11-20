@@ -79,7 +79,7 @@ class MainActivityComposeTest {
         compose.waitUntil(10_000) { PersonRegistry(context.filesDir).active()?.displayName=="短い表示名 😀" }
         compose.onNodeWithText("短い表示名 😀").assertExists()
         compose.activityRule.scenario.recreate()
-        compose.onNodeWithContentDescription("短い表示名 😀の記憶を見る").assertExists()
+        compose.onNodeWithContentDescription("会話相手の記憶を開く").assertTextContains("短い表示名 😀")
         compose.onNodeWithContentDescription("メッセージ入力").assertTextContains("名前変更中の下書き")
         val after=PersonRegistry(context.filesDir).active()!!
         assertEquals(before.id,after.id);assertEquals(before.name,after.name)
@@ -286,8 +286,11 @@ class MainActivityComposeTest {
     }
 
     private fun openShortTermMemory() {
-        val displayName = PersonRegistry(context.filesDir).active()!!.displayName
-        compose.onAllNodes(androidx.compose.ui.test.hasContentDescription("${displayName}の記憶を見る"))[0].performClick()
+        val header = "会話相手の記憶を開く"
+        compose.waitUntil(10_000) {
+            compose.onAllNodes(hasContentDescription(header) and isEnabled()).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithContentDescription(header).performClick()
         compose.waitUntil(10_000) {
             compose.onAllNodes(androidx.compose.ui.test.hasText("短期記憶（直近30往復）")).fetchSemanticsNodes().isNotEmpty()
         }
@@ -467,7 +470,7 @@ class MainActivityComposeTest {
         } finally { context.contentResolver.delete(uri,null,null) }
     }
 
-    @Test fun savedReplyKeepsItsBubbleWhileSnapshotAndPageChangeArePending() {
+    @Test fun savedReplyKeepsItsTextWhileSnapshotAndPageChangeArePending() {
         val people = PersonRegistry(context.filesDir)
         previousPerson = people.active()?.id
         val preferences = context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE)
@@ -506,7 +509,7 @@ class MainActivityComposeTest {
         } finally { release.countDown() }
     }
 
-    @Test fun replyImmediatelyUpdatesIconDetailsBeforeMemoryExtractionAndSurvivesRecreation() {
+    @Test fun replyImmediatelyUpdatesMemoryDetailsBeforeExtractionAndSurvivesRecreation() {
         val people = PersonRegistry(context.filesDir)
         previousPerson = people.active()?.id
         val preferences = context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE)
@@ -533,16 +536,14 @@ class MainActivityComposeTest {
         val pending = MainActivity::class.java.getDeclaredMethod("nativePendingJob").apply { isAccessible = true }
         assertTrue(org.json.JSONObject(pending.invoke(null) as String).getLong("id") > 0)
         compose.waitUntil(10_000) {
-            compose.onAllNodes(androidx.compose.ui.test.hasText("嬉しい")).fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodes(androidx.compose.ui.test.hasText("やったね！")).fetchSemanticsNodes().isNotEmpty()
         }
+        compose.onNodeWithText("嬉しい").assertDoesNotExist()
         openShortTermMemory()
         for (record in listOf("感情", "嬉しい", "理由", "勝ったと聞いた", "状況", "試合結果を一緒に喜んだ")) {
             compose.onNodeWithText(record).assertExists()
         }
         compose.activityRule.scenario.recreate()
-        compose.waitUntil(10_000) {
-            compose.onAllNodes(androidx.compose.ui.test.hasText("嬉しい")).fetchSemanticsNodes().isNotEmpty()
-        }
         openShortTermMemory()
         compose.onNodeWithText("勝ったと聞いた", substring = true).assertExists()
     }
@@ -628,8 +629,8 @@ class MainActivityComposeTest {
             assertEquals("", apply.invoke(null, 1L, payload.toString().toByteArray()))
         }
         compose.activityRule.scenario.recreate()
-        compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("ほっとして嬉しい")).fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("ほっとして嬉しい").assertExists()
+        compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("ほっとした。一緒に喜べて嬉しい")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("ほっとして嬉しい").assertDoesNotExist()
         compose.onNodeWithText("試合終了の報告").assertDoesNotExist()
         compose.onNodeWithText("一緒に喜んだ会話").assertDoesNotExist()
         openShortTermMemory()
@@ -673,7 +674,6 @@ class MainActivityComposeTest {
             add.invoke(null, "assistant".toByteArray(), "recent-reply-$i".toByteArray())
         }
         compose.activityRule.scenario.recreate()
-        compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("ほっとして嬉しい")).fetchSemanticsNodes().isNotEmpty() }
         openShortTermMemory()
         compose.onNodeWithText("残り64発言", substring = true).assertExists()
         compose.onNodeWithText("短期記憶（直近30往復）").performClick()
@@ -696,9 +696,11 @@ class MainActivityComposeTest {
         compose.onNodeWithText("人物").performClick()
         compose.onNodeWithText("人物アイコンを設定").performClick()
         compose.onNodeWithText("写真・画像から選ぶ").assertExists()
-        compose.onNodeWithText("名前のアイコンに戻す").performClick()
+        compose.onNodeWithText("アイコン画像を外す").performClick()
         compose.waitUntil(10_000) { PersonRegistry(context.filesDir).icon(person.id).isEmpty() }
         repeat(3) { compose.onNodeWithContentDescription("戻る").performClick() }
+        compose.onNodeWithText("ほっとして嬉しい").assertDoesNotExist()
+        openShortTermMemory()
         compose.onNodeWithText("ほっとして嬉しい").assertExists()
     }
 
@@ -775,23 +777,8 @@ class MainActivityComposeTest {
         } finally { ConnectionStore(context).save(saved) }
     }
 
-    @Test fun iconShowsEmptyShortTermMemoryWithoutInventingDetails() {
-        val people = PersonRegistry(context.filesDir)
-        previousPerson = people.active()?.id
-        val preferences = context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE)
-        previousTextSize = preferences.getInt("text_size", 16)
-        previousGap = preferences.getInt("message_gap", 12)
-        val person = people.stage(PersonDocument.named(name), null)
-        people.commit(person)
-        compose.activityRule.scenario.recreate()
-        val add = MainActivity::class.java.getDeclaredMethod("nativeAddMessage", ByteArray::class.java, ByteArray::class.java)
-            .apply { isAccessible = true }
-        add.invoke(null, "assistant".toByteArray(), "こんにちは".toByteArray())
-        compose.activityRule.scenario.recreate()
-        compose.waitUntil(10_000) {
-            compose.onAllNodes(androidx.compose.ui.test.hasContentDescription("${name}の記憶を見る"))
-                .fetchSemanticsNodes().isNotEmpty()
-        }
+    @Test fun personHeaderShowsEmptyShortTermMemoryWithoutInventingDetails() {
+        createManagementPerson()
         openShortTermMemory()
         assertEquals(3, compose.onAllNodes(androidx.compose.ui.test.hasText("未記録")).fetchSemanticsNodes().size)
         compose.onNodeWithText("中期記憶（0件）").performClick()
