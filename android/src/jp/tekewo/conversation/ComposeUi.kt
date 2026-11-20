@@ -75,6 +75,7 @@ import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
@@ -491,24 +492,25 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
             return
         }
         Box(Modifier.fillMaxWidth(), contentAlignment = if (user) Alignment.TopEnd else Alignment.TopStart) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row {
                 if (!user) {
-                    PersonPortrait(Modifier.size(48.dp).clip(CircleShape)
-                        .clickable(enabled = onIcon != null, role = Role.Button) { onIcon?.run() }
-                        .semantics { contentDescription = "${personName.ifBlank { "会話相手" }}の記憶を見る" }
-                        .padding(6.dp))
-                }
-                Column(Modifier.widthIn(max = messageWidth)) {
-                    SelectionContainer(Modifier.messageBubble(user)) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (typing) TypingIndicator()
-                            MessageBody(text)
+                    Column(Modifier.width(56.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        PersonPortrait(Modifier.size(48.dp).clip(CircleShape)
+                            .clickable(enabled = onIcon != null, role = Role.Button) { onIcon?.run() }
+                            .semantics { contentDescription = "${personName.ifBlank { "会話相手" }}の記憶を見る" }
+                            .padding(6.dp))
+                        if (emotion.isNotBlank()) {
+                            Text(emotion, Modifier.fillMaxWidth().padding(start = 2.dp, end = 2.dp, top = 2.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.sp),
+                                textAlign = TextAlign.Center, maxLines = 4, overflow = TextOverflow.Ellipsis)
                         }
                     }
-                    if (emotion.isNotBlank()) {
-                        Text(emotion, Modifier.padding(start = 12.dp, top = 4.dp),
-                            color = MaterialTheme.colorScheme.primary,
-                            style = MaterialTheme.typography.labelMedium.copy(letterSpacing = 0.sp))
+                }
+                SelectionContainer(Modifier.widthIn(max = messageWidth).messageBubble(user)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (typing) TypingIndicator()
+                        MessageBody(text)
                     }
                 }
             }

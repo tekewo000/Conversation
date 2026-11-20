@@ -289,7 +289,10 @@ class ComposeUiTest {
         val sent = compose.onNodeWithText("ありがとう").assertIsDisplayed()
         val feeling = compose.onNodeWithText("ほっとして嬉しい").assertIsDisplayed()
         assertEquals(1, compose.onAllNodes(hasText("ほっとして嬉しい")).fetchSemanticsNodes().size)
-        assertTrue(feeling.fetchSemanticsNode().boundsInRoot.top >= reply.fetchSemanticsNode().boundsInRoot.bottom)
+        val latestPortrait = portraits.fetchSemanticsNodes().maxBy { it.boundsInRoot.top }.boundsInRoot
+        val feelingBounds = feeling.fetchSemanticsNode().boundsInRoot
+        assertTrue(feelingBounds.top >= latestPortrait.bottom)
+        assertEquals(latestPortrait.center.x, feelingBounds.center.x, 1f)
         val rootCenter = compose.onRoot().fetchSemanticsNode().boundsInRoot.center.x
         assertTrue(reply.fetchSemanticsNode().boundsInRoot.center.x < rootCenter)
         assertTrue(sent.fetchSemanticsNode().boundsInRoot.center.x > rootCenter)
