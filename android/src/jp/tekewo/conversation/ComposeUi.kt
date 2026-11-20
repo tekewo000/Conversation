@@ -131,6 +131,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     var personName by mutableStateOf("")
     var personIcon by mutableStateOf<Bitmap?>(null)
     var onIcon by mutableStateOf<Runnable?>(null)
+    private var currentEmotion by mutableStateOf("")
     private var messages by mutableStateOf(emptyList<Message>())
     private var first by mutableIntStateOf(0)
     private var total by mutableIntStateOf(0)
@@ -250,6 +251,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         }
         first = page.getInt("first")
         total = page.getInt("total")
+        currentEmotion = page.optString("assistant_emotion")
         messages = next
         if (replySaved) cancelReply()
         if (pageDirection != 0) {
@@ -307,6 +309,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 BoxWithConstraints(Modifier.weight(1f).widthIn(max = 680.dp).fillMaxWidth().align(Alignment.CenterHorizontally)) {
                     val messageWidth = (maxWidth - 40.dp).coerceAtLeast(0.dp) * 0.8f
                     val latest = first + messages.size >= total
+                    val latestAssistant = if (latest) messages.lastOrNull { it.role == "assistant" }?.id else null
                     val pending = latest && (replying || streaming.isNotEmpty())
                     val visible = if (pending) {
                         listOf(Message(-1, "assistant", streaming, if (replying) replyKey else Long.MIN_VALUE)) + messages.asReversed()
@@ -322,6 +325,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                         }
                         items(visible, key = { it.key }) { message ->
                             MessageText(message.text, message.role == "user", messageWidth,
+                                emotion = if (message.id == latestAssistant) currentEmotion else "",
                                 typing = message.id == -1L && message.text.isEmpty(), annotation = message.annotation)
                         }
                         if (first > 0) item("older") {
@@ -350,10 +354,8 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                         .semantics { contentDescription = "会話相手の記憶を開く" })
                     .padding(horizontal = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    val bitmap = personIcon
-                    if (bitmap != null && personName.isNotBlank()) {
-                        Image(remember(bitmap) { bitmap.asImageBitmap() }, contentDescription = null,
-                            contentScale = ContentScale.Crop, modifier = Modifier.size(28.dp).clip(CircleShape))
+                    if (personIcon != null && personName.isNotBlank()) {
+                        PersonPortrait(Modifier.size(28.dp))
                     }
                     Text(personName.ifBlank { "会話" }, Modifier.semantics { heading() },
                         color = colors.onSurface, style = MaterialTheme.typography.titleMedium,
@@ -369,6 +371,21 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 ) {
                     Icon(ConversationIcons.Menu, contentDescription = "メニュー")
                 }
+            }
+        }
+    }
+
+    @Composable private fun PersonPortrait(modifier: Modifier) {
+        val colors = MaterialTheme.colorScheme
+        Box(modifier.background(colors.surfaceVariant, CircleShape), contentAlignment = Alignment.Center) {
+            val bitmap = personIcon
+            when {
+                bitmap != null -> Image(remember(bitmap) { bitmap.asImageBitmap() }, contentDescription = null,
+                    contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize().clip(CircleShape))
+                personName.isNotBlank() -> Text(personName.substring(0, personName.offsetByCodePoints(0, 1)),
+                    modifier = Modifier.clearAndSetSemantics { }, color = colors.primary,
+                    style = MaterialTheme.typography.titleMedium)
+                else -> Icon(ConversationIcons.Person, contentDescription = null, tint = colors.onSurfaceVariant)
             }
         }
     }
@@ -463,7 +480,8 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         }
     }
 
-    @Composable private fun MessageText(text: String, user: Boolean, messageWidth: Dp, typing: Boolean = false, annotation: String = "") {
+    @Composable private fun MessageText(text: String, user: Boolean, messageWidth: Dp, emotion: String = "",
+                                       typing: Boolean = false, annotation: String = "") {
         if (annotation.isNotEmpty()) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(if (annotation == "scene") "情景 · 返信なし" else "メタ · 返信なし", fontSize = 12.sp,
@@ -473,10 +491,25 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
             return
         }
         Box(Modifier.fillMaxWidth(), contentAlignment = if (user) Alignment.TopEnd else Alignment.TopStart) {
-            SelectionContainer(Modifier.widthIn(max = messageWidth).messageBubble(user)) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (typing) TypingIndicator()
-                    MessageBody(text)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (!user) {
+                    PersonPortrait(Modifier.size(48.dp).clip(CircleShape)
+                        .clickable(enabled = onIcon != null, role = Role.Button) { onIcon?.run() }
+                        .semantics { contentDescription = "${personName.ifBlank { "会話相手" }}の記憶を見る" }
+                        .padding(6.dp))
+                }
+                Column(Modifier.widthIn(max = messageWidth)) {
+                    SelectionContainer(Modifier.messageBubble(user)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (typing) TypingIndicator()
+                            MessageBody(text)
+                        }
+                    }
+                    if (emotion.isNotBlank()) {
+                        Text(emotion, Modifier.padding(start = 12.dp, top = 4.dp),
+                            color = MaterialTheme.colorScheme.primary,
+                            style = MaterialTheme.typography.labelMedium.copy(letterSpacing = 0.sp))
+                    }
                 }
             }
         }

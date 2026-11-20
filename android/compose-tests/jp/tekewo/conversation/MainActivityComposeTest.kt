@@ -538,7 +538,7 @@ class MainActivityComposeTest {
         compose.waitUntil(10_000) {
             compose.onAllNodes(androidx.compose.ui.test.hasText("やったね！")).fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithText("嬉しい").assertDoesNotExist()
+        compose.onNodeWithText("嬉しい").assertIsDisplayed()
         openShortTermMemory()
         for (record in listOf("感情", "嬉しい", "理由", "勝ったと聞いた", "状況", "試合結果を一緒に喜んだ")) {
             compose.onNodeWithText(record).assertExists()
@@ -630,7 +630,8 @@ class MainActivityComposeTest {
         }
         compose.activityRule.scenario.recreate()
         compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("ほっとした。一緒に喜べて嬉しい")).fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("ほっとして嬉しい").assertDoesNotExist()
+        compose.onNodeWithContentDescription("小春の記憶を見る").assertIsDisplayed()
+        compose.onNodeWithText("ほっとして嬉しい").assertIsDisplayed()
         compose.onNodeWithText("試合終了の報告").assertDoesNotExist()
         compose.onNodeWithText("一緒に喜んだ会話").assertDoesNotExist()
         openShortTermMemory()
@@ -699,7 +700,7 @@ class MainActivityComposeTest {
         compose.onNodeWithText("アイコン画像を外す").performClick()
         compose.waitUntil(10_000) { PersonRegistry(context.filesDir).icon(person.id).isEmpty() }
         repeat(3) { compose.onNodeWithContentDescription("戻る").performClick() }
-        compose.onNodeWithText("ほっとして嬉しい").assertDoesNotExist()
+        compose.onNodeWithText("ほっとして嬉しい").assertIsDisplayed()
         openShortTermMemory()
         compose.onNodeWithText("ほっとして嬉しい").assertExists()
     }
