@@ -6,6 +6,8 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -154,6 +156,51 @@ class MainActivityComposeTest {
             compose.onNodeWithText("会話を始める").performClick()
             compose.onNodeWithContentDescription("メッセージ入力").assertIsDisplayed()
         } finally { preferences.edit().putBoolean("plan_welcome", welcome).commit() }
+    }
+
+    @Test fun backgroundNotificationsCanBeTurnedOffWithoutDisablingInitiative() {
+        val triggers = InitiativePolicy.Trigger.values()
+        val previousInitiative = triggers.associateWith { InitiativeWork.enabled(context, it) }
+        val previousNotifications = InitiativeWork.notificationsEnabled(context)
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            instrumentation.uiAutomation.grantRuntimePermission(context.packageName, android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+        try {
+            triggers.forEach { InitiativeWork.setEnabled(context, it, false) }
+            InitiativeWork.setNotificationsEnabled(context, false)
+            createManagementPerson()
+
+            fun openInitiativeSettings() {
+                compose.onNodeWithContentDescription("メニュー").performClick()
+                compose.onNodeWithText("設定").performClick()
+                compose.onNodeWithText("人物から話しかける").performClick()
+            }
+
+            openInitiativeSettings()
+            compose.onNodeWithText("会話を開いたとき").assertIsOff().performClick().assertIsOn()
+            compose.onNodeWithText("会話の合間").assertIsOff().performClick().assertIsOn()
+            compose.onNodeWithText("アプリを閉じているとき").assertIsOff().performClick().assertIsOn()
+            compose.onNodeWithText("会話を開いたとき").performClick().assertIsOff()
+            compose.onNodeWithText("バックグラウンド通知").assertIsOff().performClick().assertIsOn()
+            compose.onNodeWithText("バックグラウンド通知").performClick().assertIsOff()
+            compose.activityRule.scenario.recreate()
+            openInitiativeSettings()
+            compose.onNodeWithText("会話を開いたとき").assertIsOff()
+            compose.onNodeWithText("会話の合間").assertIsOn()
+            compose.onNodeWithText("アプリを閉じているとき").assertIsOn()
+            compose.onNodeWithText("バックグラウンド通知").assertIsOff()
+            compose.activityRule.scenario.onActivity { activity ->
+                activity.startActivity(android.content.Intent(activity, MainActivity::class.java)
+                    .setAction(InitiativeWork.OPEN_CHAT))
+            }
+            compose.waitUntil(5_000) {
+                compose.onAllNodes(hasContentDescription("メッセージ入力")).fetchSemanticsNodes().isNotEmpty()
+            }
+        } finally {
+            previousInitiative.forEach { (trigger, enabled) -> InitiativeWork.setEnabled(context, trigger, enabled) }
+            InitiativeWork.setNotificationsEnabled(context, previousNotifications)
+        }
     }
 
     @Test fun oldSignInResultCannotDiscardAnImageApiKeyDraft() {

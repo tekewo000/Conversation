@@ -235,26 +235,25 @@ public final class ChatGptConnection {
     }
 
     public List<ChatRequest.Model> listModels() throws IOException {
-        synchronized (operationLock) {
-            int attempt = requests.generation();
-            String token = accessToken(attempt);
-            try {
-                JSONObject catalog = json(RESOURCE + "/models", "GET", null, token, attempt);
-                JSONArray models = catalog.getJSONArray("models");
-                List<ChatRequest.Model> visible = new ArrayList<>();
-                for (int i = 0; i < models.length(); i++) {
-                    JSONObject model = models.getJSONObject(i);
-                    if ("list".equals(model.optString("visibility"))) {
-                        ChatRequest.Model parsed = new ChatRequest.Model(model);
-                        if (!parsed.slug.isEmpty() && !parsed.displayName.isEmpty()) visible.add(parsed);
-                    }
+        int attempt = requests.generation();
+        String token;
+        synchronized (operationLock) { token = accessToken(attempt); }
+        try {
+            JSONObject catalog = json(RESOURCE + "/models", "GET", null, token, attempt);
+            JSONArray models = catalog.getJSONArray("models");
+            List<ChatRequest.Model> visible = new ArrayList<>();
+            for (int i = 0; i < models.length(); i++) {
+                JSONObject model = models.getJSONObject(i);
+                if ("list".equals(model.optString("visibility"))) {
+                    ChatRequest.Model parsed = new ChatRequest.Model(model);
+                    if (!parsed.slug.isEmpty() && !parsed.displayName.isEmpty()) visible.add(parsed);
                 }
-                if (visible.isEmpty()) throw new SafeFailure("このアカウントで利用できるモデルがありません。");
-                return visible;
-            } catch (HttpFailure e) { handleUnauthorized(e, attempt, token); throw e; }
-            catch (IOException e) { throw e; }
-            catch (Exception e) { throw new SafeFailure("モデル一覧を読み取れませんでした。"); }
-        }
+            }
+            if (visible.isEmpty()) throw new SafeFailure("このアカウントで利用できるモデルがありません。");
+            return visible;
+        } catch (HttpFailure e) { handleUnauthorized(e, attempt, token); throw e; }
+        catch (IOException e) { throw e; }
+        catch (Exception e) { throw new SafeFailure("モデル一覧を読み取れませんでした。"); }
     }
 
     public String request(ChatRequest request, String instructions, JSONArray input, Consumer<String> onDelta) throws IOException {

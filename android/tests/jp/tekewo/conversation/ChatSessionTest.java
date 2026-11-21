@@ -61,6 +61,9 @@ public final class ChatSessionTest {
         incompleteReplyStateCannotCommitAReply();
         missingReplyStateKeepsTheAnswerAndPreviousFeeling();
         replyRetrievalReceivesFullTextWithoutChangingExtraction();
+        initiativeCanOpenAnEmptyConversationOrStaySilent();
+        initiativeUsesTextWithoutActingAsTheUser();
+        initiativeRejectsInvalidOutput();
         importantWordsReachTheReplyAsOriginalReferenceText();
         assistantFeelingAndOldEvidenceReachReplyAndExtraction();
         relationshipAndOldEvidenceReachUnrelatedReplyAndExtraction();
@@ -437,6 +440,66 @@ public final class ChatSessionTest {
         };
         new ChatSession(store).reply(text, true, (instructions, input, delta) -> reply("返答"), new Listener());
         assert retrieved[0] : "Replies must use the semantic retrieval hook with full input";
+    }
+
+    private static void initiativeCanOpenAnEmptyConversationOrStaySilent() throws Exception {
+        JSONObject context = new JSONObject().put("messages", new JSONArray());
+        String message = ChatSession.initiative(context, (instructions, input, delta) -> {
+            assert !instructions.contains("<assistant_state>");
+            assert input.length() == 1 : "An empty conversation must not invent a user turn";
+            JSONObject reference = new JSONObject(input.getJSONObject(0).getString("content").split("\\n", 2)[1]);
+            assert reference.getJSONArray("history").length() == 0;
+            return "{\"message\":\"ちょっと話したいことがあったんだ。\"}";
+        });
+        assert "ちょっと話したいことがあったんだ。".equals(message);
+        assert ChatSession.initiative(context, (instructions, input, delta) -> "{\"message\":null}") == null;
+    }
+
+    private static void initiativeUsesTextWithoutActingAsTheUser() throws Exception {
+        String image = "![非公開の画像](attachment:" + new String(new char[64]).replace('\0', '0') + ".png)";
+        Store store = new Store();
+        store.person = new JSONObject().put("name", "りん").put("profile", "慎重で率直に短く話す。");
+        store.add("user", "近いうちに旅行しよう。\n" + image);
+        store.add("assistant", "行き先はまた決めよう。\n![古い画像](data:image/png;base64,aGVsbG8=)\n<assistant_state>\nnull");
+        JSONObject context = store.context("");
+        context.getJSONArray("messages").put(new JSONObject().put("id", 3).put("role", "user")
+                .put("annotation", "meta").put("content", "静かな雰囲気で。\n" + image));
+        context.put("memories", new JSONArray().put(new JSONObject().put("text", "旅行を計画中。\n" + image)));
+
+        String message = ChatSession.initiative(context, (instructions, input, delta) -> {
+            assert instructions.contains("慎重で率直に短く話す。");
+            assert !input.toString().contains("attachment:") && !input.toString().contains("非公開の画像");
+            assert !input.toString().contains("aGVsbG8=");
+            JSONObject reference = new JSONObject(input.getJSONObject(0).getString("content").split("\\n", 2)[1]);
+            assert reference.getJSONArray("context_notes").getJSONObject(0).getString("text").equals("静かな雰囲気で。");
+            assert reference.getJSONArray("history").length() == 2;
+            assert input.length() == 3 && input.getJSONObject(1).getString("role").equals("user");
+            assert input.getJSONObject(1).getString("content").equals("近いうちに旅行しよう。");
+            assert input.getJSONObject(2).getString("role").equals("assistant");
+            assert input.getJSONObject(2).getString("content").trim().equals("行き先はまた決めよう。");
+            return "{\"message\":\"温泉のあるところに行ってみたいな。\"}";
+        });
+        assert store.roles.size() == 2 && context.toString().contains("attachment:");
+        store.add("assistant", message);
+        new ChatSession(store).reply("それいいね。", true, (instructions, input, delta) -> {
+            assert input.getJSONObject(input.length() - 2).getString("content").equals("温泉のあるところに行ってみたいな。");
+            assert input.getJSONObject(input.length() - 1).getString("content").equals("それいいね。");
+            assert input.getJSONObject(1).getString("content").contains("attachment:");
+            return "じゃあいくつか探してみよう。";
+        }, new Listener());
+        assert store.roles.size() == 5 && store.texts.get(4).equals("じゃあいくつか探してみよう。");
+    }
+
+    private static void initiativeRejectsInvalidOutput() throws Exception {
+        JSONObject context = new JSONObject().put("messages", new JSONArray());
+        for (String answer : new String[]{"{}", "{\"message\":42}", "{\"message\":\"　\"}",
+                "{\"message\":\"![](https://example.com/image.png)\"}", "{\"message\":\"a\\nb\"}",
+                "{\"message\":\"ok\"} trailing", new JSONObject().put("message", new String(new char[301]).replace('\0', 'あ')).toString()}) {
+            try {
+                ChatSession.initiative(context, (instructions, input, delta) -> answer);
+                throw new AssertionError("Invalid initiative output was accepted: " + answer);
+            } catch (IOException | org.json.JSONException expected) {}
+        }
     }
 
     private static void importantWordsReachTheReplyAsOriginalReferenceText() throws Exception {

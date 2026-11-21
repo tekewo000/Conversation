@@ -139,6 +139,9 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     private var panel by mutableStateOf<Panel?>(null)
     private val pages = mutableStateListOf<Panel>()
     var onPageChanged: Consumer<String>? = null
+    var onInitiativeAvailabilityChanged: Consumer<Boolean>? = null
+    val initiativeAvailable: Boolean
+        get() = !hasDraft && attachments.isBlank() && !generateImages && pages.isEmpty() && panel == null
     val pageKey: String get() = pages.lastOrNull()?.key ?: ""
     var pageVersion = 0
         private set
@@ -176,6 +179,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     class Row @JvmOverloads constructor(@JvmField val label: String, @JvmField val action: Runnable,
                                        @JvmField val icon: Int = -1) {
         @JvmField var checked = false
+        @JvmField var toggle = false
         @JvmField var dismiss = true
         @JvmField var description = ""
         @JvmField var section = ""
@@ -194,6 +198,9 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
 
     init {
         activity.setContent {
+            LaunchedEffect(Unit) {
+                snapshotFlow { initiativeAvailable }.collect { onInitiativeAvailabilityChanged?.accept(it) }
+            }
             MaterialTheme(colorScheme = conversationColors) { Content() }
         }
     }

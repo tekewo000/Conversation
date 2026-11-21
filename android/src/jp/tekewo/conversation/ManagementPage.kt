@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -199,9 +200,11 @@ private fun PageRows(panel: ComposeUi.Panel) {
                 color = pageMuted, style = MaterialTheme.typography.titleSmall)
         }
         HorizontalDivider(color = pageRule)
+        val interaction = if (row.toggle) Modifier.toggleable(row.checked, role = Role.Switch) { row.action.run() }
+            else Modifier.clickable(role = if (panel.choices) Role.RadioButton else Role.Button) { row.action.run() }
         Row(Modifier.fillMaxWidth()
-            .semantics { if (panel.choices || row.checked) selected = row.checked }
-            .clickable(role = if (panel.choices) Role.RadioButton else Role.Button) { row.action.run() }
+            .semantics { if (!row.toggle && (panel.choices || row.checked)) selected = row.checked }
+            .then(interaction)
             .heightIn(min = 56.dp).padding(vertical = if (episodes) 16.dp else 12.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
             val ink = if (row.destructive) MaterialTheme.colorScheme.error else pageInk
@@ -223,7 +226,8 @@ private fun PageRows(panel: ComposeUi.Panel) {
                 if (row.description.isNotEmpty()) Text(row.description, color = pageMuted,
                     style = MaterialTheme.typography.bodyMedium)
             }
-            if (!panel.choices && panel.key != "display") Icon(if (row.checked) ConversationIcons.Check else ConversationIcons.Chevron,
+            if (row.toggle) Switch(checked = row.checked, onCheckedChange = null)
+            else if (!panel.choices && panel.key != "display") Icon(if (row.checked) ConversationIcons.Check else ConversationIcons.Chevron,
                 null, tint = pageMuted, modifier = Modifier.size(18.dp))
         }
     }

@@ -20,11 +20,12 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.Set;
 import java.util.HashSet;
+import jp.tekewo.conversation.InitiativePolicy.Trigger;
 import org.json.JSONObject;
 
 public final class MainActivity extends ComponentActivity {
     private static native String nativeInit(byte[] storageDir, byte[] font, byte[] emojiFont);
-    private static native long nativeAddMessage(byte[] role, byte[] text);
+    static native long nativeAddMessage(byte[] role, byte[] text);
     private static native long nativeAddReply(byte[] text, byte[] state);
     private static native long nativeAddNote(byte[] kind, byte[] text);
     static native String nativeRebuildBatch(long afterId, long throughId);
@@ -75,6 +76,10 @@ public final class MainActivity extends ComponentActivity {
     private String gitStatus = "";
     private final android.os.Handler syncTimer = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable autoSync = () -> queueGitSync(false);
+    private final Runnable initiativeOnOpen = () -> tryInitiative(Trigger.OPEN);
+    private final Runnable initiativeOnIdle = () -> tryInitiative(Trigger.IDLE);
+    private volatile long initiativeEpoch;
+    private boolean resumed, draftSavedOnPause;
     private static final ExecutorService gitWorker = Executors.newSingleThreadExecutor();
     private static final Set<String> syncingPeople = new HashSet<>();
     static final Object storeGate = new Object();
@@ -91,6 +96,7 @@ public final class MainActivity extends ComponentActivity {
     }
     private boolean ready;
     private static final int DEFAULT_TEXT_SIZE = 16;
+    private static final int REQUEST_INITIATIVE_NOTIFICATIONS = 85;
     private int textSize = DEFAULT_TEXT_SIZE;
     private int messageGap = 12;
 
@@ -112,12 +118,16 @@ public final class MainActivity extends ComponentActivity {
         getWindow().getDecorView().setSystemUiVisibility(getWindow().getDecorView().getSystemUiVisibility()
                 & ~(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR));
         compose = new ComposeUi(this, this::showHistoryMenu, this::sendMessage, first -> {
-            pageFirst = first; refreshMessages();
+            pageFirst = first; armInitiative(false); refreshMessages();
         });
         compose.setOnPageChanged(key -> {
             memoryView = key.equals("memory") ? 1 : key.equals("recent") ? 2 : key.equals("episodes") ? 3
                     : key.startsWith("episode:") ? 4 : 0;
             episodeRequest++;
+            armInitiative(key.isEmpty());
+        });
+        compose.setOnInitiativeAvailabilityChanged(available -> {
+            if (!available || !syncTimer.hasCallbacks(initiativeOnOpen)) armInitiative(false);
         });
         applyTypography();
         compose.setOnAttach(this::showAttachments);
@@ -232,6 +242,7 @@ public final class MainActivity extends ComponentActivity {
         });
         queueMemories(true);
         scheduleGitSync();
+        armInitiative(true);
     }
 
     private void startSemanticMemory() {
@@ -282,7 +293,7 @@ public final class MainActivity extends ComponentActivity {
                         if (replySaved) refreshMessages(true);
                         return;
                     }
-                    if (latest) pageFirst = -1;
+                    if (latest && pageFirst != -1) { pageFirst = -1; armInitiative(false); }
                     compose.setMessages(visibleSnapshot, replySaved);
                     if (replySaved) setBusy(false);
                     if (scrollOnRefresh) { compose.scrollToLatest(); scrollOnRefresh = false; }
@@ -319,9 +330,11 @@ public final class MainActivity extends ComponentActivity {
     private boolean saveDraft() {
         if(changingPerson||compose==null||activePerson==null) return true;
         try {
-            JSONObject state=PersonState.load(activePerson.directory);
-            state.put("draft",compose.getDraft()).put("attachments",compose.getAttachments());
-            PersonState.save(activePerson.directory,state);
+            synchronized (PersonState.class) {
+                JSONObject state=PersonState.load(activePerson.directory);
+                state.put("draft",compose.getDraft()).put("attachments",compose.getAttachments());
+                PersonState.save(activePerson.directory,state);
+            }
             getPreferences(MODE_PRIVATE).edit().putBoolean("image_mode_"+activePerson.id,compose.getGenerateImages()).apply();
             return true;
         } catch(Exception error) { showError("下書きを保存できません。入力はこの画面に保持しています。\n"+safeError(error));return false; }
@@ -331,7 +344,35 @@ public final class MainActivity extends ComponentActivity {
         busy = value;
         compose.setEnabled(ready && activePerson != null && !changingPerson);
         compose.setSending(value);
+        armInitiative(false);
         if (compose.isPageVisible("management", compose.getPageVersion())) showHistoryMenu();
+    }
+
+    private boolean canTryInitiative() {
+        return resumed && hasWindowFocus() && ready && !busy && !closed && !changingPerson && activePerson != null
+                && pageFirst == -1 && compose.getInitiativeAvailable()
+                && connection != null && connection.hasSession();
+    }
+
+    private void armInitiative(boolean opening) {
+        initiativeEpoch++;
+        syncTimer.removeCallbacks(initiativeOnOpen);
+        syncTimer.removeCallbacks(initiativeOnIdle);
+        if (!canTryInitiative()) return;
+        if (opening && InitiativeWork.enabled(this, Trigger.OPEN)) syncTimer.postDelayed(initiativeOnOpen, 750);
+        if (InitiativeWork.enabled(this, Trigger.IDLE)) syncTimer.postDelayed(initiativeOnIdle, Trigger.IDLE.quietMillis);
+    }
+
+    private void tryInitiative(Trigger trigger) {
+        if (!canTryInitiative() || !InitiativeWork.enabled(this, trigger)) return;
+        long epoch = initiativeEpoch;
+        String personId = activePerson.id;
+        InitiativeWork.tryForeground(this, personId, trigger, () -> epoch == initiativeEpoch && compose.getInitiativeAvailable(), () -> ui(() -> {
+            if (changingPerson || activePerson == null || !personId.equals(activePerson.id)) return;
+            if (pageFirst == -1 && compose.isPageVisible("", compose.getPageVersion())) scrollOnRefresh = true;
+            refreshMessages();
+            scheduleGitSync();
+        }));
     }
 
     private ChatRequest selectedRequest() throws Exception {
@@ -568,6 +609,7 @@ public final class MainActivity extends ComponentActivity {
         panel.featuredRows.add(entry("ChatGPT", connection.hasSession() ? "接続済み · アカウントと利用状況" : "未接続 · ログインして会話を始める", 5, this::showConnection));
         panel.rows.add(section("会話と画像", entry("モデルと応答", "モデル・Effort・Fast", 0, this::showResponseSettings)));
         panel.rows.add(section("会話と画像", entry("画像生成API", "画像生成だけに使う有料API", 3, this::showImageApiSettings)));
+        panel.rows.add(section("会話と画像", entry("人物から話しかける", "自発メッセージ・通知", -1, this::showInitiativeSettings)));
         panel.rows.add(section("読みやすさ", entry("表示設定", "文字サイズ・メッセージの間隔", 4, this::showDisplaySettings)));
         panel.rows.add(section("アプリ情報", new ComposeUi.Row("ライセンス",()->{
             ComposeUi.Panel licenses=page("ライセンス","licenses",false);
@@ -576,6 +618,38 @@ public final class MainActivity extends ComponentActivity {
             compose.showPage(licenses);
         })));
         compose.showPage(panel);
+    }
+
+    private void showInitiativeSettings() {
+        ComposeUi.Panel panel = page("人物から話しかける", "initiative", false);
+        panel.onResume = this::showInitiativeSettings;
+        panel.message = "自発メッセージの生成にはChatGPTの利用枠を使います。";
+        panel.rows.add(initiativeSwitch("会話を開いたとき", "初回、または直近の発言から30分以上空いたとき", Trigger.OPEN));
+        panel.rows.add(initiativeSwitch("会話の合間", "会話を表示したまま5分以上操作がないとき", Trigger.IDLE));
+        panel.rows.add(initiativeSwitch("アプリを閉じているとき", "アプリを閉じてから4時間以降", Trigger.BACKGROUND));
+        ComposeUi.Row notifications = entry("バックグラウンド通知",
+                "アプリを閉じている間に人物からメッセージが届いたときに通知します。", -1, () -> {
+            boolean enabled = !InitiativeWork.notificationsEnabled(this);
+            InitiativeWork.setNotificationsEnabled(this, enabled);
+            showInitiativeSettings();
+            if (enabled && Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                    != android.content.pm.PackageManager.PERMISSION_GRANTED)
+                requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, REQUEST_INITIATIVE_NOTIFICATIONS);
+        });
+        notifications.toggle = true;
+        notifications.checked = InitiativeWork.notificationsEnabled(this);
+        panel.rows.add(notifications);
+        compose.showPage(panel);
+    }
+
+    private ComposeUi.Row initiativeSwitch(String title, String description, Trigger trigger) {
+        ComposeUi.Row row = entry(title, description, -1, () -> {
+            InitiativeWork.setEnabled(this, trigger, !InitiativeWork.enabled(this, trigger));
+            showInitiativeSettings();
+        });
+        row.toggle = true;
+        row.checked = InitiativeWork.enabled(this, trigger);
+        return row;
     }
 
     private void showResponseSettings() {
@@ -1567,6 +1641,7 @@ public final class MainActivity extends ComponentActivity {
 
     @Override protected void onDestroy() {
         synchronized (storeGate) { closed = true; }
+        armInitiative(false);
         syncTimer.removeCallbacks(autoSync);
         if (session != null) session.cancel();
         if (semanticMemory != null) semanticMemory.close();
@@ -1603,16 +1678,60 @@ public final class MainActivity extends ComponentActivity {
         reset.dismiss = false; panel.rows.add(reset); compose.showPage(panel);
     }
 
+    @Override protected void onStart() {
+        super.onStart();
+        InitiativeWork.enterForeground(this);
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        if (InitiativeWork.OPEN_CHAT.equals(intent.getAction())) {
+            compose.closePages();
+            pageFirst = -1;
+            scrollOnRefresh = true;
+            refreshMessages();
+        }
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQUEST_INITIATIVE_NOTIFICATIONS) return;
+        if (grantResults.length == 0 || grantResults[0] != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            InitiativeWork.setNotificationsEnabled(this, false);
+        if (compose.isPageVisible("initiative", compose.getPageVersion())) showInitiativeSettings();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        resumed = true;
+        refreshMessages();
+        armInitiative(true);
+    }
+
     @Override public void onPause() {
+        resumed = false;
+        armInitiative(false);
         if (connection != null) connection.setForeground(false);
         if (compose != null) saveDisplaySettings();
-        saveDraft();
+        draftSavedOnPause = saveDraft();
         if (!busy && !changingPerson) queueGitSync(false);
         super.onPause();
+    }
+
+    @Override protected void onStop() {
+        InitiativeWork.leaveForeground(this, ready && activePerson != null && !changingPerson
+                && !isChangingConfigurations() && draftSavedOnPause && connection != null && connection.hasSession());
+        super.onStop();
+    }
+
+    @Override public void onUserInteraction() {
+        super.onUserInteraction();
+        if (InitiativeWork.enabled(this, Trigger.OPEN) || InitiativeWork.enabled(this, Trigger.IDLE)) armInitiative(false);
     }
 
     @Override public void onWindowFocusChanged(boolean focused) {
         super.onWindowFocusChanged(focused);
         if (focused && connection != null) connection.setForeground(true);
+        armInitiative(focused);
     }
 }
