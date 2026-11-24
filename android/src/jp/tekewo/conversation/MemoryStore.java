@@ -68,7 +68,7 @@ final class MemoryStore implements ChatSession.Store {
         synchronized (MainActivity.storeGate) { current(); return read(MainActivity.nativePendingPersona()); }
     }
     public boolean rebuildPending() throws Exception {
-        synchronized (MainActivity.storeGate) { return MemoryRebuild.pending(current().directory); }
+        synchronized (MainActivity.storeGate) { return new MemoryRebuild(current().directory).isRunnable(); }
     }
     public void applyPersona(long throughId, String payload) throws Exception {
         synchronized (MainActivity.storeGate) {

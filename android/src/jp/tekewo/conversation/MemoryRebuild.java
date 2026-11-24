@@ -17,6 +17,16 @@ import org.json.JSONObject;
 /** Rebuild cache only. The original history is published by Core after complete validation. */
 final class MemoryRebuild {
     static final String FILE = ".memory-rebuild.sqlite3";
+    private static final String RETRYING = "再試行待ちです";
+    private static final int PROFILE_LIMIT = 4096;
+    private static final int MIN_PROFILE_BATCH = 8;
+    static final class Progress {
+        final String text;
+        final boolean profile, paused, retrying;
+        Progress(String text, boolean profile, boolean paused, boolean retrying) {
+            this.text = text; this.profile = profile; this.paused = paused; this.retrying = retrying;
+        }
+    }
     interface Native {
         JSONObject context() throws Exception;
         JSONObject batch(long afterId, long throughId) throws Exception;
@@ -29,6 +39,16 @@ final class MemoryRebuild {
     MemoryRebuild(File directory, Runnable changed) { file = new File(directory, FILE); this.changed = changed; }
     static boolean pending(File directory) { return new File(directory, FILE).isFile(); }
     boolean isPending() { return file.isFile(); }
+    boolean isRunnable() {
+        if (!isPending()) return false;
+        try (SQLiteDatabase db = open()) { return !profileMode(db) || !isPaused(profileRun(db)); }
+        catch (Exception error) { return isPending(); }
+    }
+    boolean isProfile() {
+        if (!isPending()) return false;
+        try (SQLiteDatabase db = open()) { return profileMode(db); }
+        catch (Exception error) { return false; }
+    }
     private SQLiteDatabase open() throws IOException {
         if (!file.isFile() || Files.isSymbolicLink(file.toPath())) throw invalid();
         return EncryptedDatabase.open(file.getParentFile(),file,false);
@@ -66,8 +86,10 @@ final class MemoryRebuild {
             } finally { SQLiteDatabase.deleteDatabase(temporary); }
         }
     }
-    String status() throws Exception {
-        if (!file.isFile()) return "";
+    String status() { return progress().text; }
+
+    Progress progress() {
+        if (!file.isFile()) return new Progress("", false, false, false);
         try (SQLiteDatabase db = EncryptedDatabase.open(file.getParentFile(),file,true)) {
             boolean profile = profileMode(db);
             validate(db, profile);
@@ -75,20 +97,46 @@ final class MemoryRebuild {
             try (Cursor rows = db.rawQuery("SELECT key,value FROM meta WHERE key IN ('phase','error')", null)) {
                 while (rows.moveToNext()) { if (rows.getString(0).equals("phase")) phase = rows.getString(1); else error = rows.getString(1); }
             }
-            return (profile ? "プロフィールを作成中\n" : "過去の記憶を階層に整理中\n") + meta(db, "cursor") + " / " + meta(db, "boundary") + " 発言\n" + phase
-                    + (error.isEmpty() ? "" : "\n" + error);
+            boolean paused = profile && isPaused(profileRun(db));
+            String title = profile ? (paused ? "プロフィール作成を一時停止中" : "プロフィールを作成中") : "過去の記憶を階層に整理中";
+            String text = title + "\n" + meta(db, "cursor") + " / " + meta(db, "boundary") + " 発言";
+            if (!paused) text += "\n" + phase + (error.isEmpty() ? "" : "\n" + error);
+            return new Progress(text, profile, paused, !paused && phase.equals(RETRYING));
         } catch (Exception invalidCache) {
-            if(invalidCache instanceof EncryptedDatabase.Failure) return "整理中のデータを復号できません。原本と作業データを保持して停止しています。復元キーを確認してください。";
-            return file.isFile() ? "過去の記憶の作業データを再作成して続けます。現在の記憶は保持しています。" : "";
+            String text = invalidCache instanceof EncryptedDatabase.Failure
+                    ? "整理中のデータを復号できません。原本と作業データを保持して停止しています。復元キーを確認してください。"
+                    : file.isFile() ? "過去の記憶の作業データを再作成して続けます。現在の記憶は保持しています。" : "";
+            return new Progress(text, false, false, false);
         }
     }
+    boolean setProfilePaused(boolean paused) throws Exception {
+        synchronized (MainActivity.storeGate) {
+            if (!file.isFile()) return false;
+            try (SQLiteDatabase db = open()) {
+                db.beginTransaction();
+                try {
+                    if (!profileMode(db)) return false;
+                    long run = profileRun(db);
+                    if (isPaused(run) == paused) return false;
+                    put(db, "profile_run", Long.toString(run + 1));
+                    put(db, "phase", "実行を待っています"); put(db, "error", "");
+                    db.setTransactionSuccessful();
+                } finally { db.endTransaction(); }
+            }
+        }
+        changed.run();
+        return true;
+    }
     void phase(String message) { report(message, ""); }
-    void failed(String message) { report("再試行待ちです", message); }
+    void failed(String message) { report(RETRYING, message); }
     private void report(String phase, String error) {
         if (!file.isFile()) return;
         try (SQLiteDatabase db = open()) {
             db.beginTransaction();
-            try { put(db, "phase", phase); put(db, "error", error); db.setTransactionSuccessful(); }
+            try {
+                if (isPaused(profileRun(db))) return;
+                put(db, "phase", phase); put(db, "error", error); db.setTransactionSuccessful();
+            }
             finally { db.endTransaction(); }
             android.util.Log.i("ConversationMemory", "Rebuild: " + phase);
             changed.run();
@@ -115,10 +163,21 @@ final class MemoryRebuild {
         try (Cursor schema = db.rawQuery("SELECT root_key,key,parent_key,depth,node,path FROM nodes LIMIT 0", null)) { schema.getColumnCount(); }
     }
     private static String meta(SQLiteDatabase db, String key) throws IOException {
+        String value = optionalMeta(db, key, null);
+        if (value == null) throw invalid();
+        return value;
+    }
+    private static String optionalMeta(SQLiteDatabase db, String key, String fallback) {
         try (Cursor row = db.rawQuery("SELECT value FROM meta WHERE key=?", new String[]{key})) {
-            if (!row.moveToFirst()) throw invalid();
-            return row.getString(0);
+            return row.moveToFirst() ? row.getString(0) : fallback;
         }
+    }
+    // Odd generations are paused. A quick pause/resume also invalidates the previous response.
+    private static long profileRun(SQLiteDatabase db) { return Long.parseLong(optionalMeta(db, "profile_run", "0")); }
+    private static boolean isPaused(long run) { return (run & 1) != 0; }
+    private boolean stillCurrent(long run) throws IOException {
+        if (!isPending()) return false;
+        try (SQLiteDatabase db = open()) { return profileRun(db) == run; }
     }
     private static void put(SQLiteDatabase db, String key, String value) {
         db.execSQL("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", new Object[]{key, value});
@@ -131,12 +190,20 @@ final class MemoryRebuild {
         JSONArray roots = new JSONArray(), known = new JSONArray();
         JSONObject stagedProfile = new JSONObject();
         boolean profile = false;
+        long run = 0;
+        int batchLimit = 64;
         try (SQLiteDatabase db = open()) {
             profile = profileMode(db);
             validate(db, profile);
             cursor = Long.parseLong(meta(db, "cursor")); boundary = Long.parseLong(meta(db, "boundary"));
             if (cursor < 0 || boundary < cursor || latest < boundary) throw invalid();
-            if (profile) stagedProfile = new JSONObject(meta(db, "profile"));
+            if (profile) {
+                run = profileRun(db);
+                if (isPaused(run)) return false;
+                batchLimit = Integer.parseInt(optionalMeta(db, "profile_limit", Integer.toString(PROFILE_LIMIT)));
+                if (batchLimit < MIN_PROFILE_BATCH || batchLimit > PROFILE_LIMIT) throw invalid();
+                stagedProfile = new JSONObject(meta(db, "profile"));
+            }
             else {
                 roots = new JSONArray(meta(db, "roots"));
                 try (Cursor rows = db.rawQuery("SELECT root_key,parent_key,depth,node FROM nodes ORDER BY rowid DESC LIMIT 24", null)) {
@@ -153,7 +220,12 @@ final class MemoryRebuild {
         }
         if (cursor == boundary) {
             phase(profile ? "プロフィールを保存しています" : "整理した階層を保存しています");
-            if (profile ? source.publishProfile(boundary, stagedProfile) : source.publish()) {
+            boolean published;
+            if (profile) synchronized (MainActivity.storeGate) {
+                if (!stillCurrent(run)) return false;
+                published = source.publishProfile(boundary, stagedProfile);
+            } else published = source.publish();
+            if (published) {
                 if (!SQLiteDatabase.deleteDatabase(file)) throw new IOException("整理結果は保存されました。作業データの後片付けを再試行します。");
                 return false;
             }
@@ -164,8 +236,6 @@ final class MemoryRebuild {
             boundary = latest;
             try (SQLiteDatabase db = open()) { put(db, "boundary", Long.toString(boundary)); }
         }
-        // Profile output is at most five fields, so use Core's full history window and byte budget.
-        int batchLimit = profile ? 4096 : 64;
         long batchBoundary = Math.min(boundary, cursor + batchLimit);
         JSONObject batch = source.batch(cursor, batchBoundary);
         JSONArray messages = batch.getJSONArray("messages");
@@ -206,21 +276,34 @@ final class MemoryRebuild {
         String range = (cursor + 1) + "〜" + through + "発言：";
         phase(range + "AIの応答を待っています");
         long[] received = {0}, updated = {0};
-        String response = backend.request(profile ? ChatSession.REBUILD_PROFILE : ChatSession.REBUILD,
+        if (profile && !stillCurrent(run)) return false;
+        String response;
+        try { response = backend.request(profile ? ChatSession.REBUILD_PROFILE : ChatSession.REBUILD,
                 new JSONArray().put(new JSONObject().put("role", "user").put("content", data.toString())), delta -> {
                     received[0] += delta.length();
                     long now = System.nanoTime();
                     if (updated[0] == 0 || now - updated[0] >= 1_000_000_000L) {
                         updated[0] = now; phase(range + "AIの応答を受信中（" + received[0] + "文字）");
                     }
-                });
+                }); }
+        catch (IOException error) {
+            if (profile && !stillCurrent(run)) return false;
+            if (profile && ChatGptConnection.smallerProfileRequestMayHelp(error) && reduceProfileBatch(run, messages.length())) return true;
+            throw error;
+        }
         phase(range + "結果を検証しています");
-        String answer = ChatSession.jsonPayload(response);
         if (profile) {
-            saveProfile(stagedProfile, answer, assistantSources, through);
+            if (!stillCurrent(run)) return false;
+            try { validateProfile(stagedProfile, ChatSession.jsonPayload(response), assistantSources); }
+            catch (IOException | org.json.JSONException error) {
+                if (reduceProfileBatch(run, messages.length())) return true;
+                throw error;
+            }
+            if (!saveProfile(stagedProfile, through, run)) return false;
             phase("次の範囲の整理を準備しています");
             return true;
         }
+        String answer = ChatSession.jsonPayload(response);
         if (bytes(answer) > 131072) throw invalid("整理結果の文章量が上限を超えています。");
         JSONObject result = new JSONObject(answer), continuity = result.getJSONObject("continuity");
         if (result.length() != 2 || result.getJSONArray("memories").length() != 0 || continuity.length() != 2
@@ -250,7 +333,7 @@ final class MemoryRebuild {
         return true;
     }
 
-    private void saveProfile(JSONObject staged, String answer, Set<Long> allowed, long through) throws Exception {
+    private static void validateProfile(JSONObject staged, String answer, Set<Long> allowed) throws Exception {
         if (bytes(answer) > 8192) throw invalid("プロフィールの整理結果が長すぎます。");
         JSONObject result = new JSONObject(answer), fields = result.getJSONObject("profile");
         if (result.length() != 1 || fields.length() > 5) throw invalid("プロフィールの項目が保存条件を満たしていません。");
@@ -267,14 +350,35 @@ final class MemoryRebuild {
                 throw invalid("プロフィールの根拠が今回の本人の発言と一致しません。");
             staged.put(label, field);
         }
+    }
+
+    private boolean reduceProfileBatch(long run, int attempted) throws IOException {
+        if (attempted <= MIN_PROFILE_BATCH) return false;
+        int limit = Math.max(MIN_PROFILE_BATCH, attempted / 2);
         try (SQLiteDatabase db = open()) {
             db.beginTransaction();
             try {
+                if (profileRun(db) != run) return false;
+                put(db, "profile_limit", Integer.toString(limit));
+                put(db, "phase", "範囲を " + limit + "発言までに縮めて再試行します"); put(db, "error", "");
+                db.setTransactionSuccessful();
+            } finally { db.endTransaction(); }
+        }
+        changed.run();
+        return true;
+    }
+
+    private boolean saveProfile(JSONObject staged, long through, long run) throws IOException {
+        try (SQLiteDatabase db = open()) {
+            db.beginTransaction();
+            try {
+                if (profileRun(db) != run) return false;
                 put(db, "profile", staged.toString());
                 put(db, "cursor", Long.toString(through));
                 db.setTransactionSuccessful();
             } finally { db.endTransaction(); }
         }
+        return true;
     }
     private static void collectSources(JSONArray nodes, Set<Long> allowed, Set<Long> originals) throws Exception {
         for (int i = 0; i < nodes.length(); i++) {

@@ -129,7 +129,7 @@ final class SseReader {
                 String code = error == null ? event.optString("code") : error.optString("code");
                 if (code.startsWith("subscription_sharing_usage_")) throw new StreamFailure("ChatGPT の利用上限に達したか、現在利用できません。ChatGPT の使用状況を確認してください。");
                 throw new StreamFailure("ChatGPT が応答を完了できませんでした。時間をおいてお試しください。");
-            } else if ("response.incomplete".equals(type)) throw new StreamFailure("応答が途中で終了しました。もう一度送信してください。");
+            } else if ("response.incomplete".equals(type)) throw new StreamFailure("応答が途中で終了しました。もう一度送信してください。", true);
             return null;
         } catch (IOException e) { throw e; }
         catch (Exception e) { throw new StreamFailure("ChatGPT の応答を読み取れませんでした。"); }
@@ -151,7 +151,9 @@ final class SseReader {
         return line.length() == 0 ? null : line.toString();
     }
     static final class StreamFailure extends IOException {
-        StreamFailure(String message) { super(message); }
+        final boolean smallerRequestMayHelp;
+        StreamFailure(String message) { this(message, false); }
+        StreamFailure(String message, boolean smallerRequestMayHelp) { super(message); this.smallerRequestMayHelp = smallerRequestMayHelp; }
     }
-    private static IOException limit() { return new StreamFailure("応答が長すぎます。会話を短くしてお試しください。"); }
+    private static IOException limit() { return new StreamFailure("応答が長すぎます。会話を短くしてお試しください。", true); }
 }

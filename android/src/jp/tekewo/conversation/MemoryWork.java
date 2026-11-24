@@ -15,6 +15,7 @@ import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.json.JSONObject;
 
 public final class MemoryWork extends Worker {
@@ -22,10 +23,12 @@ public final class MemoryWork extends Worker {
     static final String RECORD_NAME = "conversation-records";
     private static final AtomicBoolean maintenanceRunning = new AtomicBoolean();
     private static final AtomicBoolean recordsRunning = new AtomicBoolean();
+    private static final AtomicReference<MemoryWork> activeProfile = new AtomicReference<>();
     private volatile ChatGptConnection connection;
     private volatile ChatSession session;
     private volatile MemoryRebuild rebuild;
     private boolean rebuilding;
+    private volatile boolean profileInterrupted;
     private java.io.File statePerson;
     private String operation = "記憶の整理";
 
@@ -48,7 +51,17 @@ public final class MemoryWork extends Worker {
     }
     static void resume(Context context) {
         schedule(context, true, recordsRunning.get() ? ExistingWorkPolicy.APPEND_OR_REPLACE : ExistingWorkPolicy.REPLACE);
+        resumeMaintenance(context);
+    }
+    static void resumeMaintenance(Context context) {
         schedule(context, false, maintenanceRunning.get() ? ExistingWorkPolicy.APPEND_OR_REPLACE : ExistingWorkPolicy.REPLACE);
+    }
+    static void interruptProfile(java.io.File person) {
+        MemoryWork worker = activeProfile.get();
+        if (worker != null && person.equals(worker.statePerson)) {
+            worker.profileInterrupted = true;
+            worker.connection.closeWorkerRequests();
+        }
     }
     static void cancel(Context context) {
         WorkManager manager = WorkManager.getInstance(context);
@@ -80,12 +93,16 @@ public final class MemoryWork extends Worker {
             statePerson=person.directory;
             MemoryStore store = new MemoryStore(context, person.id);
             rebuild = new MemoryRebuild(person.directory, this::updated);
-            rebuilding = !records && MemoryRebuild.pending(person.directory);
+            rebuilding = !records && rebuild.isRunnable();
             if (rebuilding) operation = "過去の記憶の再整理";
             JSONObject batch = records ? store.pending() : new JSONObject();
             if (records ? batch.optLong("id", 0) <= 0 : !rebuilding && store.pendingPersona().optLong("through_id", 0) <= 0) {
                 preferencesClear(context, records);
                 return Result.success();
+            }
+            if (rebuilding && rebuild.isProfile()) {
+                activeProfile.set(this);
+                if (!rebuild.isRunnable()) return Result.success();
             }
             int batchMessages = batch.optJSONArray("messages") == null ? 0 : batch.getJSONArray("messages").length();
             long started = android.os.SystemClock.elapsedRealtime();
@@ -103,7 +120,7 @@ public final class MemoryWork extends Worker {
             session = new ChatSession(store);
             updated();
             ChatSession.Transport backend = (instructions, input, delta) -> {
-                if (isStopped()) throw new IOException("記憶の整理が中断されました。");
+                if (isStopped() || profileInterrupted) throw new IOException("記憶の整理が中断されました。");
                 operation = instructions.equals(ChatSession.REBUILD_PROFILE) ? "過去の会話からプロフィールを作成" :
                         instructions.equals(ChatSession.REFLECT) ? "人物像の振り返り" : rebuilding ? "過去の記憶の再整理" : "会話の記憶整理";
                 if (!rebuilding) phase(records, operation + (records ? "：" + batchMessages + "発言の差分を整理しています" : "：会話を振り返っています"));
@@ -138,7 +155,7 @@ public final class MemoryWork extends Worker {
                 }, backend) || store.pendingPersona().optLong("through_id", 0) > 0;
             } else {
                 session.processMemories(backend, 0);
-                more = rebuild.isPending() || store.pendingPersona().optLong("through_id", 0) > 0;
+                more = rebuild.isRunnable() || store.pendingPersona().optLong("through_id", 0) > 0;
                 writeStatus(context,statePerson,"persona_status","");
             }
             JSONObject progress = store.context("").getJSONObject("memory_progress");
@@ -146,10 +163,11 @@ public final class MemoryWork extends Worker {
                     + " processed=" + progress.getLong("processed_messages") + " total=" + progress.getLong("total_messages")
                     + " elapsed_ms=" + (android.os.SystemClock.elapsedRealtime() - started));
             updated();
-            if (more && !isStopped()) schedule(context, records, ExistingWorkPolicy.APPEND_OR_REPLACE);
+            if (more && !isStopped() && !profileInterrupted) schedule(context, records, ExistingWorkPolicy.APPEND_OR_REPLACE);
             return Result.success();
         } catch (Exception error) {
-            if (!records && !rebuilding && rebuild != null && rebuild.isPending() && !isStopped()) {
+            if (profileInterrupted) return Result.success();
+            if (!records && !rebuilding && rebuild != null && rebuild.isRunnable() && !isStopped()) {
                 rebuild.phase("一括整理を先に進めます");
                 schedule(context, false, ExistingWorkPolicy.APPEND_OR_REPLACE);
                 return Result.success();
@@ -158,7 +176,7 @@ public final class MemoryWork extends Worker {
             if (rebuilding && rebuild != null) rebuild.failed(message);
             else writeStatus(context,statePerson,records?"memory_status":"persona_status",message);
             return Result.retry();
-        } finally { running.set(false); }
+        } finally { activeProfile.compareAndSet(this, null); running.set(false); }
     }
 
     private void updated() {
@@ -181,6 +199,6 @@ public final class MemoryWork extends Worker {
     }
     @Override public void onStopped() {
         if (session != null) session.cancel();
-        if (connection != null) connection.cancel();
+        if (connection != null) connection.closeWorkerRequests();
     }
 }

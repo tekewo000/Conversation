@@ -954,7 +954,7 @@ public final class MainActivity extends ComponentActivity {
                     JSONObject fact = rows.getJSONObject(i);
                     facts.put(fact.getString("label"), fact);
                 }
-                String rebuildStatus = new MemoryRebuild(person.directory).status();
+                MemoryRebuild.Progress rebuild = new MemoryRebuild(person.directory).progress();
                 ui(() -> {
                     if (!compose.isPageVisible("profile", version) || changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
                     ComposeUi.Panel panel = page("プロフィール", "profile", true);
@@ -972,7 +972,17 @@ public final class MainActivity extends ComponentActivity {
                         panel.rows.add(row);
                     }
                     panel.featuredRows.add(entry("プロフィールを編集", "", 2, () -> showEditProfile(person, values)));
-                    if (!rebuildStatus.isEmpty()) panel.blocks.add(new ComposeUi.Block("一括整理の進捗", rebuildStatus));
+                    if (!rebuild.text.isEmpty()) {
+                        panel.blocks.add(new ComposeUi.Block("一括整理の進捗", rebuild.text));
+                        if (rebuild.profile) {
+                            panel.featuredRows.add(entry(rebuild.paused ? "再開" : "一時停止", "", -1,
+                                    () -> setProfilePaused(person, !rebuild.paused)));
+                            if (rebuild.retrying) panel.featuredRows.add(entry("今すぐ再試行", "", -1, () -> {
+                                if (connection.hasSession()) MemoryWork.resumeMaintenance(getApplicationContext());
+                                else showConnection();
+                            }));
+                        }
+                    }
                     else panel.rows.add(section("記録", entry("過去の会話から作る", "ChatGPTの利用枠を使い、本人の過去の発言からプロフィールを整理します", 2, this::requestProfileRebuild)));
                     ComposeUi.Row memory = entry("会話の記憶", "会話と体験を読む", 3, this::showMemory);
                     memory.section = "記録";
@@ -1146,6 +1156,25 @@ public final class MainActivity extends ComponentActivity {
         if (activePerson == null) return;
         if (!connection.hasSession()) { showConnection(); return; }
         startHistoricalRebuild(activePerson, true);
+    }
+
+    private void setProfilePaused(PersonRegistry.Person person, boolean paused) {
+        if (!paused && !connection.hasSession()) { showConnection(); return; }
+        reader.execute(() -> {
+            try {
+                boolean changed;
+                synchronized (storeGate) {
+                    requireCurrentPerson();
+                    if (!person.id.equals(activePerson.id)) return;
+                    changed = new MemoryRebuild(person.directory).setProfilePaused(paused);
+                }
+                if (changed) {
+                    if (paused) MemoryWork.interruptProfile(person.directory);
+                    else MemoryWork.resumeMaintenance(getApplicationContext());
+                }
+                ui(this::refreshProfile);
+            } catch (Exception error) { ui(() -> showError(safeError(error))); }
+        });
     }
 
     private void startHistoricalRebuild(PersonRegistry.Person person, boolean profile) {

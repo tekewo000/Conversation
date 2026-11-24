@@ -19,6 +19,42 @@ class MemoryRebuildTest {
     private fun result(root: JSONObject) = JSONObject().put("memories", JSONArray()).put("continuity",
         JSONObject().put("threads", JSONArray()).put("episodes", JSONArray().put(root))).toString()
 
+    @Test fun profileRetrySplitsTheActualFailedRangeAndPauseDiscardsAnInFlightResult() {
+        val directory = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "profile-fallback-${UUID.randomUUID()}").apply { mkdirs() }
+        try {
+            val rebuild = MemoryRebuild(directory)
+            rebuild.request(40, true)
+            val source = object : MemoryRebuild.Native {
+                override fun context() = JSONObject().put("memory_progress", JSONObject().put("total_messages", 40))
+                override fun batch(after: Long, through: Long): JSONObject {
+                    val end = minOf(through, after + 24)
+                    val messages = JSONArray()
+                    for (id in after + 1..end) messages.put(JSONObject().put("id", id).put("role", "assistant").put("content", "発言$id"))
+                    return JSONObject().put("messages", messages).put("through_id", end).put("boundary_id", through)
+                }
+                override fun publish(): Boolean = throw AssertionError("Unexpected publication")
+            }
+            assertTrue(rebuild.step(source) { _, _, _ -> "不完全な応答" })
+            val reopened = MemoryRebuild(directory)
+            assertTrue(reopened.status().contains("12発言"))
+            assertTrue(reopened.status().contains("0 / 40"))
+            assertFalse(reopened.step(source) { _, input, _ ->
+                assertEquals(12L, JSONObject(input.getJSONObject(0).getString("content")).getJSONObject("job").getLong("through_id"))
+                assertTrue(reopened.setProfilePaused(true))
+                assertFalse(reopened.isRunnable())
+                assertTrue(reopened.setProfilePaused(false))
+                """{"profile":{"趣味":{"value":"読書","source_id":12}}}"""
+            })
+            assertTrue(reopened.status().contains("0 / 40"))
+            assertTrue(reopened.setProfilePaused(true))
+            assertFalse(MemoryRebuild(directory).step(source) { _, _, _ -> throw AssertionError("Paused job made a request") })
+            assertTrue(reopened.status().contains("一時停止中"))
+            assertTrue(reopened.setProfilePaused(false))
+            assertTrue(reopened.step(source) { _, _, _ -> """{"profile":{"趣味":{"value":"読書","source_id":12}}}""" })
+            assertTrue(reopened.status().contains("12 / 40"))
+        } finally { directory.deleteRecursively() }
+    }
+
     @Test fun profileRebuildReadsMoreThanSixtyFourMessagesInOneRequest() {
         val directory = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "profile-batch-${UUID.randomUUID()}").apply { mkdirs() }
         try {

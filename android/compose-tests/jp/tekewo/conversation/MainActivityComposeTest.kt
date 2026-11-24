@@ -378,6 +378,11 @@ class MainActivityComposeTest {
         compose.waitUntil(10_000) { compose.onAllNodes(hasText("過去の会話から作る")).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithText("過去の会話から作る").performScrollTo().performClick()
         compose.waitUntil(10_000) { compose.onAllNodes(hasText("0 / 2 発言", substring = true)).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("一時停止").performScrollTo().performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText("プロフィール作成を一時停止中", substring = true)).fetchSemanticsNodes().isNotEmpty() }
+        assertTrue(!MemoryRebuild(person.directory).isRunnable())
+        compose.onNodeWithText("再開").performScrollTo().performClick()
+        compose.waitUntil(10_000) { MemoryRebuild(person.directory).isRunnable() }
         val store = MemoryStore(context, person.id)
         val rebuild = MemoryRebuild(person.directory)
         val source = object : MemoryRebuild.Native {

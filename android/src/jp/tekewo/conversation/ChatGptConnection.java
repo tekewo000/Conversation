@@ -55,6 +55,7 @@ public final class ChatGptConnection {
     private static final Object operationLock = new Object();
     private final HttpRequestPool requests = new HttpRequestPool(), replyRequests = new HttpRequestPool();
     private final AtomicBoolean signingIn = new AtomicBoolean();
+    private volatile boolean workerClosed;
     private JSONObject state;
     private String storageError;
     private volatile String lastSignOutMessage = "";
@@ -271,6 +272,7 @@ public final class ChatGptConnection {
         synchronized (operationLock) { token = accessToken(attempt); }
         HttpURLConnection connection = null;
         ScheduledFuture<?> timeout = null;
+        AtomicBoolean timedOut = new AtomicBoolean();
         try {
             JSONObject body = request.body(instructions, input);
             byte[] encoded = body.toString().getBytes(StandardCharsets.UTF_8);
@@ -282,7 +284,7 @@ public final class ChatGptConnection {
             connection.setRequestProperty("Accept", "text/event-stream");
             connection.setDoOutput(true); connection.setFixedLengthStreamingMode(encoded.length);
             final HttpURLConnection bound = connection;
-            timeout = TIMEOUTS.schedule(bound::disconnect, timeoutSeconds, TimeUnit.SECONDS);
+            timeout = TIMEOUTS.schedule(() -> { timedOut.set(true); bound.disconnect(); }, timeoutSeconds, TimeUnit.SECONDS);
             try (OutputStream output = connection.getOutputStream()) { output.write(encoded); }
             int status = connection.getResponseCode();
             if (status != 200) throw httpFailure(connection, status);
@@ -297,7 +299,7 @@ public final class ChatGptConnection {
                 return result;
             }
         } catch (HttpFailure e) { handleUnauthorized(e, attempt, token); throw e; }
-        catch (IOException e) { throw sanitized(e); }
+        catch (IOException e) { if (timedOut.get() || e instanceof java.net.SocketTimeoutException) throw new RequestTimeout(); throw sanitized(e); }
         catch (Exception e) { throw new SafeFailure("ChatGPT に接続できませんでした。接続状態を確認してください。"); }
         finally {
             if (timeout != null) timeout.cancel(false);
@@ -413,6 +415,8 @@ public final class ChatGptConnection {
         closeListener();
     }
 
+    void closeWorkerRequests() { workerClosed = true; cancel(); }
+
     public void cancelReply() { replyRequests.cancel(); }
 
     private void closeListener() {
@@ -508,7 +512,8 @@ public final class ChatGptConnection {
         else if (status == 403) message = "このアカウントまたはワークスペースでは利用が許可されていません。ChatGPT の設定を確認してください。";
         else if (status >= 500) message = "ChatGPT が一時的に利用できません。時間をおいてお試しください。";
         else message = "ChatGPT への要求が受け付けられませんでした。再接続または別のモデルでお試しください。";
-        return new HttpFailure(message, status, "invalid_grant".equals(code));
+        return new HttpFailure(message, status, "invalid_grant".equals(code),
+                status == 408 || status == 413 || status == 504 || "context_length_exceeded".equals(code));
     }
 
     private void handleUnauthorized(HttpFailure failure, int attempt, String rejectedToken) throws IOException {
@@ -558,7 +563,7 @@ public final class ChatGptConnection {
     }
 
     private void checked(int attempt) throws IOException {
-        if (requests.generation() != attempt || Thread.currentThread().isInterrupted()) throw new SafeFailure("処理をキャンセルしました。");
+        if (workerClosed || requests.generation() != attempt || Thread.currentThread().isInterrupted()) throw new SafeFailure("処理をキャンセルしました。");
     }
 
     private static Map<String,String> form(String... pairs) {
@@ -629,10 +634,19 @@ public final class ChatGptConnection {
     }
 
     private static final class HttpFailure extends IOException {
-        final int status; final boolean invalidGrant;
-        HttpFailure(String message, int status, boolean invalidGrant) { super(message); this.status = status; this.invalidGrant = invalidGrant; }
+        final int status; final boolean invalidGrant, smallerRequestMayHelp;
+        HttpFailure(String message, int status, boolean invalidGrant, boolean smallerRequestMayHelp) {
+            super(message); this.status = status; this.invalidGrant = invalidGrant; this.smallerRequestMayHelp = smallerRequestMayHelp;
+        }
     }
-    private static final class SafeFailure extends IOException {
+    static boolean smallerProfileRequestMayHelp(IOException error) {
+        return error instanceof RequestTimeout || error instanceof HttpFailure && ((HttpFailure)error).smallerRequestMayHelp
+                || error instanceof SseReader.StreamFailure && ((SseReader.StreamFailure)error).smallerRequestMayHelp;
+    }
+    private static class SafeFailure extends IOException {
         SafeFailure(String message) { super(message); }
+    }
+    private static final class RequestTimeout extends SafeFailure {
+        RequestTimeout() { super("ChatGPT の応答待ちがタイムアウトしました。"); }
     }
 }
