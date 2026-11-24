@@ -68,6 +68,50 @@ REBUILD_ROOT :: `{"key":"trip","text":"京都への旅行","emotion":"安心","s
 REBUILD_CHILD :: `{"key":"cafe","text":"喫茶店にいた","emotion":"落ち着いた","scene":"喫茶店","scope":"real","source_ids":[1]}`
 
 @(test)
+markdown_profile_retains_manual_sections_when_an_ai_snapshot_is_stale :: proc(t:^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-markdown-profile-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ if !testing.expect(t,conversation_edit_profile(`{"基本情報":"### 仕事\n書店員"}`),string(conversation_error())) do return
+ assert(conversation_add_message("user","仕事は？")==1)
+ assert(conversation_add_message("assistant","書店にいるよ")==2)
+ assert(conversation_edit_profile(`{"基本情報":"### 仕事\n図書館員"}`))
+ assert(conversation_add_message("user","年齢は？")==3)
+ assert(conversation_add_message("assistant","年齢は30歳だよ")==4)
+ assert(conversation_publish_profile_rebuild(4,`{"基本情報":{"value":"- 年齢: 30歳","source_id":4,"base_id":1}}`))
+ testing.expect(t,strings.contains(string(conversation_context("")),`"value":"### 仕事\n図書館員"`))
+ stale:cstring=`{"memories":[{"kind":"fact","actor":"assistant","subject":"friend","key":"profile/基本情報","text":"- 年齢: 30歳","scope":"shared","certainty":"explicit","source_ids":[4],"profile_base_id":1}]}`
+ testing.expect(t,!conversation_apply_job(2,stale))
+ assert(conversation_apply_job(2,`{"memories":[{"kind":"fact","actor":"assistant","subject":"friend","key":"profile/基本情報","text":"### 仕事\n図書館員\n\n- 年齢: 30歳","scope":"shared","certainty":"explicit","source_ids":[4],"profile_base_id":2}]}`),string(conversation_error()))
+ testing.expect(t,strings.contains(string(conversation_context("")),`"value":"### 仕事\n図書館員\n\n- 年齢: 30歳","source_id":4`))
+}
+
+@(test)
+profile_history_has_a_separate_512_kib_budget :: proc(t:^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-profile-budget-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ body:=strings.repeat("x",3500)
+ defer delete(body)
+ text:=strings.clone_to_cstring(body)
+ defer delete(text)
+ for i in 1..=180 { assert(conversation_add_message("user",text)==i64(i)) }
+ ordinary:=len(string(conversation_rebuild_batch(0,180)))
+ profile:=len(string(conversation_rebuild_profile_batch(0,180)))
+ testing.expect(t,ordinary<=262400 && profile>500000 && profile<=524600)
+}
+
+@(test)
 manual_profile_edits_preserve_the_message_boundary_and_archive :: proc(t:^testing.T) {
  dir,e:=os.make_directory_temp("","conversation-profile-edit-*",context.allocator)
  assert(e==nil)

@@ -34,7 +34,10 @@ class MemoryRebuildTest {
                 }
                 override fun publish(): Boolean = throw AssertionError("Unexpected publication")
             }
-            assertTrue(rebuild.step(source) { _, _, _ -> "不完全な応答" })
+            assertTrue(rebuild.step(source) { _, _, _ ->
+                val tooLarge = "data: {\"type\":\"error\",\"code\":\"context_length_exceeded\"}\n\n"
+                SseReader.readAuto(tooLarge.byteInputStream()) { _ -> }
+            })
             val reopened = MemoryRebuild(directory)
             assertTrue(reopened.status().contains("12発言"))
             assertTrue(reopened.status().contains("0 / 40"))
@@ -52,15 +55,62 @@ class MemoryRebuildTest {
             assertTrue(reopened.setProfilePaused(false))
             assertTrue(reopened.step(source) { _, _, _ -> """{"profile":{"趣味":{"value":"読書","source_id":12}}}""" })
             assertTrue(reopened.status().contains("12 / 40"))
+            assertTrue(reopened.step(source) { _, input, _ ->
+                assertEquals(24L, JSONObject(input.getJSONObject(0).getString("content")).getJSONObject("job").getLong("through_id"))
+                """{"profile":{}}"""
+            })
+            assertTrue(reopened.step(source) { _, input, _ ->
+                assertEquals(40L, JSONObject(input.getJSONObject(0).getString("content")).getJSONObject("job").getLong("through_id"))
+                """{"profile":{}}"""
+            })
         } finally { directory.deleteRecursively() }
     }
 
-    @Test fun profileRebuildReadsMoreThanSixtyFourMessagesInOneRequest() {
+    @Test fun profileResponseFailuresKeepTheRangeForRetry() {
+        val directory = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "profile-retry-${UUID.randomUUID()}").apply { mkdirs() }
+        try {
+            val rebuild = MemoryRebuild(directory)
+            rebuild.request(24, true)
+            val source = object : MemoryRebuild.Native {
+                override fun context() = JSONObject().put("memory_progress", JSONObject().put("total_messages", 24))
+                override fun batch(after: Long, through: Long): JSONObject {
+                    val messages = JSONArray()
+                    for (id in after + 1..through) messages.put(JSONObject().put("id", id).put("role", "assistant").put("content", "発言$id"))
+                    return JSONObject().put("messages", messages).put("through_id", through).put("boundary_id", through)
+                }
+                override fun publish(): Boolean = throw AssertionError("Unexpected publication")
+            }
+            assertThrows(java.io.IOException::class.java) {
+                rebuild.step(source) { _, _, _ ->
+                    val incomplete = "data: {\"type\":\"response.incomplete\"}\n\n"
+                    SseReader.readAuto(incomplete.byteInputStream()) { _ -> }
+                }
+            }
+            assertThrows(java.io.IOException::class.java) { rebuild.step(source) { _, input, _ ->
+                val job = JSONObject(input.getJSONObject(0).getString("content")).getJSONObject("job")
+                assertEquals(24L, job.getLong("through_id"))
+                """{"profile":{"趣味":{"value":"読書","source_id":99}}}"""
+            } }
+            assertTrue(rebuild.status().contains("0 / 24"))
+            assertTrue(MemoryRebuild(directory).step(source) { _, input, _ ->
+                val data = JSONObject(input.getJSONObject(0).getString("content"))
+                assertEquals(24L, data.getJSONObject("job").getLong("through_id"))
+                assertTrue(data.has("retry_guidance"))
+                """{"profile":{"趣味":{"value":"読書","source_id":24}}}"""
+            })
+            assertTrue(rebuild.status().contains("24 / 24"))
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test fun profileRebuildUsesTwoThousandMessageWindowsAfterAnOldLimit() {
         val directory = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "profile-batch-${UUID.randomUUID()}").apply { mkdirs() }
         try {
             val rebuild = MemoryRebuild(directory)
-            val total = 130L
+            val total = 2001L
             rebuild.request(total, true)
+            EncryptedDatabase.open(directory, File(directory, MemoryRebuild.FILE), false).use { db ->
+                db.execSQL("INSERT INTO meta(key,value) VALUES('profile_limit','8')")
+            }
             var requests = 0
             val source = object : MemoryRebuild.Native {
                 override fun context() = JSONObject().put("memory_progress", JSONObject().put("total_messages", total))
@@ -73,19 +123,26 @@ class MemoryRebuildTest {
                 override fun publish(): Boolean = throw AssertionError("Expected profile publication")
                 override fun publishProfile(through: Long, profile: JSONObject): Boolean {
                     assertEquals(total, through)
-                    assertEquals(total, profile.getJSONObject("趣味").getLong("source_id"))
+                    assertEquals(2000L, profile.getJSONObject("趣味").getLong("source_id"))
                     return true
                 }
             }
             assertTrue(rebuild.step(source) { _, input, _ ->
                 requests++
                 val job = JSONObject(input.getJSONObject(0).getString("content")).getJSONObject("job")
-                assertEquals(total, job.getLong("through_id"))
-                assertEquals(total.toInt(), job.getJSONArray("messages").length())
-                """{"profile":{"趣味":{"value":"読書","source_id":130}}}"""
+                assertEquals(2000L, job.getLong("through_id"))
+                assertEquals(2000, job.getJSONArray("messages").length())
+                """{"profile":{"趣味":{"value":"読書","source_id":2000}}}"""
             })
-            assertFalse(rebuild.step(source) { _, _, _ -> throw AssertionError("Expected a single request") })
-            assertEquals(1, requests)
+            assertTrue(rebuild.step(source) { _, input, _ ->
+                requests++
+                val job = JSONObject(input.getJSONObject(0).getString("content")).getJSONObject("job")
+                assertEquals(total, job.getLong("through_id"))
+                assertEquals(1, job.getJSONArray("messages").length())
+                """{"profile":{}}"""
+            })
+            assertFalse(rebuild.step(source) { _, _, _ -> throw AssertionError("Expected completed publication") })
+            assertEquals(2, requests)
         } finally { directory.deleteRecursively() }
     }
 

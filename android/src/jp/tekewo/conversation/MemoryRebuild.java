@@ -18,8 +18,8 @@ import org.json.JSONObject;
 final class MemoryRebuild {
     static final String FILE = ".memory-rebuild.sqlite3";
     private static final String RETRYING = "再試行待ちです";
-    private static final int PROFILE_LIMIT = 4096;
-    private static final int MIN_PROFILE_BATCH = 8;
+    private static final int PROFILE_LIMIT = 2000;
+    private static final int PROFILE_PAYLOAD_BYTES = 128 * 1024;
     static final class Progress {
         final String text;
         final boolean profile, paused, retrying;
@@ -30,6 +30,7 @@ final class MemoryRebuild {
     interface Native {
         JSONObject context() throws Exception;
         JSONObject batch(long afterId, long throughId) throws Exception;
+        default JSONObject profileBatch(long afterId, long throughId) throws Exception { return batch(afterId, throughId); }
         boolean publish() throws Exception;
         default boolean publishProfile(long throughId, JSONObject profile) throws Exception { throw invalid(); }
     }
@@ -156,7 +157,7 @@ final class MemoryRebuild {
                 || !UUID.fromString(request).toString().equals(request)) throw invalid();
         if (profile) {
             String fields = meta(db, "profile");
-            if (!roots.equals("{}") || bytes(fields) > 8192 || new JSONObject(fields).length() > 5) throw invalid();
+            if (!roots.equals("{}") || bytes(fields) > PROFILE_PAYLOAD_BYTES || new JSONObject(fields).length() > 8) throw invalid();
             return;
         }
         if (bytes(roots) > 65536 || new JSONArray(roots).length() > 30) throw invalid();
@@ -191,6 +192,8 @@ final class MemoryRebuild {
         JSONObject stagedProfile = new JSONObject();
         boolean profile = false;
         long run = 0;
+        long splitThrough = 0;
+        boolean correctingProfile = false;
         int batchLimit = 64;
         try (SQLiteDatabase db = open()) {
             profile = profileMode(db);
@@ -200,8 +203,11 @@ final class MemoryRebuild {
             if (profile) {
                 run = profileRun(db);
                 if (isPaused(run)) return false;
-                batchLimit = Integer.parseInt(optionalMeta(db, "profile_limit", Integer.toString(PROFILE_LIMIT)));
-                if (batchLimit < MIN_PROFILE_BATCH || batchLimit > PROFILE_LIMIT) throw invalid();
+                splitThrough = Long.parseLong(optionalMeta(db, "profile_split_through", "0"));
+                batchLimit = splitThrough > cursor
+                        ? Integer.parseInt(optionalMeta(db, "profile_split_limit", Integer.toString(PROFILE_LIMIT))) : PROFILE_LIMIT;
+                if (batchLimit < 1 || batchLimit > PROFILE_LIMIT || splitThrough > boundary) throw invalid();
+                correctingProfile = Long.parseLong(optionalMeta(db, "profile_retry_cursor", "-1")) == cursor;
                 stagedProfile = new JSONObject(meta(db, "profile"));
             }
             else {
@@ -237,7 +243,8 @@ final class MemoryRebuild {
             try (SQLiteDatabase db = open()) { put(db, "boundary", Long.toString(boundary)); }
         }
         long batchBoundary = Math.min(boundary, cursor + batchLimit);
-        JSONObject batch = source.batch(cursor, batchBoundary);
+        if (splitThrough > cursor) batchBoundary = Math.min(batchBoundary, splitThrough);
+        JSONObject batch = profile ? source.profileBatch(cursor, batchBoundary) : source.batch(cursor, batchBoundary);
         JSONArray messages = batch.getJSONArray("messages");
         long through = batch.getLong("through_id");
         if (messages.length() < 1 || messages.length() > batchLimit || through <= cursor || through > batchBoundary
@@ -270,7 +277,18 @@ final class MemoryRebuild {
         }
         JSONObject data = new JSONObject().put("job", batch).put("person", context.optJSONObject("person"))
                 .put("time_zone", java.util.TimeZone.getDefault().getID());
-        if (profile) data.put("profile", stagedProfile);
+        JSONObject currentProfile = null;
+        if (profile) {
+            currentProfile = ChatSession.profileSections(context);
+            for (String section : ChatSession.PROFILE_SECTIONS) {
+                JSONObject staged = stagedProfile.optJSONObject(section);
+                if (staged != null && staged.optLong("base_id", -1) != currentProfile.getJSONObject(section).optLong("revision"))
+                    stagedProfile.remove(section);
+            }
+            data.put("profile", stagedProfile);
+            data.put("current_profile", ChatSession.profileValues(currentProfile));
+            if (correctingProfile) data.put("retry_guidance", "前回の応答は形式または出典を検証できませんでした。指定のJSONだけを返し、source_idは今回の本人の発言IDにしてください。裏付けがある項目だけ返してください。");
+        }
         else data.put("continuity", new JSONObject().put("threads", new JSONArray()).put("episodes", roots))
                 .put("known_nodes", known).put("evidence", evidence);
         String range = (cursor + 1) + "〜" + through + "発言：";
@@ -288,16 +306,16 @@ final class MemoryRebuild {
                 }); }
         catch (IOException error) {
             if (profile && !stillCurrent(run)) return false;
-            if (profile && ChatGptConnection.smallerProfileRequestMayHelp(error) && reduceProfileBatch(run, messages.length())) return true;
+            if (profile && ChatGptConnection.isInputTooLarge(error) && reduceProfileBatch(run, through, messages.length())) return true;
             throw error;
         }
         phase(range + "結果を検証しています");
         if (profile) {
             if (!stillCurrent(run)) return false;
-            try { validateProfile(stagedProfile, ChatSession.jsonPayload(response), assistantSources); }
+            try { validateProfile(stagedProfile, ChatSession.jsonPayload(response), assistantSources, currentProfile); }
             catch (IOException | org.json.JSONException error) {
-                if (reduceProfileBatch(run, messages.length())) return true;
-                throw error;
+                if (!recordProfileValidationFailure(run, cursor)) return false;
+                throw new IOException("AIのプロフィール応答の形式または出典を確認できませんでした。同じ範囲でやり直します。");
             }
             if (!saveProfile(stagedProfile, through, run)) return false;
             phase("次の範囲の整理を準備しています");
@@ -333,38 +351,56 @@ final class MemoryRebuild {
         return true;
     }
 
-    private static void validateProfile(JSONObject staged, String answer, Set<Long> allowed) throws Exception {
-        if (bytes(answer) > 8192) throw invalid("プロフィールの整理結果が長すぎます。");
+    private static void validateProfile(JSONObject staged, String answer, Set<Long> allowed, JSONObject currentProfile) throws Exception {
+        if (bytes(answer) > PROFILE_PAYLOAD_BYTES) throw invalid("プロフィールの整理結果が長すぎます。");
         JSONObject result = new JSONObject(answer), fields = result.getJSONObject("profile");
-        if (result.length() != 1 || fields.length() > 5) throw invalid("プロフィールの項目が保存条件を満たしていません。");
+        if (result.length() != 1 || fields.length() > 8) throw invalid("プロフィールの項目が保存条件を満たしていません。");
         for (java.util.Iterator<String> labels = fields.keys(); labels.hasNext();) {
             String label = labels.next();
+            boolean section = ChatSession.isProfileSection(label);
             switch (label) {
                 case "名前": case "身長": case "体重": case "趣味": case "好きなもの": break;
-                default: throw invalid("未対応のプロフィール項目があります。");
+                default: if (!section) throw invalid("未対応のプロフィール項目があります。");
             }
             JSONObject field = fields.getJSONObject(label);
-            String value = text(field, "value", label.equals("名前") ? 256 : 512, false);
+            String value = text(field, "value", section ? ChatSession.PROFILE_SECTION_BYTES : label.equals("名前") ? 256 : 512, false);
             long id = integer(field.get("source_id"));
-            if (field.length() != 2 || value.indexOf('\r') >= 0 || value.indexOf('\n') >= 0 || value.indexOf('\t') >= 0 || !allowed.contains(id))
+            if (field.length() != 2 || !allowed.contains(id)
+                    || (!section && (value.indexOf('\r') >= 0 || value.indexOf('\n') >= 0 || value.indexOf('\t') >= 0)))
                 throw invalid("プロフィールの根拠が今回の本人の発言と一致しません。");
+            if (section) field.put("base_id", currentProfile.getJSONObject(label).optLong("revision"));
             staged.put(label, field);
         }
+        if (bytes(staged.toString()) > PROFILE_PAYLOAD_BYTES) throw invalid("プロフィールの整理結果が長すぎます。");
     }
 
-    private boolean reduceProfileBatch(long run, int attempted) throws IOException {
-        if (attempted <= MIN_PROFILE_BATCH) return false;
-        int limit = Math.max(MIN_PROFILE_BATCH, attempted / 2);
+    private boolean reduceProfileBatch(long run, long through, int attempted) throws IOException {
+        if (attempted <= 1) return false;
+        int limit = (attempted + 1) / 2;
         try (SQLiteDatabase db = open()) {
             db.beginTransaction();
             try {
                 if (profileRun(db) != run) return false;
-                put(db, "profile_limit", Integer.toString(limit));
-                put(db, "phase", "範囲を " + limit + "発言までに縮めて再試行します"); put(db, "error", "");
+                long splitThrough = Long.parseLong(optionalMeta(db, "profile_split_through", "0"));
+                put(db, "profile_split_through", Long.toString(Math.max(through, splitThrough)));
+                put(db, "profile_split_limit", Integer.toString(limit));
+                put(db, "phase", "入力サイズ超過のため、この範囲を " + limit + "発言ずつ読み直します"); put(db, "error", "");
                 db.setTransactionSuccessful();
             } finally { db.endTransaction(); }
         }
         changed.run();
+        return true;
+    }
+
+    private boolean recordProfileValidationFailure(long run, long cursor) throws IOException {
+        try (SQLiteDatabase db = open()) {
+            db.beginTransaction();
+            try {
+                if (profileRun(db) != run) return false;
+                put(db, "profile_retry_cursor", Long.toString(cursor));
+                db.setTransactionSuccessful();
+            } finally { db.endTransaction(); }
+        }
         return true;
     }
 

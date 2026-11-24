@@ -271,15 +271,24 @@ Java_jp_tekewo_conversation_MainActivity_nativeAddNote(JNIEnv* env, jclass, jbyt
     } catch (const std::exception&) { error = "メモを保存できませんでした。"; return 0; }
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_jp_tekewo_conversation_MainActivity_nativeRebuildBatch(JNIEnv* env, jclass, jlong after, jlong through) {
+static jstring rebuild_batch(JNIEnv* env, jlong after, jlong through, bool profile) {
     std::lock_guard<std::mutex> lock(mutex);
     try {
         if (!core_ready) { error = "保存先が無効です。"; return java_string(env, ""); }
-        const char* result = conversation_rebuild_batch(after, through);
+        const char* result = profile ? conversation_rebuild_profile_batch(after, through) : conversation_rebuild_batch(after, through);
         if (!result) { core_error(); return java_string(env, ""); }
         error.clear(); return java_string(env, result);
     } catch (const std::exception&) { error = "過去の会話を読み込めませんでした。"; return java_string(env, ""); }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeRebuildBatch(JNIEnv* env, jclass, jlong after, jlong through) {
+    return rebuild_batch(env, after, through, false);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeRebuildProfileBatch(JNIEnv* env, jclass, jlong after, jlong through) {
+    return rebuild_batch(env, after, through, true);
 }
 
 extern "C" JNIEXPORT jstring JNICALL

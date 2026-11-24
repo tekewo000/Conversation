@@ -150,6 +150,7 @@ public final class MemoryWork extends Worker {
                 more = rebuild.step(new MemoryRebuild.Native() {
                     public JSONObject context() throws Exception { return store.context(""); }
                     public JSONObject batch(long afterId, long throughId) throws Exception { return store.rebuildBatch(afterId, throughId); }
+                    public JSONObject profileBatch(long afterId, long throughId) throws Exception { return store.rebuildProfileBatch(afterId, throughId); }
                     public boolean publish() throws Exception { return store.publishRebuild(); }
                     public boolean publishProfile(long throughId, JSONObject profile) throws Exception { return store.publishProfileRebuild(throughId, profile); }
                 }, backend) || store.pendingPersona().optLong("through_id", 0) > 0;

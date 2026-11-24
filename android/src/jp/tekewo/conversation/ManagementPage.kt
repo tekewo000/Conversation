@@ -34,6 +34,9 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.mikepenz.markdown.m3.Markdown
+import com.mikepenz.markdown.m3.markdownColor
+import com.mikepenz.markdown.model.rememberMarkdownState
 import kotlin.math.roundToInt
 
 private val pageBackground = conversationColors.background
@@ -184,9 +187,20 @@ private fun PageBlock(block: ComposeUi.Block) {
     HorizontalDivider(color = pageRule)
     Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(block.title, Modifier.semantics { heading() }, color = pageMuted,
-            style = MaterialTheme.typography.titleSmall)
-        SelectionContainer { Text(block.text, color = pageInk, style = MaterialTheme.typography.bodyLarge) }
+        val header = if (block.action == null) Modifier else Modifier.fillMaxWidth()
+            .clickable(role = Role.Button) { block.action.run() }.padding(vertical = 6.dp)
+        Row(header, verticalAlignment = Alignment.CenterVertically) {
+            Text(block.title, if (block.action == null) Modifier.semantics { heading() } else Modifier.weight(1f).semantics { heading() },
+                color = pageMuted, style = MaterialTheme.typography.titleSmall)
+            if (block.action != null) Icon(ConversationIcons.Chevron, contentDescription = null,
+                tint = pageMuted, modifier = Modifier.size(18.dp))
+        }
+        SelectionContainer {
+            if (block.markdown) Markdown(markdownState = rememberMarkdownState(block.text, retainState = true),
+                colors = markdownColor(text = pageInk),
+                loading = { Text(block.text, color = pageInk, style = MaterialTheme.typography.bodyLarge) })
+            else Text(block.text, color = pageInk, style = MaterialTheme.typography.bodyLarge)
+        }
     }
 }
 

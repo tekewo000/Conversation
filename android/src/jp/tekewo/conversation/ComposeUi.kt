@@ -174,7 +174,8 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         @JvmField val sliders = mutableListOf<Setting>()
         @JvmField var preview = false
     }
-    class Block(@JvmField val title: String, @JvmField val text: String)
+    class Block @JvmOverloads constructor(@JvmField val title: String, @JvmField val text: String,
+        @JvmField val markdown: Boolean = false, @JvmField val action: Runnable? = null)
     class MemoryState(val emotion: String, val reason: String, val situation: String)
     class Row @JvmOverloads constructor(@JvmField val label: String, @JvmField val action: Runnable,
                                        @JvmField val icon: Int = -1) {
@@ -186,7 +187,8 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         @JvmField var section = ""
         @JvmField var destructive = false
     }
-    class Field(@JvmField val label: String, @JvmField val secret: Boolean) {
+    class Field @JvmOverloads constructor(@JvmField val label: String, @JvmField val secret: Boolean,
+        @JvmField val multiline: Boolean = false) {
         // No rememberSaveable: secrets and large drafts must not enter activity saved state.
         var value by mutableStateOf("")
         var error by mutableStateOf("")
@@ -696,11 +698,11 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                 val interactions = remember { MutableInteractionSource() }
                 val focused by interactions.collectIsFocusedAsState()
                 BasicTextField(field.value, onValueChange = { field.value = it; field.error = "" },
-                    singleLine = true, interactionSource = interactions,
+                    singleLine = !field.multiline, maxLines = if (field.multiline) 8 else 1, interactionSource = interactions,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
                         .background(colors.background, RoundedCornerShape(16.dp))
                         .border(1.dp, if (focused) colors.primary else colors.outline, RoundedCornerShape(16.dp))
-                        .heightIn(min = 52.dp).semantics { contentDescription = field.label }
+                        .heightIn(min = if (field.multiline) 92.dp else 52.dp).semantics { contentDescription = field.label }
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                     textStyle = TextStyle(color = colors.onSurface, fontSize = 16.sp),
                     cursorBrush = SolidColor(colors.primary),

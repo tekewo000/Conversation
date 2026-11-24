@@ -185,6 +185,7 @@ archive_row_valid :: proc(table: ^Archive_Table, row: json.Object) -> bool {
    _,legacy_job:=row["job_id"].(json.Null)
    key,key_ok:=row["key"].(json.String)
    if table.name=="memories" && legacy_job do maximum=PERSON_SEED_TEXT_MAX_BYTES
+   if table.name=="memories" && key_ok && profile_section_key(string(key)) do maximum=PROFILE_SECTION_MAX
    if table.name=="memories" && legacy_job && key_ok && string(key)=="legacy_pin" do maximum=MAX_MESSAGE_BYTES
   case "profile":maximum=PERSON_PROFILE_MAX_BYTES
   case "raw_markdown":maximum=PERSON_SOURCE_MAX_BYTES

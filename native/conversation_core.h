@@ -12,6 +12,7 @@ bool conversation_send(const char* utf8);
 int64_t conversation_add_message(const char* role, const char* utf8);
 int64_t conversation_add_note(const char* kind, const char* utf8);
 const char* conversation_rebuild_batch(int64_t after_id, int64_t through_id);
+const char* conversation_rebuild_profile_batch(int64_t after_id, int64_t through_id);
 bool conversation_publish_rebuild(void);
 bool conversation_publish_profile_rebuild(int64_t boundary, const char* profile_json);
 bool conversation_edit_profile(const char* edits_json);

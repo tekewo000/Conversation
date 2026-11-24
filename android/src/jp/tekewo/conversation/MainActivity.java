@@ -29,6 +29,7 @@ public final class MainActivity extends ComponentActivity {
     private static native long nativeAddReply(byte[] text, byte[] state);
     private static native long nativeAddNote(byte[] kind, byte[] text);
     static native String nativeRebuildBatch(long afterId, long throughId);
+    static native String nativeRebuildProfileBatch(long afterId, long throughId);
     static native String nativePublishRebuild();
     static native String nativePublishProfileRebuild(long boundary, byte[] payload);
     static native String nativeEditProfile(byte[] payload);
@@ -932,8 +933,6 @@ public final class MainActivity extends ComponentActivity {
         refreshProfile();
     }
 
-    private static final String[] PROFILE_LABELS = {"名前", "身長", "体重", "趣味", "好きなもの"};
-
     private void refreshProfile() {
         PersonRegistry.Person person = activePerson;
         int version = compose.getPageVersion();
@@ -948,32 +947,24 @@ public final class MainActivity extends ComponentActivity {
                     if (result.isEmpty()) throw new java.io.IOException(nativeLastError());
                     snapshot = new JSONObject(result);
                 }
-                java.util.Map<String, JSONObject> facts = new java.util.HashMap<>();
-                org.json.JSONArray rows = snapshot.optJSONArray("profile_facts");
-                if (rows != null) for (int i = 0; i < rows.length(); i++) {
-                    JSONObject fact = rows.getJSONObject(i);
-                    facts.put(fact.getString("label"), fact);
-                }
+                JSONObject sections = ChatSession.profileSections(snapshot);
                 MemoryRebuild.Progress rebuild = new MemoryRebuild(person.directory).progress();
                 ui(() -> {
                     if (!compose.isPageVisible("profile", version) || changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
                     ComposeUi.Panel panel = page("プロフィール", "profile", true);
                     panel.onResume = this::refreshProfile;
-                    JSONObject name = facts.get("名前");
-                    if (name != null) panel.subtitle = name.optString("value", person.name);
                     java.util.Map<String, String> values = new java.util.HashMap<>();
-                    for (String label : PROFILE_LABELS) {
-                        JSONObject fact = facts.get(label);
-                        String value = fact == null ? (label.equals("名前") ? person.name : "") : fact.optString("value");
+                    for (String label : ChatSession.PROFILE_SECTIONS) {
+                        JSONObject fact = sections.optJSONObject(label);
+                        String value = fact.optString("value");
                         values.put(label, value);
-                        String displayed = value.isEmpty() ? "未設定" : value;
-                        ComposeUi.Row row = entry(label, displayed, -1, () -> showProfileFact(label, displayed, fact));
-                        row.enabled = fact != null || label.equals("名前");
-                        panel.rows.add(row);
+                        String displayed = value.isBlank() ? "未設定" : value;
+                        Runnable details = !value.isBlank() || fact.optLong("revision") > 0 ? () -> showProfileFact(label, displayed, fact) : null;
+                        panel.blocks.add(new ComposeUi.Block(label, displayed, !value.isBlank(), details));
                     }
                     panel.featuredRows.add(entry("プロフィールを編集", "", 2, () -> showEditProfile(person, values)));
                     if (!rebuild.text.isEmpty()) {
-                        panel.blocks.add(new ComposeUi.Block("一括整理の進捗", rebuild.text));
+                        panel.blocks.add(0, new ComposeUi.Block("一括整理の進捗", rebuild.text));
                         if (rebuild.profile) {
                             panel.featuredRows.add(entry(rebuild.paused ? "再開" : "一時停止", "", -1,
                                     () -> setProfilePaused(person, !rebuild.paused)));
@@ -1002,8 +993,8 @@ public final class MainActivity extends ComponentActivity {
     private void showEditProfile(PersonRegistry.Person person, java.util.Map<String, String> original) {
         ComposeUi.Panel panel = new ComposeUi.Panel("プロフィールを編集");
         panel.secure = true;
-        for (String label : PROFILE_LABELS) {
-            ComposeUi.Field field = new ComposeUi.Field(label, false);
+        for (String label : ChatSession.PROFILE_SECTIONS) {
+            ComposeUi.Field field = new ComposeUi.Field(label, false, true);
             field.setValue(original.get(label));
             panel.fields.add(field);
         }
@@ -1012,15 +1003,12 @@ public final class MainActivity extends ComponentActivity {
             JSONObject changes = new JSONObject();
             boolean valid = true;
             for (ComposeUi.Field field : panel.fields) {
-                String value = field.getValue().trim();
+                String value = field.getValue();
+                if (value.isBlank()) value = "";
                 field.setError("");
                 if (value.equals(original.get(field.label))) continue;
-                if (field.label.equals("名前") && value.isBlank()) {
-                    field.setError("名前を入力してください。");
-                    valid = false;
-                } else if (bytes(value).length > (field.label.equals("名前") ? 256 : 512)
-                        || value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0 || value.indexOf('\t') >= 0 || value.indexOf('\0') >= 0) {
-                    field.setError("短い一行で入力してください。");
+                if (bytes(value).length > ChatSession.PROFILE_SECTION_BYTES || value.indexOf('\0') >= 0) {
+                    field.setError("この欄は16 KiBまで保存できます。");
                     valid = false;
                 } else try { changes.put(field.label, value); }
                 catch (org.json.JSONException error) { field.setError("保存できない内容です。"); valid = false; }
@@ -1048,22 +1036,32 @@ public final class MainActivity extends ComponentActivity {
 
     private void showProfileFact(String label, String value, JSONObject fact) {
         ComposeUi.Panel panel = page(label, "profile-detail", true);
-        panel.blocks.add(new ComposeUi.Block("現在のプロフィール", value));
-        if (fact == null || fact.optBoolean("imported")) {
-            panel.blocks.add(new ComposeUi.Block("出典", "引き継ぎプロフィール"));
+        panel.blocks.add(new ComposeUi.Block("現在のプロフィール", value, true));
+        org.json.JSONArray legacy = fact.optJSONArray("legacy");
+        if (legacy != null && legacy.length() > 0) {
+            for (int i = 0; i < legacy.length(); i++) {
+                JSONObject old = legacy.optJSONObject(i);
+                if (old != null) addProfileOrigin(panel, old.optString("label") + "の", old);
+            }
+        } else addProfileOrigin(panel, "", fact);
+        compose.showPage(panel);
+    }
+
+    private void addProfileOrigin(ComposeUi.Panel panel, String prefix, JSONObject fact) {
+        if (fact.optLong("revision") == 0 || fact.optBoolean("imported")) {
+            panel.blocks.add(new ComposeUi.Block(prefix + "出典", "引き継ぎプロフィール"));
         } else {
             boolean manual = fact.optBoolean("manual");
-            if (manual) panel.blocks.add(new ComposeUi.Block("出典", "手動編集"));
+            if (manual) panel.blocks.add(new ComposeUi.Block(prefix + "出典", "手動編集"));
             String updated = fact.optString("updated_at");
-            if (!updated.isEmpty()) panel.blocks.add(new ComposeUi.Block(manual ? "更新日時" : "反映元の発言日時",
+            if (!updated.isEmpty()) panel.blocks.add(new ComposeUi.Block(prefix + (manual ? "更新日時" : "反映元の発言日時"),
                     java.time.format.DateTimeFormatter.ofPattern("yyyy年M月d日 HH:mm").withZone(java.time.ZoneId.systemDefault())
                             .format(java.time.Instant.parse(updated))));
             if (!manual) {
                 String source = ReplyText.visible(fact.optString("source"), true);
-                if (!source.isBlank()) panel.blocks.add(new ComposeUi.Block("本人の発言", source));
+                if (!source.isBlank()) panel.blocks.add(new ComposeUi.Block(prefix + "本人の発言", source));
             }
         }
-        compose.showPage(panel);
     }
 
     private void showMemory() {

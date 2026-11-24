@@ -299,7 +299,11 @@ public final class ChatGptConnection {
                 return result;
             }
         } catch (HttpFailure e) { handleUnauthorized(e, attempt, token); throw e; }
-        catch (IOException e) { if (timedOut.get() || e instanceof java.net.SocketTimeoutException) throw new RequestTimeout(); throw sanitized(e); }
+        catch (IOException e) {
+            if (timedOut.get()) throw new SafeFailure("ChatGPT の応答が " + timeoutSeconds + " 秒以内に完了しませんでした。");
+            if (e instanceof java.net.SocketTimeoutException) throw new SafeFailure("ChatGPT との通信が待ち時間の上限に達しました。");
+            throw sanitized(e);
+        }
         catch (Exception e) { throw new SafeFailure("ChatGPT に接続できませんでした。接続状態を確認してください。"); }
         finally {
             if (timeout != null) timeout.cancel(false);
@@ -506,14 +510,15 @@ public final class ChatGptConnection {
                 code = object == null ? parsed.optString("error") : object.optString("code");
             }
         } catch (Exception ignored) {}
+        boolean inputTooLarge = status == 413 || "context_length_exceeded".equals(code);
         String message;
         if ("invalid_grant".equals(code) || status == 401) message = "ChatGPT の接続の有効期限が切れました。もう一度サインインしてください。";
         else if (status == 429 || code.startsWith("subscription_sharing_usage_")) message = "ChatGPT の利用上限に達したか、現在利用できません。ChatGPT の使用状況を確認してください。";
         else if (status == 403) message = "このアカウントまたはワークスペースでは利用が許可されていません。ChatGPT の設定を確認してください。";
+        else if (inputTooLarge) message = "ChatGPT が入力サイズ超過と応答しました。";
         else if (status >= 500) message = "ChatGPT が一時的に利用できません。時間をおいてお試しください。";
         else message = "ChatGPT への要求が受け付けられませんでした。再接続または別のモデルでお試しください。";
-        return new HttpFailure(message, status, "invalid_grant".equals(code),
-                status == 408 || status == 413 || status == 504 || "context_length_exceeded".equals(code));
+        return new HttpFailure(message, status, "invalid_grant".equals(code), inputTooLarge);
     }
 
     private void handleUnauthorized(HttpFailure failure, int attempt, String rejectedToken) throws IOException {
@@ -634,19 +639,16 @@ public final class ChatGptConnection {
     }
 
     private static final class HttpFailure extends IOException {
-        final int status; final boolean invalidGrant, smallerRequestMayHelp;
-        HttpFailure(String message, int status, boolean invalidGrant, boolean smallerRequestMayHelp) {
-            super(message); this.status = status; this.invalidGrant = invalidGrant; this.smallerRequestMayHelp = smallerRequestMayHelp;
+        final int status; final boolean invalidGrant, inputTooLarge;
+        HttpFailure(String message, int status, boolean invalidGrant, boolean inputTooLarge) {
+            super(message); this.status = status; this.invalidGrant = invalidGrant; this.inputTooLarge = inputTooLarge;
         }
     }
-    static boolean smallerProfileRequestMayHelp(IOException error) {
-        return error instanceof RequestTimeout || error instanceof HttpFailure && ((HttpFailure)error).smallerRequestMayHelp
-                || error instanceof SseReader.StreamFailure && ((SseReader.StreamFailure)error).smallerRequestMayHelp;
+    static boolean isInputTooLarge(IOException error) {
+        return error instanceof HttpFailure && ((HttpFailure)error).inputTooLarge
+                || error instanceof SseReader.StreamFailure && ((SseReader.StreamFailure)error).inputTooLarge;
     }
-    private static class SafeFailure extends IOException {
+    private static final class SafeFailure extends IOException {
         SafeFailure(String message) { super(message); }
-    }
-    private static final class RequestTimeout extends SafeFailure {
-        RequestTimeout() { super("ChatGPT の応答待ちがタイムアウトしました。"); }
     }
 }

@@ -41,13 +41,24 @@ REBUILD_MESSAGE_JSON :: `json_patch(json_object('id',id,'role',role,'content',su
 @(export)
 conversation_rebuild_batch :: proc "c" (after_id,through_id:i64) -> cstring {
  context=runtime.default_context()
+ return read_rebuild_batch(after_id,through_id,262000)
+}
+
+@(export)
+conversation_rebuild_profile_batch :: proc "c" (after_id,through_id:i64) -> cstring {
+ context=runtime.default_context()
+ if after_id>=0 && through_id>=after_id && through_id-after_id>2000 { fail("Profile history request exceeds 2000 messages."); return nil }
+ return read_rebuild_batch(after_id,through_id,524288)
+}
+
+read_rebuild_batch :: proc(after_id,through_id,byte_limit:i64) -> cstring {
  if !ready || after_id<0 || through_id<after_id || through_id>i64(message_count) { fail("Invalid historical rebuild boundary."); return nil }
- sql:=strings.clone_to_cstring(`WITH candidates AS MATERIALIZED (SELECT id,`+REBUILD_MESSAGE_JSON+` AS row FROM messages WHERE id>?1 AND id<=?2 ORDER BY id LIMIT 4096), budget AS (SELECT id,row,sum(length(CAST(row AS BLOB))+1) OVER(ORDER BY id) AS bytes FROM candidates), page AS (SELECT * FROM budget WHERE bytes<=262000) SELECT json_object('messages',json((SELECT json_group_array(json(row)) FROM page)),'through_id',coalesce((SELECT max(id) FROM page),?1),'boundary_id',?2)`)
+ sql:=strings.clone_to_cstring(`WITH candidates AS MATERIALIZED (SELECT id,`+REBUILD_MESSAGE_JSON+` AS row FROM messages WHERE id>?1 AND id<=?2 ORDER BY id LIMIT 4096), budget AS (SELECT id,row,sum(length(CAST(row AS BLOB))+1) OVER(ORDER BY id) AS bytes FROM candidates), page AS (SELECT * FROM budget WHERE bytes<=?3) SELECT json_object('messages',json((SELECT json_group_array(json(row)) FROM page)),'through_id',coalesce((SELECT max(id) FROM page),?1),'boundary_id',?2)`)
  defer delete(sql)
  stmt:=prepare(sql)
  if stmt==nil do return nil
  defer sqlite3_finalize(stmt)
- if !bind_int(stmt,1,after_id) || !bind_int(stmt,2,through_id) || sqlite3_step(stmt)!=100 { fail("Could not read historical messages."); return nil }
+ if !bind_int(stmt,1,after_id) || !bind_int(stmt,2,through_id) || !bind_int(stmt,3,byte_limit) || sqlite3_step(stmt)!=100 { fail("Could not read historical messages."); return nil }
  last_error=""
  return result_text(sqlite3_column_text(stmt,0))
 }
@@ -113,12 +124,12 @@ rebuild_prepare :: proc(stage:SQLite,sql:cstring) -> Statement {
 conversation_publish_profile_rebuild :: proc "c" (boundary:i64,payload:cstring) -> bool {
  context=runtime.default_context()
  if !ready do return fail("History is not open.")
- if boundary<1 || payload==nil || len(string(payload))>8192 do return fail("Invalid historical profile data.")
+ if boundary<1 || payload==nil || len(string(payload))>PROFILE_PAYLOAD_MAX do return fail("Invalid historical profile data.")
  value,parsed:=parse_json(transmute([]byte)string(payload))
  if !parsed do return false
  defer json.destroy_value(value)
  fields,object_ok:=value.(json.Object)
- if !object_ok || len(fields)>5 do return fail("Expected at most five historical profile fields.")
+ if !object_ok || len(fields)>8 do return fail("Invalid historical profile field count.")
  if !execute("BEGIN IMMEDIATE") do return false
  committed:=false
  defer { archive_group=0; if !committed do execute("ROLLBACK") }
@@ -127,12 +138,18 @@ conversation_publish_profile_rebuild :: proc "c" (boundary:i64,payload:cstring) 
   key:=strings.concatenate({"profile/",label})
   defer delete(key)
   field,field_ok:=candidate.(json.Object)
-  if !profile_fact_key(key) || !field_ok || len(field)!=2 do return fail("Invalid historical profile field.")
+  section:=profile_section_key(key)
+  if !profile_fact_key(key) || !field_ok || len(field)!=(3 if section else 2) do return fail("Invalid historical profile field.")
   value,value_ok:=field["value"].(json.String)
   source,source_ok:=field["source_id"].(json.Integer)
   if !value_ok || !profile_fact_value_valid(key,string(value)) || !source_ok || source<1 || i64(source)>boundary || !profile_fact_source_valid(i64(source)) do return fail("Profile evidence must be an assistant reply in the rebuilt history.")
   previous,previous_source,_,ok:=current_profile_fact(key,string(value))
   if !ok do return false
+  if section {
+   base_id,base_ok:=field["base_id"].(json.Integer)
+   if !base_ok || base_id<0 do return fail("Invalid rebuilt profile section revision.")
+   if previous!=i64(base_id) do continue
+  }
   if previous_source>=i64(source) do continue
   if archive_group==0 && !archive_begin() do return false
   stmt:=prepare(`INSERT INTO memories(kind,actor,subject,key,text,scope,certainty,supersedes_id,valid_from)

@@ -554,7 +554,7 @@ public final class ChatSessionTest {
         };
         new ChatSession(store).reply("最近どう？", true, (instructions, input, delta) -> {
             JSONObject data = new JSONObject(input.getJSONObject(0).getString("content").replaceFirst("^[^\\n]*\\n", ""));
-            assert data.getJSONObject("profile").getString("趣味").equals("陶芸");
+            assert data.getJSONObject("profile").getString("自由記述").equals("- 趣味: 陶芸");
             assert !data.getJSONObject("profile").toString().contains("以前は");
             return "元気だよ";
         }, new Listener());

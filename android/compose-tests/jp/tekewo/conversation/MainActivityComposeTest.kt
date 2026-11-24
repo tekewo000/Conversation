@@ -349,7 +349,7 @@ class MainActivityComposeTest {
         assertEquals("165 cm", facts.getJSONObject(0).getString("value"))
         val profile = "会話相手のプロフィールを開く"
         compose.onNodeWithContentDescription(profile).performClick()
-        compose.waitUntil(10_000) { compose.onAllNodes(hasText("165 cm")).fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText("165 cm", substring = true)).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithContentDescription("戻る").performClick()
 
         val add = MainActivity::class.java.getDeclaredMethod("nativeAddMessage", ByteArray::class.java, ByteArray::class.java).apply { isAccessible = true }
@@ -357,8 +357,8 @@ class MainActivityComposeTest {
         assertEquals(2L, add.invoke(null, "assistant".toByteArray(), "測り直したら166 cmだった".toByteArray()))
         assertEquals("", MainActivity.nativeApplyJob(1, """{"memories":[{"kind":"fact","actor":"assistant","subject":"friend","key":"profile/身長","text":"166 cm","scope":"shared","certainty":"explicit","source_ids":[2]}]}""".toByteArray()))
         compose.onNodeWithContentDescription(profile).performClick()
-        compose.waitUntil(10_000) { compose.onAllNodes(hasText("166 cm")).fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("身長").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText("166 cm", substring = true)).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("身体的特徴").performClick()
         compose.onNodeWithText("測り直したら166 cmだった").assertIsDisplayed()
     }
 
@@ -388,15 +388,16 @@ class MainActivityComposeTest {
         val source = object : MemoryRebuild.Native {
             override fun context() = store.context("")
             override fun batch(after: Long, through: Long) = store.rebuildBatch(after, through)
+            override fun profileBatch(after: Long, through: Long) = store.rebuildProfileBatch(after, through)
             override fun publish(): Boolean = throw AssertionError("Profile rebuild must not publish episodes")
             override fun publishProfile(through: Long, profile: org.json.JSONObject) = store.publishProfileRebuild(through, profile)
         }
-        assertTrue(rebuild.step(source) { _, _, _ -> """{"profile":{"趣味":{"value":"読書","source_id":2}}}""" })
+        assertTrue(rebuild.step(source) { _, _, _ -> """{"profile":{"自由記述":{"value":"## 趣味\n- 読書","source_id":2}}}""" })
         assertTrue(!rebuild.step(source) { _, _, _ -> throw AssertionError("Expected publication") })
         compose.onNodeWithContentDescription("戻る").performClick()
         compose.onNodeWithContentDescription("会話相手のプロフィールを開く").performClick()
         compose.waitUntil(10_000) { compose.onAllNodes(hasText("読書")).fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("趣味").performScrollTo().performClick()
+        compose.onNodeWithText("自由記述").performScrollTo().performClick()
         compose.onNodeWithText("趣味は読書だよ").assertIsDisplayed()
     }
 
@@ -406,14 +407,14 @@ class MainActivityComposeTest {
         compose.onNodeWithContentDescription(header).performClick()
         compose.waitUntil(10_000) { compose.onAllNodes(hasText("プロフィールを編集")).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithText("プロフィールを編集").performClick()
-        compose.onNodeWithContentDescription("趣味").performTextInput("陶芸")
-        compose.onNodeWithContentDescription("身長").performTextInput("165 cm")
+        compose.onNodeWithContentDescription("自由記述").performTextInput("## 趣味\n- 陶芸")
+        compose.onNodeWithContentDescription("身体的特徴").performTextInput("- 身長: 165 cm\n- 髪型: ボブ")
         compose.onNodeWithText("保存").performClick()
         compose.waitUntil(10_000) { compose.onAllNodes(hasText("陶芸")).fetchSemanticsNodes().isNotEmpty() }
         compose.activityRule.scenario.recreate()
         compose.onNodeWithContentDescription(header).performClick()
-        compose.waitUntil(10_000) { compose.onAllNodes(hasText("165 cm")).fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("趣味").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText("165 cm", substring = true)).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("自由記述").performClick()
         compose.onNodeWithText("陶芸").assertIsDisplayed()
         compose.onNodeWithText("手動編集").assertIsDisplayed()
     }

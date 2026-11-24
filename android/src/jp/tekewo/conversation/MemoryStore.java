@@ -42,6 +42,9 @@ final class MemoryStore implements ChatSession.Store {
     JSONObject rebuildBatch(long afterId, long throughId) throws Exception {
         synchronized (MainActivity.storeGate) { current(); return read(MainActivity.nativeRebuildBatch(afterId, throughId)); }
     }
+    JSONObject rebuildProfileBatch(long afterId, long throughId) throws Exception {
+        synchronized (MainActivity.storeGate) { current(); return read(MainActivity.nativeRebuildProfileBatch(afterId, throughId)); }
+    }
     boolean publishRebuild() throws Exception {
         synchronized (MainActivity.storeGate) {
             current(); String error = MainActivity.nativePublishRebuild();

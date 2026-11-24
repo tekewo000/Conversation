@@ -496,12 +496,13 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
   record, is_record := value.(json.Object)
   if !is_record do return fail("Every memory must be an object.")
   for key in record {
-   if key != "kind" && key != "actor" && key != "subject" && key != "key" && key != "text" && key != "scope" && key != "certainty" && key != "status" && key != "source_ids" && key != "supersedes_id" && key != "valid_from" do return fail("Unknown memory field.")
+   if key != "kind" && key != "actor" && key != "subject" && key != "key" && key != "text" && key != "scope" && key != "certainty" && key != "status" && key != "source_ids" && key != "supersedes_id" && key != "valid_from" && key != "profile_base_id" do return fail("Unknown memory field.")
   }
   kind, k_ok := string_field(record, "kind", 32)
   subject, s_ok := string_field(record, "subject", 256)
   key, key_ok := string_field(record, "key", 256)
-  text, t_ok := string_field(record, "text", 4096)
+   profile_section := subject=="friend" && profile_section_key(key)
+   text, t_ok := string_field(record, "text", PROFILE_SECTION_MAX if profile_section else 4096)
   scope, sc_ok := string_field(record, "scope", 32)
   certainty, c_ok := string_field(record, "certainty", 32)
   actor := "user"
@@ -514,6 +515,9 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
   if !k_ok || !s_ok || !key_ok || !t_ok || !sc_ok || !c_ok || !sources_ok || len(sources) == 0 || len(sources) > 16 || (kind != "fact" && kind != "event" && kind != "interpretation" && kind != "promise") || (scope != "real" && scope != "fiction" && scope != "shared") || (kind=="interpretation" && certainty!="inferred") || (kind!="interpretation" && certainty!="explicit") { return fail("Invalid typed memory or missing source IDs.") }
   if subject=="episode" && (actor=="conversation" || strings.has_prefix(key,"episode:") || strings.has_prefix(key,"episode-node:")) do return fail("Episode events must be updated through continuity, not generic memories.")
   profile_fact := subject=="friend" && profile_fact_key(key)
+   base,base_present:=record["profile_base_id"]
+   base_id,base_ok:=base.(json.Integer)
+   if (profile_section && (!base_ok || base_id<0)) || (!profile_section && base_present) do return fail("Invalid profile section revision.")
    if profile_fact && (actor!="assistant" || kind!="fact" || scope!="shared" || len(sources)!=1 || !profile_fact_value_valid(key,text)) do return fail("Profile fields need one explicit self-disclosure and a short one-line value.")
   status := "active"
   if _, exists := record["status"]; exists {
@@ -554,6 +558,7 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
     prior,prior_source,unchanged,found:=current_profile_fact(key,text)
     if !found do return false
     if unchanged || prior_source>=source do continue
+    if profile_section && prior!=i64(base_id) do return fail("Profile section changed while the response was being prepared; retry with the current profile.")
     previous=prior
   }
   stmt := prepare("INSERT INTO memories(job_id,ordinal,kind,actor,subject,key,text,scope,certainty,supersedes_id,valid_from,status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,nullif(?10,0),coalesce(nullif(?11,''),(SELECT created_at FROM messages WHERE id=?12)),?13)")

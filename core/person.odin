@@ -30,7 +30,7 @@ PROFILE_FACT_VALUE_SQL :: `CASE WHEN p.actor='user' AND p.key!='profile/名前' 
  THEN substr(p.text,instr(p.text,substr(p.key,9)||': ')+length(p.key)-6) ELSE p.text END`
 
 PROFILE_FACTS_JSON :: `(
- WITH fields(label) AS (VALUES('名前'),('身長'),('体重'),('趣味'),('好きなもの')),
+ WITH fields(label) AS (VALUES('名前'),('身長'),('体重'),('趣味'),('好きなもの'),('基本情報'),('身体的特徴'),('自由記述')),
  facts AS (
   SELECT label,p.id,p.job_id,p.actor,p.created_at,`+PROFILE_FACT_VALUE_SQL+` AS value FROM fields JOIN memories p ON p.id=(
    SELECT m.id FROM memories m JOIN memory_current c ON c.id=m.id
@@ -39,18 +39,27 @@ PROFILE_FACTS_JSON :: `(
  )
  SELECT json_group_array(json_object('label',f.label,'value',f.value,
    'source_id',s.id,'source',substr(s.content,1,2048),'updated_at',CASE WHEN f.actor='user' THEN f.created_at ELSE s.created_at END,
-   'manual',json(CASE WHEN f.actor='user' THEN 'true' ELSE 'false' END),'imported',json(CASE WHEN f.job_id IS NULL AND f.actor='friend' THEN 'true' ELSE 'false' END)))
+   'manual',json(CASE WHEN f.actor='user' THEN 'true' ELSE 'false' END),'imported',json(CASE WHEN f.job_id IS NULL AND f.actor='friend' THEN 'true' ELSE 'false' END),
+   'revision',f.id))
  FROM facts f LEFT JOIN messages s ON s.id=(SELECT max(message_id) FROM memory_sources WHERE memory_id=f.id)
 )`
+
+PROFILE_SECTION_MAX :: 16384
+PROFILE_PAYLOAD_MAX :: 131072
+
+profile_section_key :: proc(key: string) -> bool {
+ return key=="profile/基本情報" || key=="profile/身体的特徴" || key=="profile/自由記述"
+}
 
 profile_fact_key :: proc(key: string) -> bool {
  switch key {
  case "profile/名前", "profile/身長", "profile/体重", "profile/趣味", "profile/好きなもの": return true
  }
- return false
+ return profile_section_key(key)
 }
 
 profile_fact_value_valid :: proc(key,text:string) -> bool {
+ if profile_section_key(key) do return valid_text(text,PROFILE_SECTION_MAX)
  return valid_text(text,256 if key=="profile/名前" else 512) && !strings.contains_any(text,"\r\n\t")
 }
 
@@ -74,6 +83,19 @@ current_profile_fact :: proc(key,text:string) -> (id,source:i64,unchanged,ok:boo
  rc:=sqlite3_step(latest)
  if rc==100 do return sqlite3_column_int64(latest,0),sqlite3_column_int64(latest,2),string(sqlite3_column_text(latest,1))==text,true
  if rc!=101 do fail("Could not read the current profile value.")
+ if rc==101 && profile_section_key(key) {
+  legacy:=prepare(`SELECT coalesce(max(CASE WHEN p.actor='user' THEN p.ordinal
+    ELSE coalesce((SELECT max(message_id) FROM memory_sources WHERE memory_id=p.id),0) END),0)
+   FROM memories p JOIN memory_current c ON c.id=p.id
+   WHERE p.subject='friend' AND p.scope='shared' AND p.kind='fact' AND p.certainty='explicit'
+    AND ((?1='profile/基本情報' AND p.key='profile/名前') OR (?1='profile/身体的特徴' AND p.key IN ('profile/身長','profile/体重'))
+      OR (?1='profile/自由記述' AND p.key IN ('profile/趣味','profile/好きなもの')))`)
+  if legacy==nil do return
+  defer sqlite3_finalize(legacy)
+  if !bind_text(legacy,1,key) || sqlite3_step(legacy)!=100 do return
+  source=sqlite3_column_int64(legacy,0)
+  return 0,source,false,true
+ }
  return 0,0,false,rc==101
 }
 
@@ -81,12 +103,12 @@ current_profile_fact :: proc(key,text:string) -> (id,source:i64,unchanged,ok:boo
 conversation_edit_profile :: proc "c" (payload:cstring) -> bool {
  context=runtime.default_context()
  if !ready do return fail("History is not open.")
- if payload==nil || len(string(payload))>8192 do return fail("Invalid profile edits.")
+ if payload==nil || len(string(payload))>PROFILE_PAYLOAD_MAX do return fail("Invalid profile edits.")
  value,parsed:=parse_json(transmute([]byte)string(payload))
  if !parsed do return false
  defer json.destroy_value(value)
  fields,object_ok:=value.(json.Object)
- if !object_ok || len(fields)<1 || len(fields)>5 do return fail("Expected one to five profile edits.")
+ if !object_ok || len(fields)<1 || len(fields)>8 do return fail("Invalid profile edit count.")
  if !execute("BEGIN IMMEDIATE") do return false
  committed:=false
  defer { archive_group=0; if !committed do execute("ROLLBACK") }
