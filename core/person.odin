@@ -25,19 +25,21 @@ CREATE TRIGGER IF NOT EXISTS documents_no_delete BEFORE DELETE ON source_documen
 
 PERSON_JSON :: `coalesce((SELECT json_object('id',person_id,'name',name,'profile',profile,'source_sha256',source_sha256,'version',version) FROM person_profiles WHERE slot=1),'null')`
 
-PROFILE_FACT_VALUE_SQL :: `CASE WHEN p.job_id IS NULL AND p.actor='friend' AND instr(p.text,substr(p.key,9)||': ')>0
+PROFILE_FACT_VALUE_SQL :: `CASE WHEN p.actor='user' AND p.key!='profile/名前' AND p.text='未設定' THEN ''
+ WHEN p.job_id IS NULL AND p.actor='friend' AND instr(p.text,substr(p.key,9)||': ')>0
  THEN substr(p.text,instr(p.text,substr(p.key,9)||': ')+length(p.key)-6) ELSE p.text END`
 
 PROFILE_FACTS_JSON :: `(
  WITH fields(label) AS (VALUES('名前'),('身長'),('体重'),('趣味'),('好きなもの')),
  facts AS (
-  SELECT label,p.id,p.job_id,p.actor,`+PROFILE_FACT_VALUE_SQL+` AS value FROM fields JOIN memories p ON p.id=(
+  SELECT label,p.id,p.job_id,p.actor,p.created_at,`+PROFILE_FACT_VALUE_SQL+` AS value FROM fields JOIN memories p ON p.id=(
    SELECT m.id FROM memories m JOIN memory_current c ON c.id=m.id
    WHERE m.subject='friend' AND m.key='profile/'||fields.label AND m.scope='shared' AND m.kind='fact'
-    AND m.certainty='explicit' AND m.actor IN ('assistant','friend') ORDER BY m.id DESC LIMIT 1)
+    AND m.certainty='explicit' AND (m.actor IN ('assistant','friend') OR (m.actor='user' AND m.job_id IS NULL AND m.ordinal IS NOT NULL)) ORDER BY m.id DESC LIMIT 1)
  )
  SELECT json_group_array(json_object('label',f.label,'value',f.value,
-   'source_id',s.id,'source',substr(s.content,1,2048),'updated_at',s.created_at,'imported',json(CASE WHEN f.job_id IS NULL AND f.actor='friend' THEN 'true' ELSE 'false' END)))
+   'source_id',s.id,'source',substr(s.content,1,2048),'updated_at',CASE WHEN f.actor='user' THEN f.created_at ELSE s.created_at END,
+   'manual',json(CASE WHEN f.actor='user' THEN 'true' ELSE 'false' END),'imported',json(CASE WHEN f.job_id IS NULL AND f.actor='friend' THEN 'true' ELSE 'false' END)))
  FROM facts f LEFT JOIN messages s ON s.id=(SELECT max(message_id) FROM memory_sources WHERE memory_id=f.id)
 )`
 
@@ -60,9 +62,11 @@ profile_fact_source_valid :: proc(id:i64) -> bool {
 }
 
 current_profile_fact :: proc(key,text:string) -> (id,source:i64,unchanged,ok:bool) {
- latest:=prepare(`SELECT p.id,`+PROFILE_FACT_VALUE_SQL+`,coalesce((SELECT max(message_id) FROM memory_sources WHERE memory_id=p.id),0)
+ latest:=prepare(`SELECT p.id,`+PROFILE_FACT_VALUE_SQL+`,CASE WHEN p.actor='user' THEN p.ordinal
+  ELSE coalesce((SELECT max(message_id) FROM memory_sources WHERE memory_id=p.id),0) END
   FROM memories p JOIN memory_current c ON c.id=p.id
-  WHERE p.subject='friend' AND p.key=?1 AND p.scope='shared' AND p.kind='fact' AND p.actor IN ('assistant','friend')
+  WHERE p.subject='friend' AND p.key=?1 AND p.scope='shared' AND p.kind='fact' AND p.certainty='explicit'
+   AND (p.actor IN ('assistant','friend') OR (p.actor='user' AND p.job_id IS NULL AND p.ordinal IS NOT NULL))
   ORDER BY p.id DESC LIMIT 1`)
  if latest==nil do return
  defer sqlite3_finalize(latest)
@@ -71,6 +75,45 @@ current_profile_fact :: proc(key,text:string) -> (id,source:i64,unchanged,ok:boo
  if rc==100 do return sqlite3_column_int64(latest,0),sqlite3_column_int64(latest,2),string(sqlite3_column_text(latest,1))==text,true
  if rc!=101 do fail("Could not read the current profile value.")
  return 0,0,false,rc==101
+}
+
+@(export)
+conversation_edit_profile :: proc "c" (payload:cstring) -> bool {
+ context=runtime.default_context()
+ if !ready do return fail("History is not open.")
+ if payload==nil || len(string(payload))>8192 do return fail("Invalid profile edits.")
+ value,parsed:=parse_json(transmute([]byte)string(payload))
+ if !parsed do return false
+ defer json.destroy_value(value)
+ fields,object_ok:=value.(json.Object)
+ if !object_ok || len(fields)<1 || len(fields)>5 do return fail("Expected one to five profile edits.")
+ if !execute("BEGIN IMMEDIATE") do return false
+ committed:=false
+ defer { archive_group=0; if !committed do execute("ROLLBACK") }
+ // A manual row has no job; its ordinal is the last message visible when the edit is saved.
+ boundary:=scalar("SELECT coalesce(max(id),0) FROM messages")
+ if boundary<0 || !archive_begin() do return false
+ for label,field in fields {
+  key:=strings.concatenate({"profile/",label})
+  defer delete(key)
+  value,value_ok:=field.(json.String)
+  text:=string(value)
+  cleared:=text=="" && label!="名前"
+  if !profile_fact_key(key) || !value_ok || (!cleared && !profile_fact_value_valid(key,text)) do return fail("Invalid profile field or value.")
+  previous,_,_,ok:=current_profile_fact(key,text)
+  if !ok do return false
+  stmt:=prepare(`INSERT INTO memories(ordinal,kind,actor,subject,key,text,scope,certainty,supersedes_id,valid_from)
+    VALUES(?1,'fact','user','friend',?2,?3,'shared','explicit',nullif(?4,0),strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+  if stmt==nil do return false
+  stored:="未設定" if cleared else text
+  saved:=bind_int(stmt,1,boundary) && bind_text(stmt,2,key) && bind_text(stmt,3,stored) && bind_int(stmt,4,previous) && sqlite3_step(stmt)==101
+  sqlite3_finalize(stmt)
+  if !saved || !archive_capture("memories",sqlite3_last_insert_rowid(db)) do return false
+ }
+ if !archive_finish() do return false
+ committed=execute("COMMIT")
+ if committed do last_error=""
+ return committed
 }
 
 IMPORTED_SOURCES_JSON :: `(SELECT json_group_array(json_object('document_id',d.id,'format',d.format,'provenance',d.provenance,'source_sha256',d.source_sha256,'section',s.section,'occurred_at',s.occurred_at,'snippet',substr(d.raw_markdown,1,256))) FROM memory_document_sources s JOIN source_documents d ON d.id=s.document_id WHERE s.memory_id=m.id)`

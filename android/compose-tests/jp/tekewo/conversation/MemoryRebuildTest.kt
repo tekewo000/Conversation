@@ -19,6 +19,40 @@ class MemoryRebuildTest {
     private fun result(root: JSONObject) = JSONObject().put("memories", JSONArray()).put("continuity",
         JSONObject().put("threads", JSONArray()).put("episodes", JSONArray().put(root))).toString()
 
+    @Test fun profileRebuildReadsMoreThanSixtyFourMessagesInOneRequest() {
+        val directory = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "profile-batch-${UUID.randomUUID()}").apply { mkdirs() }
+        try {
+            val rebuild = MemoryRebuild(directory)
+            val total = 130L
+            rebuild.request(total, true)
+            var requests = 0
+            val source = object : MemoryRebuild.Native {
+                override fun context() = JSONObject().put("memory_progress", JSONObject().put("total_messages", total))
+                override fun batch(after: Long, through: Long): JSONObject {
+                    val messages = JSONArray()
+                    for (id in after + 1..through) messages.put(JSONObject().put("id", id)
+                        .put("role", if (id % 2L == 0L) "assistant" else "user").put("content", "発言$id"))
+                    return JSONObject().put("messages", messages).put("through_id", through).put("boundary_id", through)
+                }
+                override fun publish(): Boolean = throw AssertionError("Expected profile publication")
+                override fun publishProfile(through: Long, profile: JSONObject): Boolean {
+                    assertEquals(total, through)
+                    assertEquals(total, profile.getJSONObject("趣味").getLong("source_id"))
+                    return true
+                }
+            }
+            assertTrue(rebuild.step(source) { _, input, _ ->
+                requests++
+                val job = JSONObject(input.getJSONObject(0).getString("content")).getJSONObject("job")
+                assertEquals(total, job.getLong("through_id"))
+                assertEquals(total.toInt(), job.getJSONArray("messages").length())
+                """{"profile":{"趣味":{"value":"読書","source_id":130}}}"""
+            })
+            assertFalse(rebuild.step(source) { _, _, _ -> throw AssertionError("Expected a single request") })
+            assertEquals(1, requests)
+        } finally { directory.deleteRecursively() }
+    }
+
     @Test fun profileRebuildResumesAndRejectsAnUnsupportedSource() {
         val directory = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "profile-rebuild-${UUID.randomUUID()}").apply { mkdirs() }
         try {

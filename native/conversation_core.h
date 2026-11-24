@@ -14,6 +14,7 @@ int64_t conversation_add_note(const char* kind, const char* utf8);
 const char* conversation_rebuild_batch(int64_t after_id, int64_t through_id);
 bool conversation_publish_rebuild(void);
 bool conversation_publish_profile_rebuild(int64_t boundary, const char* profile_json);
+bool conversation_edit_profile(const char* edits_json);
 int64_t conversation_add_reply(const char* utf8, const char* state_json);
 int32_t conversation_message_count(void);
 // Absolute zero-based indexes; load at most 80 rows before using getters.

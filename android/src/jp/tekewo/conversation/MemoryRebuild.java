@@ -164,11 +164,13 @@ final class MemoryRebuild {
             boundary = latest;
             try (SQLiteDatabase db = open()) { put(db, "boundary", Long.toString(boundary)); }
         }
-        long batchBoundary = Math.min(boundary, cursor + 64);
+        // Profile output is at most five fields, so use Core's full history window and byte budget.
+        int batchLimit = profile ? 4096 : 64;
+        long batchBoundary = Math.min(boundary, cursor + batchLimit);
         JSONObject batch = source.batch(cursor, batchBoundary);
         JSONArray messages = batch.getJSONArray("messages");
         long through = batch.getLong("through_id");
-        if (messages.length() < 1 || messages.length() > 64 || through <= cursor || through > batchBoundary
+        if (messages.length() < 1 || messages.length() > batchLimit || through <= cursor || through > batchBoundary
                 || batch.getLong("boundary_id") != batchBoundary || through - cursor != messages.length()) throw invalid();
         Set<Long> allowed = new HashSet<>();
         Set<Long> assistantSources = new HashSet<>();

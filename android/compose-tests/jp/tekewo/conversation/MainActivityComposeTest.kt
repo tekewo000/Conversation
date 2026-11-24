@@ -395,6 +395,24 @@ class MainActivityComposeTest {
         compose.onNodeWithText("趣味は読書だよ").assertIsDisplayed()
     }
 
+    @Test fun profileEditorSavesValuesAndMarksTheirOrigin() {
+        createManagementPerson()
+        val header = "会話相手のプロフィールを開く"
+        compose.onNodeWithContentDescription(header).performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText("プロフィールを編集")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("プロフィールを編集").performClick()
+        compose.onNodeWithContentDescription("趣味").performTextInput("陶芸")
+        compose.onNodeWithContentDescription("身長").performTextInput("165 cm")
+        compose.onNodeWithText("保存").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText("陶芸")).fetchSemanticsNodes().isNotEmpty() }
+        compose.activityRule.scenario.recreate()
+        compose.onNodeWithContentDescription(header).performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText("165 cm")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("趣味").performClick()
+        compose.onNodeWithText("陶芸").assertIsDisplayed()
+        compose.onNodeWithText("手動編集").assertIsDisplayed()
+    }
+
     private fun openShortTermMemory() {
         val header = "会話相手のプロフィールを開く"
         compose.waitUntil(10_000) {

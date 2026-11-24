@@ -305,6 +305,18 @@ Java_jp_tekewo_conversation_MainActivity_nativePublishProfileRebuild(JNIEnv* env
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_jp_tekewo_conversation_MainActivity_nativeEditProfile(JNIEnv* env, jclass, jbyteArray payload) {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {
+        if (!core_ready) return java_string(env, "保存先が無効です。");
+        std::string edits;
+        if (!read_text(env, payload, edits)) return java_string(env, "プロフィールの形式が正しくありません。");
+        if (!conversation_edit_profile(edits.c_str())) { core_error(); return java_string(env, error); }
+        error.clear(); return java_string(env, "");
+    } catch (const std::exception&) { return java_string(env, "プロフィールを保存できませんでした。"); }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_jp_tekewo_conversation_MainActivity_nativeLastError(JNIEnv* env, jclass) {
     std::lock_guard<std::mutex> lock(mutex);
     return java_string(env, error);
