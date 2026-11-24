@@ -165,7 +165,7 @@ public final class MainActivity extends ComponentActivity {
         if (activePerson != null) compose.setAttachments(readPersonState().optString("attachments"));
         if (activePerson != null) compose.setGenerateImages(getPreferences(MODE_PRIVATE).getBoolean("image_mode_" + activePerson.id, false));
         compose.setPersonName(activePerson == null ? "" : activePerson.displayName);
-        compose.setOnIcon(this::showMemory);
+        compose.setOnIcon(this::showProfile);
         compose.setOnSendNote(this::showNoteMenu);
         refreshPersonIcon();
         connection = new ChatGptConnection(this);
@@ -199,10 +199,11 @@ public final class MainActivity extends ComponentActivity {
                 synchronized (storeGate) { requireCurrentPerson(); return new JSONObject(nativeContext(bytes(query))); }
             }
             public JSONObject replyContext(String text) throws Exception {
-                long[] ids = semanticMemory == null ? new long[0] : semanticMemory.search(text);
+                String search = ChatSession.needsRecallContext(text) ? ChatSession.recallQuery(text, context("")) : text;
+                long[] ids = semanticMemory == null ? new long[0] : semanticMemory.search(search);
                 synchronized (storeGate) {
                     requireCurrentPerson();
-                    String result = nativeContextHybrid(bytes(ChatSession.query(text)), ids);
+                    String result = nativeContextHybrid(bytes(ChatSession.query(search)), ids);
                     if (result.isEmpty()) throw new java.io.IOException(nativeLastError());
                     return new JSONObject(result);
                 }
@@ -238,6 +239,7 @@ public final class MainActivity extends ComponentActivity {
             refreshMessages();
             if (semanticMemory != null) semanticMemory.refresh();
             if (memoryView != 0) refreshMemoryView();
+            else if (compose.isPageVisible("profile", compose.getPageVersion())) refreshProfile();
             else if (compose.isPageVisible("management", compose.getPageVersion())) showHistoryMenu();
         });
         queueMemories(true);
@@ -918,6 +920,76 @@ public final class MainActivity extends ComponentActivity {
                 ui(() -> { if (activePerson != null && person.id.equals(activePerson.id)) compose.setPersonIcon(bitmap); });
             } catch (Exception error) { ui(() -> { compose.setPersonIcon(null); showError(safeError(error)); }); }
         });
+    }
+
+    private void showProfile() {
+        ComposeUi.Panel loading = page("プロフィール", "profile", true);
+        loading.loading = true;
+        loading.onResume = this::refreshProfile;
+        compose.showPage(loading);
+        refreshProfile();
+    }
+
+    private void refreshProfile() {
+        PersonRegistry.Person person = activePerson;
+        int version = compose.getPageVersion();
+        if (person == null || changingPerson || !compose.isPageVisible("profile", version)) return;
+        reader.execute(() -> {
+            try {
+                JSONObject snapshot;
+                synchronized (storeGate) {
+                    if (activePerson == null || !person.id.equals(activePerson.id)) return;
+                    requireCurrentPerson();
+                    String result = nativeContext(bytes(""));
+                    if (result.isEmpty()) throw new java.io.IOException(nativeLastError());
+                    snapshot = new JSONObject(result);
+                }
+                java.util.Map<String, JSONObject> facts = new java.util.HashMap<>();
+                org.json.JSONArray rows = snapshot.optJSONArray("profile_facts");
+                if (rows != null) for (int i = 0; i < rows.length(); i++) {
+                    JSONObject fact = rows.getJSONObject(i);
+                    facts.put(fact.getString("label"), fact);
+                }
+                ui(() -> {
+                    if (!compose.isPageVisible("profile", version) || changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
+                    ComposeUi.Panel panel = page("プロフィール", "profile", true);
+                    panel.onResume = this::refreshProfile;
+                    JSONObject name = facts.get("名前");
+                    if (name != null) panel.subtitle = name.optString("value", person.name);
+                    for (String label : new String[]{"名前", "身長", "体重", "趣味", "好きなもの"}) {
+                        JSONObject fact = facts.get(label);
+                        String value = fact == null ? (label.equals("名前") ? person.name : "未設定") : fact.optString("value");
+                        ComposeUi.Row row = entry(label, value, -1, () -> showProfileFact(label, value, fact));
+                        row.enabled = fact != null || label.equals("名前");
+                        panel.rows.add(row);
+                    }
+                    panel.rows.add(section("記録", entry("会話の記憶", "会話と体験を読む", 3, this::showMemory)));
+                    compose.showPage(panel);
+                });
+            } catch (Exception error) { ui(() -> {
+                if (!compose.isPageVisible("profile", version)) return;
+                ComposeUi.Panel failed = page("プロフィール", "profile", true);
+                failed.message = safeError(error);
+                failed.onResume = this::refreshProfile;
+                compose.showPage(failed);
+            }); }
+        });
+    }
+
+    private void showProfileFact(String label, String value, JSONObject fact) {
+        ComposeUi.Panel panel = page(label, "profile-detail", true);
+        panel.blocks.add(new ComposeUi.Block("現在のプロフィール", value));
+        if (fact == null || fact.optBoolean("imported")) {
+            panel.blocks.add(new ComposeUi.Block("出典", "引き継ぎプロフィール"));
+        } else {
+            String updated = fact.optString("updated_at");
+            if (!updated.isEmpty()) panel.blocks.add(new ComposeUi.Block("反映元の発言日時",
+                    java.time.format.DateTimeFormatter.ofPattern("yyyy年M月d日 HH:mm").withZone(java.time.ZoneId.systemDefault())
+                            .format(java.time.Instant.parse(updated))));
+            String source = ReplyText.visible(fact.optString("source"), true);
+            if (!source.isBlank()) panel.blocks.add(new ComposeUi.Block("本人の発言", source));
+        }
+        compose.showPage(panel);
     }
 
     private void showMemory() {

@@ -74,7 +74,7 @@ internal fun ManagementPage(
                     .verticalScroll(panel.scroll).padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 32.dp)) {
                     if (episode) Text(panel.title, Modifier.padding(bottom = 12.dp).semantics { heading() },
                         style = MaterialTheme.typography.headlineSmall)
-                    if (panel.subtitle.isNotEmpty()) PageIdentity(panel.subtitle, portrait, panel.key == "management")
+                     if (panel.subtitle.isNotEmpty()) PageIdentity(panel.subtitle, portrait, panel.key == "management" || panel.key == "profile")
                     if (panel.loading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(bottom = 16.dp))
                     if (panel.message.isNotEmpty()) SelectionContainer {
                         Text(panel.message, Modifier.padding(bottom = 20.dp), color = pageMuted,
@@ -201,7 +201,7 @@ private fun PageRows(panel: ComposeUi.Panel) {
         }
         HorizontalDivider(color = pageRule)
         val interaction = if (row.toggle) Modifier.toggleable(row.checked, role = Role.Switch) { row.action.run() }
-            else Modifier.clickable(role = if (panel.choices) Role.RadioButton else Role.Button) { row.action.run() }
+             else Modifier.clickable(enabled = row.enabled, role = if (panel.choices) Role.RadioButton else Role.Button) { row.action.run() }
         Row(Modifier.fillMaxWidth()
             .semantics { if (!row.toggle && (panel.choices || row.checked)) selected = row.checked }
             .then(interaction)
@@ -227,7 +227,7 @@ private fun PageRows(panel: ComposeUi.Panel) {
                     style = MaterialTheme.typography.bodyMedium)
             }
             if (row.toggle) Switch(checked = row.checked, onCheckedChange = null)
-            else if (!panel.choices && panel.key != "display") Icon(if (row.checked) ConversationIcons.Check else ConversationIcons.Chevron,
+             else if (row.enabled && !panel.choices && panel.key != "display") Icon(if (row.checked) ConversationIcons.Check else ConversationIcons.Chevron,
                 null, tint = pageMuted, modifier = Modifier.size(18.dp))
         }
     }

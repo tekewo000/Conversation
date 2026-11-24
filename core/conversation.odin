@@ -455,11 +455,12 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
  if !execute("BEGIN IMMEDIATE") do return false
  committed := false
  defer { archive_group=0; if !committed do execute("ROLLBACK") }
- job := prepare("SELECT end_id,processed FROM jobs WHERE id=?1")
+ job := prepare("SELECT end_id,processed,first_id FROM jobs WHERE id=?1")
  if job == nil do return false
  defer sqlite3_finalize(job)
  if !bind_int(job, 1, job_id) || sqlite3_step(job) != 100 do return fail("Unknown extraction job.")
  end_id := sqlite3_column_int64(job, 0)
+ start_id := sqlite3_column_int64(job, 2)
  if sqlite3_column_int64(job, 1) == 1 {
   committed = execute("COMMIT")
   if committed do last_error = ""
@@ -486,6 +487,7 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
   valid=bind_int(size,1,first) && bind_int(size,2,end_id) && sqlite3_step(size)==100 && sqlite3_column_int64(size,0)<=MEMORY_BATCH_BYTES
   sqlite3_finalize(size)
   if !valid do return fail("Memory batch exceeds the source byte budget.")
+  start_id=first
   if !insert_job(first,end_id) do return false
   effective_job_id=scalar("SELECT max(id) FROM jobs")
   if effective_job_id<1 do return false
@@ -511,6 +513,8 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
   sources, sources_ok := record["source_ids"].(json.Array)
   if !k_ok || !s_ok || !key_ok || !t_ok || !sc_ok || !c_ok || !sources_ok || len(sources) == 0 || len(sources) > 16 || (kind != "fact" && kind != "event" && kind != "interpretation" && kind != "promise") || (scope != "real" && scope != "fiction" && scope != "shared") || (kind=="interpretation" && certainty!="inferred") || (kind!="interpretation" && certainty!="explicit") { return fail("Invalid typed memory or missing source IDs.") }
   if subject=="episode" && (actor=="conversation" || strings.has_prefix(key,"episode:") || strings.has_prefix(key,"episode-node:")) do return fail("Episode events must be updated through continuity, not generic memories.")
+  profile_fact := subject=="friend" && profile_fact_key(key)
+  if profile_fact && (actor!="assistant" || kind!="fact" || scope!="shared" || len(sources)!=1 || len(text)>512 || (key=="profile/名前" && len(text)>256) || strings.contains_any(text,"\r\n\t")) do return fail("Profile fields need one explicit self-disclosure and a short one-line value.")
   status := "active"
   if _, exists := record["status"]; exists {
    status_ok: bool
@@ -543,6 +547,29 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
    valid := bind_int(check,1,i64(id)) && sqlite3_step(check)==100 && sqlite3_column_int64(check,0)==1
    sqlite3_finalize(check)
    if !valid do return fail("Source message does not exist.")
+   if profile_fact {
+    evidence:=prepare("SELECT count(*) FROM messages WHERE id=?1 AND role='assistant' AND NOT EXISTS(SELECT 1 FROM message_annotations WHERE message_id=?1)")
+    if evidence==nil do return false
+    valid=i64(id)>=start_id && bind_int(evidence,1,i64(id)) && sqlite3_step(evidence)==100 && sqlite3_column_int64(evidence,0)==1
+    sqlite3_finalize(evidence)
+    if !valid do return fail("Profile evidence must be an assistant reply in the current memory batch.")
+   }
+  }
+  if profile_fact {
+   latest:=prepare(`SELECT p.id,`+PROFILE_FACT_VALUE_SQL+` FROM memories p JOIN memory_current c ON c.id=p.id
+     WHERE p.subject='friend' AND p.key=?1 AND p.scope='shared' AND p.kind='fact' AND p.actor IN ('assistant','friend')
+     ORDER BY p.id DESC LIMIT 1`)
+   if latest==nil do return false
+   if !bind_text(latest,1,key) { sqlite3_finalize(latest); return false }
+   rc:=sqlite3_step(latest)
+   unchanged:=false
+   if rc==100 {
+    previous=sqlite3_column_int64(latest,0)
+    unchanged=string(sqlite3_column_text(latest,1))==text
+   }
+   sqlite3_finalize(latest)
+   if rc!=100 && rc!=101 do return fail("Could not read the current profile value.")
+   if unchanged do continue
   }
   stmt := prepare("INSERT INTO memories(job_id,ordinal,kind,actor,subject,key,text,scope,certainty,supersedes_id,valid_from,status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,nullif(?10,0),coalesce(nullif(?11,''),(SELECT created_at FROM messages WHERE id=?12)),?13)")
   if stmt == nil do return false
@@ -710,7 +737,7 @@ CONTEXT_JSON :: `WITH RECURSIVE query_grams(i,token) AS (
 ), message_budget AS (
  SELECT id,category,row,sum(length(CAST(row AS BLOB))+1) OVER(PARTITION BY category ORDER BY priority,id DESC ROWS UNBOUNDED PRECEDING) AS bytes FROM message_rows
 )
-SELECT json_object('person',json(` + PERSON_JSON + `),'persona',json(` + PERSONA_JSON + `),'continuity',json(` + CONTINUITY_JSON + `),'memory_progress',`+MEMORY_PROGRESS_JSON+`,'messages',json((SELECT json_group_array(json(row)) FROM (SELECT row FROM message_budget WHERE bytes<=CASE category WHEN 0 THEN 786432 ELSE 20000 END ORDER BY id))),'memories',json((SELECT json_group_array(json(row)) FROM memory_budget WHERE bytes<=10000)),'quotes',json((SELECT json_group_array(json(row)) FROM quote_budget WHERE bytes<=400000)))`
+ SELECT json_object('person',json(` + PERSON_JSON + `),'persona',json(` + PERSONA_JSON + `),'profile_facts',json(` + PROFILE_FACTS_JSON + `),'continuity',json(` + CONTINUITY_JSON + `),'memory_progress',`+MEMORY_PROGRESS_JSON+`,'messages',json((SELECT json_group_array(json(row)) FROM (SELECT row FROM message_budget WHERE bytes<=CASE category WHEN 0 THEN 786432 ELSE 20000 END ORDER BY id))),'memories',json((SELECT json_group_array(json(row)) FROM memory_budget WHERE bytes<=10000)),'quotes',json((SELECT json_group_array(json(row)) FROM quote_budget WHERE bytes<=400000)))`
 
 @(export)
 conversation_context :: proc "c" (query: cstring) -> cstring {

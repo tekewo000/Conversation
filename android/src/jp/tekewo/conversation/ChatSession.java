@@ -19,7 +19,9 @@ final class ChatSession {
         long addReply(String text, String state) throws Exception;
         default long addNote(String kind, String text) throws Exception { throw new IOException("補足を保存できませんでした。"); }
         JSONObject context(String query) throws Exception;
-        default JSONObject replyContext(String text) throws Exception { return context(query(text)); }
+        default JSONObject replyContext(String text) throws Exception {
+            return context(query(needsRecallContext(text) ? recallQuery(text, context("")) : text));
+        }
         JSONObject pending() throws Exception;
         void apply(long job, String payload) throws Exception;
         JSONObject pendingPersona() throws Exception;
@@ -53,6 +55,67 @@ final class ChatSession {
         return text.substring(0, text.offsetByCodePoints(0, count));
     }
 
+    private static final Pattern VAGUE_FOLLOW_UP = Pattern.compile(
+            "^(?:(?:(?:前に|この前|さっき)言ってた)?(?:あれ|それ|あの件|その件)|(?:前|この前|こないだ|前回|この間|さっき)の(?:話|件|続き)|続き)?"
+            + "(?:って|は|の)?[、, 　]*(?:どうなった|どうした|どうする|覚えて(?:る|いる)|何だった|どこまで(?:いった|行った|話した)|教えて|話そう|聞かせて|しよう)?"
+            + "[？?。！!]*$");
+
+    static boolean needsRecallContext(String text) {
+        String trimmed = text.trim();
+        return trimmed.length() >= 2 && trimmed.length() <= 32 && VAGUE_FOLLOW_UP.matcher(trimmed).matches();
+    }
+
+    static String recallQuery(String text, JSONObject snapshot) {
+        JSONArray messages = snapshot.optJSONArray("messages");
+        Set<Long> recentIds = new HashSet<>();
+        String recentTopic = "";
+        boolean skippedCurrent = false;
+        if (messages != null) for (int i = messages.length() - 1; i >= 0 && recentIds.size() < 2; i--) {
+            JSONObject turn = messages.optJSONObject(i);
+            if (turn == null || !turn.optString("annotation").isEmpty()) continue;
+            String content = turn.optString("content").trim();
+            if (!skippedCurrent && turn.optString("role").equals("user") && content.equals(text.trim())) {
+                skippedCurrent = true;
+                continue;
+            }
+            recentIds.add(turn.optLong("id"));
+            if (recentTopic.isEmpty() && turn.optString("role").equals("user") && !needsRecallContext(content)) recentTopic = content;
+        }
+        JSONObject continuity = snapshot.optJSONObject("continuity");
+        JSONArray threads = continuity == null ? null : continuity.optJSONArray("threads");
+        String unfinished = "", recentMatch = "";
+        int unfinishedCount = 0, recentMatches = 0;
+        if (threads != null) for (int i = 0; i < threads.length(); i++) {
+            JSONObject thread = threads.optJSONObject(i);
+            if (thread == null || !(thread.optString("status").equals("active") || thread.optString("status").equals("paused"))) continue;
+            String topic = thread.optString("text").trim();
+            if (topic.isEmpty()) continue;
+            unfinished = topic;
+            unfinishedCount++;
+            JSONArray sources = thread.optJSONArray("source_ids");
+            if (sources != null) for (int j = 0; j < sources.length(); j++) {
+                if (!recentIds.contains(sources.optLong(j))) continue;
+                recentMatch = topic;
+                recentMatches++;
+                break;
+            }
+        }
+        if (recentMatches == 1) return recentMatch;
+        if (unfinishedCount == 1) return unfinished;
+        if (unfinishedCount == 0 && !recentTopic.isEmpty()) return recentTopic;
+        return text;
+    }
+
+    private static JSONObject profileValues(JSONObject context) throws JSONException {
+        JSONObject values = new JSONObject();
+        JSONArray facts = context.optJSONArray("profile_facts");
+        if (facts != null) for (int i = 0; i < facts.length(); i++) {
+            JSONObject fact = facts.getJSONObject(i);
+            values.put(fact.getString("label"), fact.getString("value"));
+        }
+        return values;
+    }
+
     static final String COMMON =
             "自分や相手の過去の体験・約束や、すでに決まっている人物設定は記録に従ってください。"
           + "自分の趣味や好きなものを聞かれ、まだ決まっていなければ、人物像に合うものを自分で決めて会話の中で自然に答えてください。"
@@ -71,10 +134,13 @@ final class ChatSession {
           + "ユーザーが求めた引用・翻訳や固有名詞以外で、無関係な他言語や広告文を混ぜないでください。"
           + "参照用データのpersona.fieldsは応答する人物の現在の人物像です。各fieldに対応する範囲でのみ"
           + "引き継ぎプロフィールより優先し、未更新の設定や名前・経歴は保ってください。"
+          + "参照用profileは本人が明言して確定した最新のプロフィールです。対応項目では古い資料や記憶より優先してください。"
+          + "名前、身長、体重はすでに決まった値を引き継ぎ、本人の明確な訂正や変化があるときだけ変えてください。"
           + "記憶は関連するときだけ自然に使い、毎回思い出話を挟んだり、同じ情報を繰り返したり、"
           + "何でも同意したりしないでください。不要な見出しや毎回の質問を避け、会話を続けてください。"
           + "continuityは以前の会話の現在地と体験です。候補の順番、決定・保留、出来事・当時の感情・場面を"
           + "必要に応じて参照し、根拠の会話も確認してください。through_idより新しい発言の訂正や決定を優先します。"
+          + "『あれどうなった？』『この前の続き』などで候補が複数あり、直近の会話や継続中の話題から特定できなければ、一言だけ確認してください。"
           + "episodesは旅行や一連の相談など大きな体験の概要です。memoriesのhierarchyには体験→日・段階→場面→出来事の親子関係があります。"
           + "細部への検索結果は親の体験・日・場面と結び付け、同じ場所でも別の旅行や別の日を混ぜません。今の場面と過去の場面を区別し、"
           + "『あのカフェのとき』などは場面・出来事・感情を関連付けて思い出してください。"
@@ -163,8 +229,10 @@ final class ChatSession {
           + "personaやプロフィールの記載だけを新規記憶の根拠にしないこと。"
           + "truncated:trueの発言は一部しかないので、見えていない内容を推測しないこと。"
           + "出来事・好み・約束・関係の変化を区別し、単発の挨拶や無意味な断片は登録しないこと。"
-          + "応答する人物が自分の趣味や好きなものとして明言した内容は、初めてでもkind=fact、actor=assistant、subject=friend、scope=shared、certainty=explicitで保存し、"
-          + "本人の返答をsource_idsに入れます。keyとtextに趣味や好みの種類を書き、一度きりの提案は恒常的な好みとして扱いません。"
+           + "本人が自分の名前・身長・体重・趣味・好きなものを今回の返答で明言したら、kind=fact、actor=assistant、subject=friend、scope=shared、certainty=explicitで保存します。"
+           + "keyはそれぞれprofile/名前、profile/身長、profile/体重、profile/趣味、profile/好きなもの。textはラベルを付けない一行の値、source_idsは本人の根拠発言一つ。"
+           + "profileは現在の値です。趣味や好きなものの追加・中止は、残る項目を含む更新後の一覧をtextにまとめます。空になったら『なし』。同じ項目は今回の最新の値一件だけを出し、supersedes_idは省略します。"
+           + "一度きりの提案、冗談、創作で演じた別の人物、ユーザーが一方的に述べた内容を本人のプロフィールにしないでください。"
           + "言い回し自体に意味がある大切な発言や、言葉のまま覚えてほしいと明示された発言はkind=event、subject=quoteで記憶に登録します。"
           + "source_idsにはその発言自体のIDを1件だけ入れ、keyとtextには後で話題から探せる手がかりを書きます。約束はkind=promiseのまま扱います。"
           + "ユーザーが明言したことと、友達がそう受け止めた解釈は別物です。"
@@ -299,6 +367,7 @@ final class ChatSession {
         JSONObject reference = new JSONObject().put("now", java.time.Instant.now().toString())
                 .put("time_zone", java.util.TimeZone.getDefault().getID())
                 .put("persona", context.optJSONObject("persona"))
+                .put("profile", profileValues(context))
                 .put("continuity", context.optJSONObject("continuity") == null ? new JSONObject() : context.optJSONObject("continuity"))
                 .put("memories", memories == null ? new JSONArray() : memories)
                 .put("quotes", context.optJSONArray("quotes"));
@@ -447,6 +516,7 @@ final class ChatSession {
                     .put("time_zone", java.util.TimeZone.getDefault().getID())
                     .put("person", existing.optJSONObject("person"))
                     .put("persona", existing.optJSONObject("persona"))
+                    .put("profile", profileValues(existing))
                     .put("continuity", existing.optJSONObject("continuity") == null ? new JSONObject() : existing.optJSONObject("continuity"))
                     .put("evidence", evidence)
                     .put("existing", existing.optJSONArray("memories"));

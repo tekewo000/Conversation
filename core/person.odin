@@ -24,6 +24,29 @@ CREATE TRIGGER IF NOT EXISTS documents_no_delete BEFORE DELETE ON source_documen
 `
 
 PERSON_JSON :: `coalesce((SELECT json_object('id',person_id,'name',name,'profile',profile,'source_sha256',source_sha256,'version',version) FROM person_profiles WHERE slot=1),'null')`
+
+PROFILE_FACT_VALUE_SQL :: `CASE WHEN p.job_id IS NULL AND instr(p.text,substr(p.key,9)||': ')>0
+ THEN substr(p.text,instr(p.text,substr(p.key,9)||': ')+length(p.key)-6) ELSE p.text END`
+
+PROFILE_FACTS_JSON :: `(
+ WITH fields(label) AS (VALUES('名前'),('身長'),('体重'),('趣味'),('好きなもの')),
+ facts AS (
+  SELECT label,p.id,p.job_id,`+PROFILE_FACT_VALUE_SQL+` AS value FROM fields JOIN memories p ON p.id=(
+   SELECT m.id FROM memories m JOIN memory_current c ON c.id=m.id
+   WHERE m.subject='friend' AND m.key='profile/'||fields.label AND m.scope='shared' AND m.kind='fact'
+    AND m.certainty='explicit' AND m.actor IN ('assistant','friend') ORDER BY m.id DESC LIMIT 1)
+ )
+ SELECT json_group_array(json_object('label',f.label,'value',f.value,
+  'source_id',s.id,'source',substr(s.content,1,2048),'updated_at',s.created_at,'imported',json(CASE WHEN f.job_id IS NULL THEN 'true' ELSE 'false' END)))
+ FROM facts f LEFT JOIN messages s ON s.id=(SELECT max(message_id) FROM memory_sources WHERE memory_id=f.id)
+)`
+
+profile_fact_key :: proc(key: string) -> bool {
+ switch key {
+ case "profile/名前", "profile/身長", "profile/体重", "profile/趣味", "profile/好きなもの": return true
+ }
+ return false
+}
 IMPORTED_SOURCES_JSON :: `(SELECT json_group_array(json_object('document_id',d.id,'format',d.format,'provenance',d.provenance,'source_sha256',d.source_sha256,'section',s.section,'occurred_at',s.occurred_at,'snippet',substr(d.raw_markdown,1,256))) FROM memory_document_sources s JOIN source_documents d ON d.id=s.document_id WHERE s.memory_id=m.id)`
 
 person_uuid_valid :: proc(id: string) -> bool {

@@ -65,6 +65,8 @@ public final class ChatSessionTest {
         initiativeUsesTextWithoutActingAsTheUser();
         initiativeRejectsInvalidOutput();
         importantWordsReachTheReplyAsOriginalReferenceText();
+        ambiguousFollowUpUsesCurrentThreadForRetrieval();
+        currentProfileFactsReachReply();
         assistantFeelingAndOldEvidenceReachReplyAndExtraction();
         relationshipAndOldEvidenceReachUnrelatedReplyAndExtraction();
         reflectionReceivesRelationshipAndItsOriginalEvidence();
@@ -516,6 +518,45 @@ public final class ChatSessionTest {
             assert quote.getString("content").equals(original);
             assert quote.getString("role").equals("assistant");
             return reply("ずっと味方だよ");
+        }, new Listener());
+    }
+
+    private static void ambiguousFollowUpUsesCurrentThreadForRetrieval() throws Exception {
+        List<String> searches = new ArrayList<>();
+        Store store = new Store() {
+            @Override public JSONObject context(String query) throws Exception {
+                searches.add(query);
+                return super.context(query);
+            }
+        };
+        store.continuity.put("threads", new JSONArray("[{\"status\":\"active\",\"text\":\"箱根の温泉旅行の行き先を検討中\",\"source_ids\":[1]},{\"status\":\"resolved\",\"text\":\"映画のチケットを購入\",\"source_ids\":[2]}]"));
+        store.add("user", "箱根の温泉はどう？");
+        store.add("assistant", "行き先は次回決めよう");
+        store.add("user", "あれどうなった？");
+        store.replyContext("あれどうなった？");
+        assert searches.get(searches.size() - 1).contains("箱根の温泉旅行") : searches;
+        searches.clear();
+        store.replyContext("映画のチケットを見せて");
+        assert searches.equals(java.util.Collections.singletonList("映画のチケットを見せて")) : searches;
+        store.continuity.getJSONArray("threads").getJSONObject(1).put("status", "paused");
+        store.continuity.getJSONArray("threads").getJSONObject(0).put("source_ids", new JSONArray("[7]"));
+        store.continuity.getJSONArray("threads").getJSONObject(1).put("source_ids", new JSONArray("[8]"));
+        searches.clear();
+        store.replyContext("あれどうなった？");
+        assert searches.get(searches.size() - 1).equals("あれどうなった？") : searches;
+    }
+
+    private static void currentProfileFactsReachReply() throws Exception {
+        Store store = new Store() {
+            @Override public JSONObject context(String query) throws Exception {
+                return super.context(query).put("profile_facts", new JSONArray("[{\"label\":\"趣味\",\"value\":\"陶芸\",\"source\":\"以前は絵を描いていた\"}]"));
+            }
+        };
+        new ChatSession(store).reply("最近どう？", true, (instructions, input, delta) -> {
+            JSONObject data = new JSONObject(input.getJSONObject(0).getString("content").replaceFirst("^[^\\n]*\\n", ""));
+            assert data.getJSONObject("profile").getString("趣味").equals("陶芸");
+            assert !data.getJSONObject("profile").toString().contains("以前は");
+            return "元気だよ";
         }, new Listener());
     }
 

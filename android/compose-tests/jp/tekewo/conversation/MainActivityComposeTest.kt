@@ -16,7 +16,9 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.printToString
 import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performSemanticsAction
@@ -81,7 +83,7 @@ class MainActivityComposeTest {
         compose.waitUntil(10_000) { PersonRegistry(context.filesDir).active()?.displayName=="短い表示名 😀" }
         compose.onNodeWithText("短い表示名 😀").assertExists()
         compose.activityRule.scenario.recreate()
-        compose.onNodeWithContentDescription("会話相手の記憶を開く").assertTextContains("短い表示名 😀")
+        compose.onNodeWithContentDescription("会話相手のプロフィールを開く").assertTextContains("短い表示名 😀")
         compose.onNodeWithContentDescription("メッセージ入力").assertTextContains("名前変更中の下書き")
         val after=PersonRegistry(context.filesDir).active()!!
         assertEquals(before.id,after.id);assertEquals(before.name,after.name)
@@ -332,12 +334,44 @@ class MainActivityComposeTest {
         compose.onNodeWithText("短期記憶（直近30往復）").assertDoesNotExist()
     }
 
+    @Test fun profileShowsImportedAndUpdatedFactsWithTheirEvidence() {
+        val people = PersonRegistry(context.filesDir)
+        previousPerson = people.active()?.id
+        val markdown = PersonDocument.named(name).rawMarkdown.replace("- 名前: $name", "- 名前: $name\n- 身長: 165 cm")
+        val document = PersonDocument.parse(markdown)
+        val person = people.stage(document, null)
+        assertEquals("", MainActivity.nativeSwitchPerson(person.directory.absolutePath.toByteArray(),
+            document.importPayload(person.id).toString().toByteArray()))
+        people.commit(person)
+        compose.activityRule.scenario.recreate()
+        val contextQuery = MainActivity::class.java.getDeclaredMethod("nativeContext", ByteArray::class.java).apply { isAccessible = true }
+        val facts = org.json.JSONObject(contextQuery.invoke(null, byteArrayOf()) as String).getJSONArray("profile_facts")
+        assertEquals("165 cm", facts.getJSONObject(0).getString("value"))
+        val profile = "会話相手のプロフィールを開く"
+        compose.onNodeWithContentDescription(profile).performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText("165 cm")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithContentDescription("戻る").performClick()
+
+        val add = MainActivity::class.java.getDeclaredMethod("nativeAddMessage", ByteArray::class.java, ByteArray::class.java).apply { isAccessible = true }
+        assertEquals(1L, add.invoke(null, "user".toByteArray(), "今も同じ？".toByteArray()))
+        assertEquals(2L, add.invoke(null, "assistant".toByteArray(), "測り直したら166 cmだった".toByteArray()))
+        assertEquals("", MainActivity.nativeApplyJob(1, """{"memories":[{"kind":"fact","actor":"assistant","subject":"friend","key":"profile/身長","text":"166 cm","scope":"shared","certainty":"explicit","source_ids":[2]}]}""".toByteArray()))
+        compose.onNodeWithContentDescription(profile).performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText("166 cm")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("身長").performClick()
+        compose.onNodeWithText("測り直したら166 cmだった").assertIsDisplayed()
+    }
+
     private fun openShortTermMemory() {
-        val header = "会話相手の記憶を開く"
+        val header = "会話相手のプロフィールを開く"
         compose.waitUntil(10_000) {
             compose.onAllNodes(hasContentDescription(header) and isEnabled()).fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithContentDescription(header).performClick()
+        compose.waitUntil(10_000) {
+            compose.onAllNodes(hasText("会話の記憶")).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("会話の記憶").performScrollTo().performClick()
         compose.waitUntil(10_000) {
             compose.onAllNodes(androidx.compose.ui.test.hasText("短期記憶（直近30往復）")).fetchSemanticsNodes().isNotEmpty()
         }
@@ -408,6 +442,8 @@ class MainActivityComposeTest {
         compose.activityRule.scenario.recreate()
         openShortTermMemory()
         compose.onNodeWithText("過去の記憶を階層に整理").assertExists()
+        compose.onNodeWithContentDescription("戻る").performClick()
+        compose.onNodeWithText("プロフィール").assertIsDisplayed()
         compose.onNodeWithContentDescription("戻る").performClick()
         MemoryRebuild(person.directory).request(3)
         openShortTermMemory()
@@ -677,7 +713,7 @@ class MainActivityComposeTest {
         }
         compose.activityRule.scenario.recreate()
         compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("ほっとした。一緒に喜べて嬉しい")).fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithContentDescription("小春の記憶を見る").assertIsDisplayed()
+        compose.onNodeWithContentDescription("小春のプロフィールを見る").assertIsDisplayed()
         compose.onNodeWithText("ほっとして嬉しい").assertIsDisplayed()
         compose.onNodeWithText("試合終了の報告").assertDoesNotExist()
         compose.onNodeWithText("一緒に喜んだ会話").assertDoesNotExist()
@@ -739,6 +775,7 @@ class MainActivityComposeTest {
         compose.onNodeWithText("記憶の整理を続ける").assertDoesNotExist()
         compose.onNodeWithText("この整理のあと一時停止").assertDoesNotExist()
         assertTrue(org.json.JSONObject(MainActivity.nativePendingJob()).getLong("id") > 0)
+        compose.onNodeWithContentDescription("戻る").performClick()
         compose.onNodeWithContentDescription("戻る").performClick()
         compose.onNodeWithContentDescription("メニュー").performClick()
         compose.onNodeWithText("人物").performClick()

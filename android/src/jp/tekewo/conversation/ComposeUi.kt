@@ -178,6 +178,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     class MemoryState(val emotion: String, val reason: String, val situation: String)
     class Row @JvmOverloads constructor(@JvmField val label: String, @JvmField val action: Runnable,
                                        @JvmField val icon: Int = -1) {
+        @JvmField var enabled = true
         @JvmField var checked = false
         @JvmField var toggle = false
         @JvmField var dismiss = true
@@ -296,7 +297,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
             if (panel == null) { keyboard?.hide(); focus.clearFocus(); backFocus.requestFocus() }
         }
         BackHandler(enabled = panel == null, onBack = ::back)
-        ManagementPage(value, backFocus, ::back, personIcon.takeIf { value.subtitle == personName },
+        ManagementPage(value, backFocus, ::back, personIcon.takeIf { value.subtitle == personName || value.key == "profile" },
             textSize, messageGap, Modifier.then(if (panel != null) Modifier.clearAndSetSemantics { } else Modifier)) {
             PanelFields(value.fields)
         }
@@ -353,13 +354,13 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         val keyboard = LocalSoftwareKeyboardController.current
         val focus = LocalFocusManager.current
         val colors = MaterialTheme.colorScheme
-        val memoryAction = onIcon.takeIf { enabled && personName.isNotBlank() }
+        val profileAction = onIcon.takeIf { enabled && personName.isNotBlank() }
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
             Box(Modifier.widthIn(max = 680.dp).fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
                 Row(Modifier.fillMaxWidth().padding(end = 56.dp).heightIn(min = 48.dp)
-                    .then(if (memoryAction == null) Modifier else Modifier
-                        .clickable(role = Role.Button) { memoryAction.run() }
-                        .semantics { contentDescription = "会話相手の記憶を開く" })
+                    .then(if (profileAction == null) Modifier else Modifier
+                        .clickable(role = Role.Button) { profileAction.run() }
+                        .semantics { contentDescription = "会話相手のプロフィールを開く" })
                     .padding(horizontal = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (personIcon != null && personName.isNotBlank()) {
@@ -504,7 +505,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                     Column(Modifier.width(56.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                         PersonPortrait(Modifier.size(48.dp).clip(CircleShape)
                             .clickable(enabled = onIcon != null, role = Role.Button) { onIcon?.run() }
-                            .semantics { contentDescription = "${personName.ifBlank { "会話相手" }}の記憶を見る" }
+                            .semantics { contentDescription = "${personName.ifBlank { "会話相手" }}のプロフィールを見る" }
                             .padding(6.dp))
                         if (emotion.isNotBlank()) {
                             Text(emotion, Modifier.fillMaxWidth().padding(start = 2.dp, end = 2.dp, top = 2.dp),

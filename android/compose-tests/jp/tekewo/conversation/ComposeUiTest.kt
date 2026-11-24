@@ -148,7 +148,7 @@ class ComposeUiTest {
             ui.beginReply()
         }
         compose.onNodeWithContentDescription("返答を入力中").assertIsDisplayed()
-        val avatar = compose.onNodeWithContentDescription("小春の記憶を見る")
+        val avatar = compose.onNodeWithContentDescription("小春のプロフィールを見る")
         val avatarId = avatar.assertIsDisplayed().fetchSemanticsNode().id
         compose.onNodeWithText("穏やか").assertDoesNotExist()
         compose.runOnUiThread { ui.streaming = "返答です" }
@@ -217,7 +217,7 @@ class ComposeUiTest {
             ui.enabled = true
             ui.onIcon = Runnable { memoryOpens++ }
         }
-        compose.onNode(hasText("小春") and hasContentDescription("会話相手の記憶を開く"))
+        compose.onNode(hasText("小春") and hasContentDescription("会話相手のプロフィールを開く"))
             .assertIsDisplayed().performClick()
         compose.onNodeWithText("記憶").assertDoesNotExist()
         compose.runOnIdle { assertEquals(1, memoryOpens) }
@@ -280,11 +280,11 @@ class ComposeUiTest {
             ui.onIcon = Runnable { memoryOpens++ }
             ui.setMessages("""{"first":0,"total":4,"assistant_emotion":"ほっとして嬉しい","messages":[{"id":1,"role":"user","text":"試合が終わったよ"},{"id":2,"role":"assistant","text":"お疲れさま"},{"id":3,"role":"user","text":"ありがとう"},{"id":4,"role":"assistant","text":"一緒に喜べて嬉しいよ"}]}""")
         }
-        val portraits = compose.onAllNodes(hasContentDescription("小春の記憶を見る"))
+        val portraits = compose.onAllNodes(hasContentDescription("小春のプロフィールを見る"))
         assertEquals(2, portraits.fetchSemanticsNodes().size)
         portraits[0].assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals(1, memoryOpens) }
-        compose.onNodeWithContentDescription("会話相手の記憶を開く").assertIsDisplayed()
+        compose.onNodeWithContentDescription("会話相手のプロフィールを開く").assertIsDisplayed()
         val reply = compose.onNodeWithText("一緒に喜べて嬉しいよ").assertIsDisplayed()
         val sent = compose.onNodeWithText("ありがとう").assertIsDisplayed()
         val feeling = compose.onNodeWithText("ほっとして嬉しい").assertIsDisplayed()

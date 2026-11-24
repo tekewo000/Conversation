@@ -402,6 +402,40 @@ fts_search_uses_incremental_virtual_indexes :: proc(t: ^testing.T) {
 }
 
 @(test)
+profile_facts_follow_explicit_self_disclosure :: proc(t: ^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-profile-*_",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ assert(conversation_import_person(`{"person_id":"11111111-1111-4111-8111-111111111111","name":"葵","profile":"身長: 164 cm","source_md":"hello","source_sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","seeds":[{"kind":"fact","actor":"friend","subject":"friend","key":"profile/身長","text":"引き継ぎ資料に記載（区分未指定）: 身長: 164 cm","scope":"shared","certainty":"explicit","section":"基本プロフィール"}]}`))
+ testing.expect(t,strings.contains(string(conversation_context("")),`"label":"身長","value":"164 cm"`))
+ assert(conversation_add_message("user","身長は？")==1)
+ assert(conversation_add_message("assistant","身長は165 cmだよ")==2)
+ invalid:cstring=`{"memories":[{"kind":"fact","actor":"assistant","subject":"friend","key":"profile/身長","text":"170 cm","scope":"shared","certainty":"explicit","source_ids":[1]}]}`
+ if !testing.expect(t,!conversation_apply_job(1,invalid)) do return
+ assert(conversation_apply_job(1,`{"memories":[{"kind":"fact","actor":"assistant","subject":"friend","key":"profile/身長","text":"165 cm","scope":"shared","certainty":"explicit","source_ids":[2]}]}`))
+ assert(conversation_add_message("user","今も同じ？")==3)
+ assert(conversation_add_message("assistant","測り直したら166 cmだった")==4)
+ assert(conversation_apply_job(2,`{"memories":[{"kind":"fact","actor":"assistant","subject":"friend","key":"profile/身長","text":"166 cm","scope":"shared","certainty":"explicit","source_ids":[4]}]}`))
+ conversation_close()
+ assert(conversation_init(c))
+ output:=conversation_context("まったく別の話")
+ parsed,ok:=parse_json(transmute([]byte)string(output),16)
+ assert(ok)
+ defer json.destroy_value(parsed)
+ facts,available:=parsed.(json.Object)["profile_facts"].(json.Array)
+ if !testing.expect(t,available && len(facts)==1) do return
+ fact:=facts[0].(json.Object)
+ testing.expect_value(t,string(fact["value"].(json.String)),"166 cm")
+ testing.expect_value(t,string(fact["source"].(json.String)),"測り直したら166 cmだった")
+ testing.expect_value(t,scalar("SELECT count(*) FROM memories WHERE key='profile/身長' AND supersedes_id IS NOT NULL"),2)
+}
+
+@(test)
 database_version_and_missing_marker_fail_closed :: proc(t: ^testing.T) {
  dir,e:=os.make_directory_temp("","conversation-schema-*",context.allocator)
  assert(e==nil)
