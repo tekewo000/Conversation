@@ -514,7 +514,7 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
   if !k_ok || !s_ok || !key_ok || !t_ok || !sc_ok || !c_ok || !sources_ok || len(sources) == 0 || len(sources) > 16 || (kind != "fact" && kind != "event" && kind != "interpretation" && kind != "promise") || (scope != "real" && scope != "fiction" && scope != "shared") || (kind=="interpretation" && certainty!="inferred") || (kind!="interpretation" && certainty!="explicit") { return fail("Invalid typed memory or missing source IDs.") }
   if subject=="episode" && (actor=="conversation" || strings.has_prefix(key,"episode:") || strings.has_prefix(key,"episode-node:")) do return fail("Episode events must be updated through continuity, not generic memories.")
   profile_fact := subject=="friend" && profile_fact_key(key)
-  if profile_fact && (actor!="assistant" || kind!="fact" || scope!="shared" || len(sources)!=1 || len(text)>512 || (key=="profile/名前" && len(text)>256) || strings.contains_any(text,"\r\n\t")) do return fail("Profile fields need one explicit self-disclosure and a short one-line value.")
+   if profile_fact && (actor!="assistant" || kind!="fact" || scope!="shared" || len(sources)!=1 || !profile_fact_value_valid(key,text)) do return fail("Profile fields need one explicit self-disclosure and a short one-line value.")
   status := "active"
   if _, exists := record["status"]; exists {
    status_ok: bool
@@ -547,29 +547,14 @@ conversation_apply_job :: proc "c" (job_id: i64, payload: cstring) -> bool {
    valid := bind_int(check,1,i64(id)) && sqlite3_step(check)==100 && sqlite3_column_int64(check,0)==1
    sqlite3_finalize(check)
    if !valid do return fail("Source message does not exist.")
-   if profile_fact {
-    evidence:=prepare("SELECT count(*) FROM messages WHERE id=?1 AND role='assistant' AND NOT EXISTS(SELECT 1 FROM message_annotations WHERE message_id=?1)")
-    if evidence==nil do return false
-    valid=i64(id)>=start_id && bind_int(evidence,1,i64(id)) && sqlite3_step(evidence)==100 && sqlite3_column_int64(evidence,0)==1
-    sqlite3_finalize(evidence)
-    if !valid do return fail("Profile evidence must be an assistant reply in the current memory batch.")
-   }
   }
   if profile_fact {
-   latest:=prepare(`SELECT p.id,`+PROFILE_FACT_VALUE_SQL+` FROM memories p JOIN memory_current c ON c.id=p.id
-     WHERE p.subject='friend' AND p.key=?1 AND p.scope='shared' AND p.kind='fact' AND p.actor IN ('assistant','friend')
-     ORDER BY p.id DESC LIMIT 1`)
-   if latest==nil do return false
-   if !bind_text(latest,1,key) { sqlite3_finalize(latest); return false }
-   rc:=sqlite3_step(latest)
-   unchanged:=false
-   if rc==100 {
-    previous=sqlite3_column_int64(latest,0)
-    unchanged=string(sqlite3_column_text(latest,1))==text
-   }
-   sqlite3_finalize(latest)
-   if rc!=100 && rc!=101 do return fail("Could not read the current profile value.")
-   if unchanged do continue
+    source:=i64(sources[0].(json.Integer))
+    if source<start_id || !profile_fact_source_valid(source) do return fail("Profile evidence must be an assistant reply in the current memory batch.")
+    prior,prior_source,unchanged,found:=current_profile_fact(key,text)
+    if !found do return false
+    if unchanged || prior_source>=source do continue
+    previous=prior
   }
   stmt := prepare("INSERT INTO memories(job_id,ordinal,kind,actor,subject,key,text,scope,certainty,supersedes_id,valid_from,status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,nullif(?10,0),coalesce(nullif(?11,''),(SELECT created_at FROM messages WHERE id=?12)),?13)")
   if stmt == nil do return false

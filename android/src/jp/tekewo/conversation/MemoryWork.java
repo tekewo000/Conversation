@@ -104,7 +104,8 @@ public final class MemoryWork extends Worker {
             updated();
             ChatSession.Transport backend = (instructions, input, delta) -> {
                 if (isStopped()) throw new IOException("記憶の整理が中断されました。");
-                operation = instructions.equals(ChatSession.REFLECT) ? "人物像の振り返り" : instructions.equals(ChatSession.REBUILD) ? "過去の記憶の再整理" : "会話の記憶整理";
+                operation = instructions.equals(ChatSession.REBUILD_PROFILE) ? "過去の会話からプロフィールを作成" :
+                        instructions.equals(ChatSession.REFLECT) ? "人物像の振り返り" : rebuilding ? "過去の記憶の再整理" : "会話の記憶整理";
                 if (!rebuilding) phase(records, operation + (records ? "：" + batchMessages + "発言の差分を整理しています" : "：会話を振り返っています"));
                 final long[] lastUpdate = {0};
                 final int[] received = {0};
@@ -133,6 +134,7 @@ public final class MemoryWork extends Worker {
                     public JSONObject context() throws Exception { return store.context(""); }
                     public JSONObject batch(long afterId, long throughId) throws Exception { return store.rebuildBatch(afterId, throughId); }
                     public boolean publish() throws Exception { return store.publishRebuild(); }
+                    public boolean publishProfile(long throughId, JSONObject profile) throws Exception { return store.publishProfileRebuild(throughId, profile); }
                 }, backend) || store.pendingPersona().optLong("through_id", 0) > 0;
             } else {
                 session.processMemories(backend, 0);

@@ -25,19 +25,19 @@ CREATE TRIGGER IF NOT EXISTS documents_no_delete BEFORE DELETE ON source_documen
 
 PERSON_JSON :: `coalesce((SELECT json_object('id',person_id,'name',name,'profile',profile,'source_sha256',source_sha256,'version',version) FROM person_profiles WHERE slot=1),'null')`
 
-PROFILE_FACT_VALUE_SQL :: `CASE WHEN p.job_id IS NULL AND instr(p.text,substr(p.key,9)||': ')>0
+PROFILE_FACT_VALUE_SQL :: `CASE WHEN p.job_id IS NULL AND p.actor='friend' AND instr(p.text,substr(p.key,9)||': ')>0
  THEN substr(p.text,instr(p.text,substr(p.key,9)||': ')+length(p.key)-6) ELSE p.text END`
 
 PROFILE_FACTS_JSON :: `(
  WITH fields(label) AS (VALUES('名前'),('身長'),('体重'),('趣味'),('好きなもの')),
  facts AS (
-  SELECT label,p.id,p.job_id,`+PROFILE_FACT_VALUE_SQL+` AS value FROM fields JOIN memories p ON p.id=(
+  SELECT label,p.id,p.job_id,p.actor,`+PROFILE_FACT_VALUE_SQL+` AS value FROM fields JOIN memories p ON p.id=(
    SELECT m.id FROM memories m JOIN memory_current c ON c.id=m.id
    WHERE m.subject='friend' AND m.key='profile/'||fields.label AND m.scope='shared' AND m.kind='fact'
     AND m.certainty='explicit' AND m.actor IN ('assistant','friend') ORDER BY m.id DESC LIMIT 1)
  )
  SELECT json_group_array(json_object('label',f.label,'value',f.value,
-  'source_id',s.id,'source',substr(s.content,1,2048),'updated_at',s.created_at,'imported',json(CASE WHEN f.job_id IS NULL THEN 'true' ELSE 'false' END)))
+   'source_id',s.id,'source',substr(s.content,1,2048),'updated_at',s.created_at,'imported',json(CASE WHEN f.job_id IS NULL AND f.actor='friend' THEN 'true' ELSE 'false' END)))
  FROM facts f LEFT JOIN messages s ON s.id=(SELECT max(message_id) FROM memory_sources WHERE memory_id=f.id)
 )`
 
@@ -47,6 +47,32 @@ profile_fact_key :: proc(key: string) -> bool {
  }
  return false
 }
+
+profile_fact_value_valid :: proc(key,text:string) -> bool {
+ return valid_text(text,256 if key=="profile/名前" else 512) && !strings.contains_any(text,"\r\n\t")
+}
+
+profile_fact_source_valid :: proc(id:i64) -> bool {
+ evidence:=prepare("SELECT 1 FROM messages WHERE id=?1 AND role='assistant' AND NOT EXISTS(SELECT 1 FROM message_annotations WHERE message_id=?1)")
+ if evidence==nil do return false
+ defer sqlite3_finalize(evidence)
+ return bind_int(evidence,1,id) && sqlite3_step(evidence)==100
+}
+
+current_profile_fact :: proc(key,text:string) -> (id,source:i64,unchanged,ok:bool) {
+ latest:=prepare(`SELECT p.id,`+PROFILE_FACT_VALUE_SQL+`,coalesce((SELECT max(message_id) FROM memory_sources WHERE memory_id=p.id),0)
+  FROM memories p JOIN memory_current c ON c.id=p.id
+  WHERE p.subject='friend' AND p.key=?1 AND p.scope='shared' AND p.kind='fact' AND p.actor IN ('assistant','friend')
+  ORDER BY p.id DESC LIMIT 1`)
+ if latest==nil do return
+ defer sqlite3_finalize(latest)
+ if !bind_text(latest,1,key) do return
+ rc:=sqlite3_step(latest)
+ if rc==100 do return sqlite3_column_int64(latest,0),sqlite3_column_int64(latest,2),string(sqlite3_column_text(latest,1))==text,true
+ if rc!=101 do fail("Could not read the current profile value.")
+ return 0,0,false,rc==101
+}
+
 IMPORTED_SOURCES_JSON :: `(SELECT json_group_array(json_object('document_id',d.id,'format',d.format,'provenance',d.provenance,'source_sha256',d.source_sha256,'section',s.section,'occurred_at',s.occurred_at,'snippet',substr(d.raw_markdown,1,256))) FROM memory_document_sources s JOIN source_documents d ON d.id=s.document_id WHERE s.memory_id=m.id)`
 
 person_uuid_valid :: proc(id: string) -> bool {

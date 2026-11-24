@@ -67,6 +67,45 @@ notes_are_immutable_evidence_and_bounded_rebuild_batches :: proc(t:^testing.T) {
 REBUILD_ROOT :: `{"key":"trip","text":"京都への旅行","emotion":"安心","scene":"京都","scope":"real","source_ids":[1]}`
 REBUILD_CHILD :: `{"key":"cafe","text":"喫茶店にいた","emotion":"落ち着いた","scene":"喫茶店","scope":"real","source_ids":[1]}`
 
+@(test)
+historical_profile_publishes_only_newer_self_disclosures :: proc(t:^testing.T) {
+ dir,e:=os.make_directory_temp("","conversation-profile-rebuild-*",context.allocator)
+ assert(e==nil)
+ defer delete(dir)
+ defer os.remove_all(dir)
+ c:=strings.clone_to_cstring(dir)
+ defer delete(c)
+ defer conversation_close()
+ assert(conversation_init(c))
+ assert(conversation_add_message("user","プロフィールを教えて")==1)
+ assert(conversation_add_message("assistant","身長は165 cmで、趣味は読書だよ")==2)
+ assert(conversation_add_message("user","今は？")==3)
+ assert(conversation_add_message("assistant","測り直したら166 cm。陶芸も趣味になったよ")==4)
+ assert(conversation_apply_job(2,`{"memories":[{"kind":"fact","actor":"assistant","subject":"friend","key":"profile/身長","text":"166 cm","scope":"shared","certainty":"explicit","source_ids":[4]}]}`))
+ payload:cstring=`{"身長":{"value":"165 cm","source_id":2},"趣味":{"value":"読書、陶芸","source_id":4}}`
+ testing.expect(t,!conversation_publish_profile_rebuild(2,payload))
+ testing.expect(t,!conversation_publish_profile_rebuild(4,`{"趣味":{"value":"陶芸","source_id":4},"体重":{"value":"60 kg","source_id":1}}`))
+ testing.expect_value(t,scalar("SELECT count(*) FROM memories"),1)
+ assert(conversation_publish_profile_rebuild(4,payload),string(conversation_error()))
+ assert(conversation_publish_profile_rebuild(4,payload),string(conversation_error()))
+ assert(conversation_apply_job(1,`{"memories":[{"kind":"fact","actor":"assistant","subject":"friend","key":"profile/趣味","text":"読書","scope":"shared","certainty":"explicit","source_ids":[2]}]}`))
+ testing.expect_value(t,scalar("SELECT count(*) FROM memories"),2)
+ output:=string(conversation_context(""))
+ testing.expect(t,strings.contains(output,`"label":"身長","value":"166 cm","source_id":4`))
+ testing.expect(t,strings.contains(output,`"label":"趣味","value":"読書、陶芸","source_id":4,"source":"測り直したら166 cm。陶芸も趣味になったよ"`))
+ testing.expect_value(t,scalar("SELECT count(*) FROM episode_rebuilds"),0)
+ archive:=strings.clone_to_cstring(string(conversation_archive_delta(0)))
+ defer delete(archive)
+ conversation_close()
+ restored:=strings.concatenate({dir,"/restored"})
+ defer delete(restored)
+ restored_path:=strings.clone_to_cstring(restored)
+ defer delete(restored_path)
+ assert(conversation_init(restored_path))
+ assert(conversation_apply_archive(archive),string(conversation_error()))
+ testing.expect(t,strings.contains(string(conversation_context("")),`"label":"趣味","value":"読書、陶芸","source_id":4`))
+}
+
 make_rebuild_stage :: proc(dir:string,boundary,cursor:i64) {
  stage_path:=strings.concatenate({dir,"/.memory-rebuild.sqlite3"})
  defer delete(stage_path)

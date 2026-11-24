@@ -110,6 +110,47 @@ rebuild_prepare :: proc(stage:SQLite,sql:cstring) -> Statement {
 }
 
 @(export)
+conversation_publish_profile_rebuild :: proc "c" (boundary:i64,payload:cstring) -> bool {
+ context=runtime.default_context()
+ if !ready do return fail("History is not open.")
+ if boundary<1 || payload==nil || len(string(payload))>8192 do return fail("Invalid historical profile data.")
+ value,parsed:=parse_json(transmute([]byte)string(payload))
+ if !parsed do return false
+ defer json.destroy_value(value)
+ fields,object_ok:=value.(json.Object)
+ if !object_ok || len(fields)>5 do return fail("Expected at most five historical profile fields.")
+ if !execute("BEGIN IMMEDIATE") do return false
+ committed:=false
+ defer { archive_group=0; if !committed do execute("ROLLBACK") }
+ if boundary!=scalar("SELECT coalesce(max(id),0) FROM messages") do return fail("New messages arrived during rebuild; extend staging to the latest boundary and retry.")
+ for label,candidate in fields {
+  key:=strings.concatenate({"profile/",label})
+  defer delete(key)
+  field,field_ok:=candidate.(json.Object)
+  if !profile_fact_key(key) || !field_ok || len(field)!=2 do return fail("Invalid historical profile field.")
+  value,value_ok:=field["value"].(json.String)
+  source,source_ok:=field["source_id"].(json.Integer)
+  if !value_ok || !profile_fact_value_valid(key,string(value)) || !source_ok || source<1 || i64(source)>boundary || !profile_fact_source_valid(i64(source)) do return fail("Profile evidence must be an assistant reply in the rebuilt history.")
+  previous,previous_source,_,ok:=current_profile_fact(key,string(value))
+  if !ok do return false
+  if previous_source>=i64(source) do continue
+  if archive_group==0 && !archive_begin() do return false
+  stmt:=prepare(`INSERT INTO memories(kind,actor,subject,key,text,scope,certainty,supersedes_id,valid_from)
+    VALUES('fact','assistant','friend',?1,?2,'shared','explicit',nullif(?3,0),(SELECT created_at FROM messages WHERE id=?4))`)
+  if stmt==nil do return false
+  saved:=bind_text(stmt,1,key) && bind_text(stmt,2,string(value)) && bind_int(stmt,3,previous) && bind_int(stmt,4,i64(source)) && sqlite3_step(stmt)==101
+  sqlite3_finalize(stmt)
+  if !saved do return fail("Could not save the historical profile field.")
+  id:=sqlite3_last_insert_rowid(db)
+  if !archive_capture("memories",id) || !insert_source(id,i64(source)) do return false
+ }
+ if archive_group!=0 && !archive_finish() do return false
+ committed=execute("COMMIT")
+ if committed do last_error=""
+ return committed
+}
+
+@(export)
 conversation_publish_rebuild :: proc "c" () -> bool {
  context=runtime.default_context()
  if !ready do return fail("History is not open.")

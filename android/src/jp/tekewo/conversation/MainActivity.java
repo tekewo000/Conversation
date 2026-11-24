@@ -30,6 +30,7 @@ public final class MainActivity extends ComponentActivity {
     private static native long nativeAddNote(byte[] kind, byte[] text);
     static native String nativeRebuildBatch(long afterId, long throughId);
     static native String nativePublishRebuild();
+    static native String nativePublishProfileRebuild(long boundary, byte[] payload);
     static native String nativeLastError();
     static native String nativeContext(byte[] query);
     private static native String nativeContextHybrid(byte[] query, long[] candidates);
@@ -950,6 +951,7 @@ public final class MainActivity extends ComponentActivity {
                     JSONObject fact = rows.getJSONObject(i);
                     facts.put(fact.getString("label"), fact);
                 }
+                String rebuildStatus = new MemoryRebuild(person.directory).status();
                 ui(() -> {
                     if (!compose.isPageVisible("profile", version) || changingPerson || activePerson == null || !person.id.equals(activePerson.id)) return;
                     ComposeUi.Panel panel = page("プロフィール", "profile", true);
@@ -963,7 +965,11 @@ public final class MainActivity extends ComponentActivity {
                         row.enabled = fact != null || label.equals("名前");
                         panel.rows.add(row);
                     }
-                    panel.rows.add(section("記録", entry("会話の記憶", "会話と体験を読む", 3, this::showMemory)));
+                    if (!rebuildStatus.isEmpty()) panel.blocks.add(new ComposeUi.Block("一括整理の進捗", rebuildStatus));
+                    else panel.rows.add(section("記録", entry("過去の会話から作る", "ChatGPTの利用枠を使い、本人の過去の発言からプロフィールを整理します", 2, this::requestProfileRebuild)));
+                    ComposeUi.Row memory = entry("会話の記憶", "会話と体験を読む", 3, this::showMemory);
+                    memory.section = "記録";
+                    panel.rows.add(memory);
                     compose.showPage(panel);
                 });
             } catch (Exception error) { ui(() -> {
@@ -1073,28 +1079,41 @@ public final class MainActivity extends ComponentActivity {
         panel.onDismiss = this::showMemory;
         panel.confirm = () -> {
             compose.hide();
-            final int version = compose.getPageVersion();
-            final String origin = compose.getPageKey();
-            worker.execute(() -> {
-                try {
-                    synchronized (storeGate) {
-                        requireCurrentPerson();
-                        if (!person.id.equals(activePerson.id)) return;
-                        JSONObject snapshot = new JSONObject(nativeContext(bytes("")));
-                        long total = snapshot.getJSONObject("memory_progress").getLong("total_messages");
-                        new MemoryRebuild(person.directory).request(total);
-                    }
-                    MemoryWork.resume(getApplicationContext());
-                    ui(() -> {
-                        if (activePerson != null && person.id.equals(activePerson.id) && compose.isPageVisible(origin, version)) showMemory();
-                        else refreshManagementStatus();
-                    });
-                } catch (Exception error) { ui(() -> {
-                    if (compose.isPageVisible(origin, version)) showError(safeError(error));
-                }); }
-            });
+            startHistoricalRebuild(person, false);
         };
         compose.show(panel);
+    }
+
+    private void requestProfileRebuild() {
+        if (activePerson == null) return;
+        if (!connection.hasSession()) { showConnection(); return; }
+        startHistoricalRebuild(activePerson, true);
+    }
+
+    private void startHistoricalRebuild(PersonRegistry.Person person, boolean profile) {
+        int version = compose.getPageVersion();
+        String origin = compose.getPageKey();
+        worker.execute(() -> {
+            try {
+                synchronized (storeGate) {
+                    requireCurrentPerson();
+                    if (!person.id.equals(activePerson.id)) return;
+                    String result = nativeContext(bytes(""));
+                    if (result.isEmpty()) throw new java.io.IOException(nativeLastError());
+                    long total = new JSONObject(result).getJSONObject("memory_progress").getLong("total_messages");
+                    new MemoryRebuild(person.directory).request(total, profile);
+                }
+                MemoryWork.resume(getApplicationContext());
+                ui(() -> {
+                    if (activePerson == null || !person.id.equals(activePerson.id) || !compose.isPageVisible(origin, version)) {
+                        refreshManagementStatus();
+                    } else if (profile) refreshProfile();
+                    else showMemory();
+                });
+            } catch (Exception error) { ui(() -> {
+                if (compose.isPageVisible(origin, version)) showError(safeError(error));
+            }); }
+        });
     }
 
     private void showMemoryHistory(PersonRegistry.Person person, JSONObject snapshot, boolean middleTerm) {

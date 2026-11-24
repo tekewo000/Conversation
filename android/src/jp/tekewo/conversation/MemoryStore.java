@@ -50,6 +50,14 @@ final class MemoryStore implements ChatSession.Store {
             return true;
         }
     }
+    boolean publishProfileRebuild(long boundary, JSONObject profile) throws Exception {
+        synchronized (MainActivity.storeGate) {
+            current(); String error = MainActivity.nativePublishProfileRebuild(boundary, bytes(profile.toString()));
+            if (error.startsWith("New messages arrived during rebuild;")) return false;
+            if (!error.isEmpty()) throw new IOException(error);
+            return true;
+        }
+    }
     public void apply(long id, String payload) throws Exception {
         synchronized (MainActivity.storeGate) {
             current(); String error = MainActivity.nativeApplyJob(id, bytes(payload));

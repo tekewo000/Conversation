@@ -19,6 +19,46 @@ class MemoryRebuildTest {
     private fun result(root: JSONObject) = JSONObject().put("memories", JSONArray()).put("continuity",
         JSONObject().put("threads", JSONArray()).put("episodes", JSONArray().put(root))).toString()
 
+    @Test fun profileRebuildResumesAndRejectsAnUnsupportedSource() {
+        val directory = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "profile-rebuild-${UUID.randomUUID()}").apply { mkdirs() }
+        try {
+            val first = MemoryRebuild(directory)
+            first.request(4, true)
+            var published: JSONObject? = null
+            val source = object : MemoryRebuild.Native {
+                override fun context() = JSONObject().put("memory_progress", JSONObject().put("total_messages", 4))
+                override fun batch(after: Long, through: Long): JSONObject {
+                    val end = minOf(through, after + 2)
+                    val messages = JSONArray()
+                    for (id in after + 1..end) messages.put(JSONObject().put("id", id)
+                        .put("role", if (id % 2L == 0L) "assistant" else "user").put("content", "原文$id"))
+                    return JSONObject().put("messages", messages).put("through_id", end).put("boundary_id", through)
+                }
+                override fun publish(): Boolean = throw AssertionError("Profile rebuild must not publish episodes")
+                override fun publishProfile(through: Long, profile: JSONObject): Boolean {
+                    assertEquals(4L, through)
+                    published = profile
+                    return true
+                }
+            }
+            assertTrue(first.step(source) { _, _, _ -> """{"profile":{"趣味":{"value":"読書","source_id":2}}}""" })
+            val resumed = MemoryRebuild(directory)
+            assertTrue(resumed.status().contains("2 / 4"))
+            assertThrows(java.io.IOException::class.java) {
+                resumed.step(source) { _, _, _ -> """{"profile":{"体重":{"value":"60 kg","source_id":3}}}""" }
+            }
+            assertTrue(resumed.status().contains("2 / 4"))
+            assertTrue(resumed.step(source) { _, input, _ ->
+                val data = JSONObject(input.getJSONObject(0).getString("content"))
+                assertEquals("読書", data.getJSONObject("profile").getJSONObject("趣味").getString("value"))
+                """{"profile":{"趣味":{"value":"読書、陶芸","source_id":4}}}"""
+            })
+            assertFalse(resumed.step(source) { _, _, _ -> throw AssertionError("Saved work should publish without another request") })
+            assertEquals("読書、陶芸", published!!.getJSONObject("趣味").getString("value"))
+            assertFalse(resumed.isPending())
+        } finally { directory.deleteRecursively() }
+    }
+
     @Test fun deltaUpdatesAndEmptyBatchesKeepPreviouslySavedExperiences() {
         val directory = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "rebuild-delta-${UUID.randomUUID()}").apply { mkdirs() }
         try {

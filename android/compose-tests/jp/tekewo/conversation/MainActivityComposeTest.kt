@@ -362,6 +362,39 @@ class MainActivityComposeTest {
         compose.onNodeWithText("測り直したら166 cmだった").assertIsDisplayed()
     }
 
+    @Test fun profileRebuildButtonPublishesAnOldReplyThroughTheNormalStore() {
+        createManagementPerson()
+        val person = PersonRegistry(context.filesDir).active()!!
+        val add = MainActivity::class.java.getDeclaredMethod("nativeAddMessage", ByteArray::class.java, ByteArray::class.java).apply { isAccessible = true }
+        assertEquals(1L, add.invoke(null, "user".toByteArray(), "趣味を教えて".toByteArray()))
+        assertEquals(2L, add.invoke(null, "assistant".toByteArray(), "趣味は読書だよ".toByteArray()))
+        compose.runOnUiThread {
+            val connection = MainActivity::class.java.getDeclaredField("connection").apply { isAccessible = true }.get(compose.activity)
+            ChatGptConnection::class.java.getDeclaredField("state").apply { isAccessible = true }.set(connection,
+                org.json.JSONObject().put("access_token", "synthetic-ui-only").put("refresh_token", "synthetic-ui-only")
+                    .put("subject", "synthetic-ui-only").put("client_id", "synthetic-ui-only"))
+        }
+        compose.onNodeWithContentDescription("会話相手のプロフィールを開く").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText("過去の会話から作る")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("過去の会話から作る").performScrollTo().performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText("0 / 2 発言", substring = true)).fetchSemanticsNodes().isNotEmpty() }
+        val store = MemoryStore(context, person.id)
+        val rebuild = MemoryRebuild(person.directory)
+        val source = object : MemoryRebuild.Native {
+            override fun context() = store.context("")
+            override fun batch(after: Long, through: Long) = store.rebuildBatch(after, through)
+            override fun publish(): Boolean = throw AssertionError("Profile rebuild must not publish episodes")
+            override fun publishProfile(through: Long, profile: org.json.JSONObject) = store.publishProfileRebuild(through, profile)
+        }
+        assertTrue(rebuild.step(source) { _, _, _ -> """{"profile":{"趣味":{"value":"読書","source_id":2}}}""" })
+        assertTrue(!rebuild.step(source) { _, _, _ -> throw AssertionError("Expected publication") })
+        compose.onNodeWithContentDescription("戻る").performClick()
+        compose.onNodeWithContentDescription("会話相手のプロフィールを開く").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText("読書")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("趣味").performScrollTo().performClick()
+        compose.onNodeWithText("趣味は読書だよ").assertIsDisplayed()
+    }
+
     private fun openShortTermMemory() {
         val header = "会話相手のプロフィールを開く"
         compose.waitUntil(10_000) {

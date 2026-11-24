@@ -21,6 +21,7 @@ final class MemoryRebuild {
         JSONObject context() throws Exception;
         JSONObject batch(long afterId, long throughId) throws Exception;
         boolean publish() throws Exception;
+        default boolean publishProfile(long throughId, JSONObject profile) throws Exception { throw invalid(); }
     }
     private final File file;
     private final Runnable changed;
@@ -32,12 +33,19 @@ final class MemoryRebuild {
         if (!file.isFile() || Files.isSymbolicLink(file.toPath())) throw invalid();
         return EncryptedDatabase.open(file.getParentFile(),file,false);
     }
-    void request(long boundary) throws Exception {
+    void request(long boundary) throws Exception { request(boundary, false); }
+
+    void request(long boundary, boolean profile) throws Exception {
         if (boundary < 1) throw new IOException("整理する過去の会話がまだありません。");
         synchronized (MemoryRebuild.class) {
             if (file.isFile()) {
-                try (SQLiteDatabase db = open()) { validate(db); return; }
+                Boolean existingMode = null;
+                try (SQLiteDatabase db = open()) { boolean isProfile = profileMode(db); validate(db, isProfile); existingMode = isProfile; }
                 catch (Exception invalidCache) { if(invalidCache instanceof EncryptedDatabase.Failure) throw invalidCache; if (!SQLiteDatabase.deleteDatabase(file)) throw invalid(); }
+                if (existingMode != null) {
+                    if (existingMode != profile) throw new IOException("別の一括整理が進行中です。");
+                    return;
+                }
             }
             File temporary = new File(file.getParentFile(), FILE + "." + UUID.randomUUID() + ".tmp");
             try {
@@ -46,7 +54,10 @@ final class MemoryRebuild {
                     try {
                         db.execSQL("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
                         db.execSQL("CREATE TABLE nodes(root_key TEXT NOT NULL,key TEXT NOT NULL,parent_key TEXT NOT NULL,depth INTEGER NOT NULL,node TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(root_key,key))");
-                        put(db, "boundary", Long.toString(boundary)); put(db, "cursor", "0"); put(db, "roots", "[]");
+                        put(db, "boundary", Long.toString(boundary)); put(db, "cursor", "0");
+                        // An older app must reject a profile stage before attempting episode publication.
+                        put(db, "roots", profile ? "{}" : "[]");
+                        if (profile) { put(db, "mode", "profile"); put(db, "profile", "{}"); }
                         put(db, "request_id", UUID.randomUUID().toString());
                         db.setTransactionSuccessful();
                     } finally { db.endTransaction(); }
@@ -58,12 +69,13 @@ final class MemoryRebuild {
     String status() throws Exception {
         if (!file.isFile()) return "";
         try (SQLiteDatabase db = EncryptedDatabase.open(file.getParentFile(),file,true)) {
-            validate(db);
+            boolean profile = profileMode(db);
+            validate(db, profile);
             String phase = "実行を待っています", error = "";
             try (Cursor rows = db.rawQuery("SELECT key,value FROM meta WHERE key IN ('phase','error')", null)) {
                 while (rows.moveToNext()) { if (rows.getString(0).equals("phase")) phase = rows.getString(1); else error = rows.getString(1); }
             }
-            return "過去の記憶を階層に整理中\n" + meta(db, "cursor") + " / " + meta(db, "boundary") + " 発言\n" + phase
+            return (profile ? "プロフィールを作成中\n" : "過去の記憶を階層に整理中\n") + meta(db, "cursor") + " / " + meta(db, "boundary") + " 発言\n" + phase
                     + (error.isEmpty() ? "" : "\n" + error);
         } catch (Exception invalidCache) {
             if(invalidCache instanceof EncryptedDatabase.Failure) return "整理中のデータを復号できません。原本と作業データを保持して停止しています。復元キーを確認してください。";
@@ -82,11 +94,24 @@ final class MemoryRebuild {
             changed.run();
         } catch (Exception ignored) { android.util.Log.w("ConversationMemory", "Rebuild status could not be updated"); }
     }
-    private static void validate(SQLiteDatabase db) throws Exception {
+    private static boolean profileMode(SQLiteDatabase db) throws IOException {
+        try (Cursor row = db.rawQuery("SELECT value FROM meta WHERE key='mode'", null)) {
+            if (!row.moveToFirst()) return false;
+            if (!"profile".equals(row.getString(0))) throw invalid();
+            return true;
+        }
+    }
+    private static void validate(SQLiteDatabase db, boolean profile) throws Exception {
         long cursor = Long.parseLong(meta(db, "cursor")), boundary = Long.parseLong(meta(db, "boundary"));
         String roots = meta(db, "roots"), request = meta(db, "request_id");
-        if (cursor < 0 || boundary < cursor || bytes(roots) > 65536 || new JSONArray(roots).length() > 30
+        if (cursor < 0 || boundary < cursor
                 || !UUID.fromString(request).toString().equals(request)) throw invalid();
+        if (profile) {
+            String fields = meta(db, "profile");
+            if (!roots.equals("{}") || bytes(fields) > 8192 || new JSONObject(fields).length() > 5) throw invalid();
+            return;
+        }
+        if (bytes(roots) > 65536 || new JSONArray(roots).length() > 30) throw invalid();
         try (Cursor schema = db.rawQuery("SELECT root_key,key,parent_key,depth,node,path FROM nodes LIMIT 0", null)) { schema.getColumnCount(); }
     }
     private static String meta(SQLiteDatabase db, String key) throws IOException {
@@ -103,26 +128,32 @@ final class MemoryRebuild {
         JSONObject context = source.context();
         long latest = context.getJSONObject("memory_progress").getLong("total_messages");
         long cursor, boundary;
-        JSONArray roots, known = new JSONArray();
+        JSONArray roots = new JSONArray(), known = new JSONArray();
+        JSONObject stagedProfile = new JSONObject();
+        boolean profile = false;
         try (SQLiteDatabase db = open()) {
-            validate(db);
+            profile = profileMode(db);
+            validate(db, profile);
             cursor = Long.parseLong(meta(db, "cursor")); boundary = Long.parseLong(meta(db, "boundary"));
             if (cursor < 0 || boundary < cursor || latest < boundary) throw invalid();
-            roots = new JSONArray(meta(db, "roots"));
-            try (Cursor rows = db.rawQuery("SELECT root_key,parent_key,depth,node FROM nodes ORDER BY rowid DESC LIMIT 24", null)) {
+            if (profile) stagedProfile = new JSONObject(meta(db, "profile"));
+            else {
+                roots = new JSONArray(meta(db, "roots"));
+                try (Cursor rows = db.rawQuery("SELECT root_key,parent_key,depth,node FROM nodes ORDER BY rowid DESC LIMIT 24", null)) {
                 while (rows.moveToNext()) known.put(new JSONObject(rows.getString(3)).put("root_key", rows.getString(0))
                         .put("parent_key", rows.getString(1)).put("depth", rows.getInt(2)));
+                }
             }
         } catch (Exception invalidCache) {
             if(invalidCache instanceof EncryptedDatabase.Failure) throw invalidCache;
             if (!file.isFile()) return false;
             if (!SQLiteDatabase.deleteDatabase(file)) throw invalid();
-            request(latest);
+            request(latest, profile);
             return true;
         }
         if (cursor == boundary) {
-            phase("整理した階層を保存しています");
-            if (source.publish()) {
+            phase(profile ? "プロフィールを保存しています" : "整理した階層を保存しています");
+            if (profile ? source.publishProfile(boundary, stagedProfile) : source.publish()) {
                 if (!SQLiteDatabase.deleteDatabase(file)) throw new IOException("整理結果は保存されました。作業データの後片付けを再試行します。");
                 return false;
             }
@@ -140,10 +171,13 @@ final class MemoryRebuild {
         if (messages.length() < 1 || messages.length() > 64 || through <= cursor || through > batchBoundary
                 || batch.getLong("boundary_id") != batchBoundary || through - cursor != messages.length()) throw invalid();
         Set<Long> allowed = new HashSet<>();
+        Set<Long> assistantSources = new HashSet<>();
         for (int i = 0; i < messages.length(); i++) {
-            long id = integer(messages.getJSONObject(i).get("id"));
+            JSONObject message = messages.getJSONObject(i);
+            long id = integer(message.get("id"));
             if (id != cursor + i + 1) throw invalid();
             allowed.add(id);
+            if (profile && message.optString("role").equals("assistant") && !message.has("annotation")) assistantSources.add(id);
         }
         Set<Long> originals = new java.util.LinkedHashSet<>();
         collectSources(known, allowed, originals); collectSources(roots, allowed, originals);
@@ -163,13 +197,14 @@ final class MemoryRebuild {
             evidence.put(original);
         }
         JSONObject data = new JSONObject().put("job", batch).put("person", context.optJSONObject("person"))
-                .put("time_zone", java.util.TimeZone.getDefault().getID())
-                .put("continuity", new JSONObject().put("threads", new JSONArray()).put("episodes", roots))
+                .put("time_zone", java.util.TimeZone.getDefault().getID());
+        if (profile) data.put("profile", stagedProfile);
+        else data.put("continuity", new JSONObject().put("threads", new JSONArray()).put("episodes", roots))
                 .put("known_nodes", known).put("evidence", evidence);
         String range = (cursor + 1) + "〜" + through + "発言：";
         phase(range + "AIの応答を待っています");
         long[] received = {0}, updated = {0};
-        String response = backend.request(ChatSession.REBUILD,
+        String response = backend.request(profile ? ChatSession.REBUILD_PROFILE : ChatSession.REBUILD,
                 new JSONArray().put(new JSONObject().put("role", "user").put("content", data.toString())), delta -> {
                     received[0] += delta.length();
                     long now = System.nanoTime();
@@ -179,6 +214,11 @@ final class MemoryRebuild {
                 });
         phase(range + "結果を検証しています");
         String answer = ChatSession.jsonPayload(response);
+        if (profile) {
+            saveProfile(stagedProfile, answer, assistantSources, through);
+            phase("次の範囲の整理を準備しています");
+            return true;
+        }
         if (bytes(answer) > 131072) throw invalid("整理結果の文章量が上限を超えています。");
         JSONObject result = new JSONObject(answer), continuity = result.getJSONObject("continuity");
         if (result.length() != 2 || result.getJSONArray("memories").length() != 0 || continuity.length() != 2
@@ -206,6 +246,33 @@ final class MemoryRebuild {
         }
         phase("次の範囲の整理を準備しています");
         return true;
+    }
+
+    private void saveProfile(JSONObject staged, String answer, Set<Long> allowed, long through) throws Exception {
+        if (bytes(answer) > 8192) throw invalid("プロフィールの整理結果が長すぎます。");
+        JSONObject result = new JSONObject(answer), fields = result.getJSONObject("profile");
+        if (result.length() != 1 || fields.length() > 5) throw invalid("プロフィールの項目が保存条件を満たしていません。");
+        for (java.util.Iterator<String> labels = fields.keys(); labels.hasNext();) {
+            String label = labels.next();
+            switch (label) {
+                case "名前": case "身長": case "体重": case "趣味": case "好きなもの": break;
+                default: throw invalid("未対応のプロフィール項目があります。");
+            }
+            JSONObject field = fields.getJSONObject(label);
+            String value = text(field, "value", label.equals("名前") ? 256 : 512, false);
+            long id = integer(field.get("source_id"));
+            if (field.length() != 2 || value.indexOf('\r') >= 0 || value.indexOf('\n') >= 0 || value.indexOf('\t') >= 0 || !allowed.contains(id))
+                throw invalid("プロフィールの根拠が今回の本人の発言と一致しません。");
+            staged.put(label, field);
+        }
+        try (SQLiteDatabase db = open()) {
+            db.beginTransaction();
+            try {
+                put(db, "profile", staged.toString());
+                put(db, "cursor", Long.toString(through));
+                db.setTransactionSuccessful();
+            } finally { db.endTransaction(); }
+        }
     }
     private static void collectSources(JSONArray nodes, Set<Long> allowed, Set<Long> originals) throws Exception {
         for (int i = 0; i < nodes.length(); i++) {
