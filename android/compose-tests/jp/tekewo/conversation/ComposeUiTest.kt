@@ -19,8 +19,6 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTouchInput
-import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
@@ -114,15 +112,13 @@ class ComposeUiTest {
         compose.runOnIdle { assertEquals("", token.value) }
     }
 
-    @Test fun longPressOffersContextNotesWithoutSendingAnOrdinaryMessage() {
-        var notes = 0
+    @Test fun sendHasNoSeparateLongPressAction() {
         compose.runOnUiThread {
-            install(); ui.enabled = true; ui.draft = "雨が降り始めた"
-            ui.onSendNote = Runnable { notes++ }
+            install(); ui.enabled = true; ui.draft = "おはよう\n（眠たそう）"
         }
-        compose.onNodeWithContentDescription("送信").performTouchInput { longClick() }
-        compose.runOnIdle { assertEquals(0, sends); assertEquals(1, notes) }
-        compose.onNodeWithContentDescription("送信").performClick()
+        val send = compose.onNodeWithContentDescription("送信")
+        send.assert(SemanticsMatcher.keyNotDefined(SemanticsActions.OnLongClick))
+        send.performClick()
         compose.runOnIdle { assertEquals(1, sends); ui.sending = true }
         compose.onNodeWithContentDescription("送信").assertIsNotEnabled()
     }
@@ -201,7 +197,7 @@ class ComposeUiTest {
         val menu = menuControl.fetchSemanticsNode().boundsInRoot
         val root = compose.onRoot().fetchSemanticsNode().boundsInRoot
         assertTrue(menu.center.x > root.center.x && menu.center.y < root.center.y)
-        val attach = compose.onNodeWithContentDescription("添付ファイルを追加").fetchSemanticsNode().boundsInRoot
+        val attach = compose.onNodeWithContentDescription("メッセージに追加").fetchSemanticsNode().boundsInRoot
         assertTrue(attach.center.x < root.center.x && attach.center.y > root.center.y)
         compose.runOnIdle { ui.personName = "長い会話相手の名前".repeat(6) }
         assertEquals(menu.top, menuControl.fetchSemanticsNode().boundsInRoot.top, 0.5f)

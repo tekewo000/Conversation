@@ -259,18 +259,6 @@ Java_jp_tekewo_conversation_MainActivity_nativeAddMessage(JNIEnv* env, jclass, j
     }
 }
 
-extern "C" JNIEXPORT jlong JNICALL
-Java_jp_tekewo_conversation_MainActivity_nativeAddNote(JNIEnv* env, jclass, jbyteArray kind, jbyteArray text) {
-    std::lock_guard<std::mutex> lock(mutex);
-    try {
-        std::string note_kind, note;
-        if (!core_ready || !read_text(env, kind, note_kind) || !read_text(env, text, note)) { error = "入力が無効です。"; return 0; }
-        const int64_t id = conversation_add_note(note_kind.c_str(), note.c_str());
-        if (!id) { core_error(); return 0; }
-        error.clear(); return id;
-    } catch (const std::exception&) { error = "メモを保存できませんでした。"; return 0; }
-}
-
 static jstring rebuild_batch(JNIEnv* env, jlong after, jlong through, bool profile) {
     std::lock_guard<std::mutex> lock(mutex);
     try {

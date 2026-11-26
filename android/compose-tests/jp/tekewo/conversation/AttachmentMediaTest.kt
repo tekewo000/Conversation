@@ -139,7 +139,7 @@ class AttachmentMediaTest {
         compose.onNodeWithContentDescription("送信").assertIsEnabled()
         compose.onNodeWithContentDescription("緑の画像を取り外す").performClick()
         compose.onNodeWithContentDescription("送信").assertIsNotEnabled()
-        compose.onNodeWithContentDescription("添付ファイルを追加").performClick()
+        compose.onNodeWithContentDescription("メッセージに追加").performClick()
         compose.runOnIdle { assertEquals(1, picked) }
         compose.runOnUiThread {
             ui.setMessages(JSONObject().put("first", 0).put("total", 2).put("messages", JSONArray()

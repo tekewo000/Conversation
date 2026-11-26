@@ -53,6 +53,7 @@ public final class ChatSessionTest {
         rebuildRequestedDuringReflectionHandsOffWithoutLosingTheReview();
         extractionCanContinueWhileAnUnsupportedPersonaReviewStaysPending();
         nonReplyNotesStayOutOfSpokenDialogueAndReachTheNextReply();
+        inlineDialogueReachesTheModelAsOneTurnWithNotationGuidance();
         hierarchySourcesReachExtractionAndIdleWorkMakesNoRequests();
         memoryBatchBoundaryComesFromTheStoreNotTheModel();
         memoryPayloadAcceptsThirtyDetailedScenesAndRejectsOversizedResults();
@@ -286,7 +287,6 @@ public final class ChatSessionTest {
 
     static void nonReplyNotesStayOutOfSpokenDialogueAndReachTheNextReply() throws Exception {
         Store store = new Store() {
-            @Override public long addNote(String kind, String text) { return add("user", text); }
             @Override public JSONObject context(String query) throws Exception {
                 JSONObject context = super.context(query);
                 JSONArray messages = context.getJSONArray("messages");
@@ -299,9 +299,8 @@ public final class ChatSessionTest {
             }
         };
         ChatSession session = new ChatSession(store);
-        session.note("scene", "雨が降り始め、二人は軒下にいる");
-        session.note("meta", "次は少し静かな雰囲気で");
-        assert store.roles.size() == 2 && !store.roles.contains("assistant") : "Saving context notes must not invent an assistant reply";
+        store.add("user", "雨が降り始め、二人は軒下にいる");
+        store.add("user", "次は少し静かな雰囲気で");
         session.reply("雨宿りしようか", true, (instructions, input, delta) -> {
             JSONObject reference = new JSONObject(input.getJSONObject(0).getString("content").split("\\n", 2)[1]);
             JSONArray notes = reference.getJSONArray("context_notes");
@@ -314,6 +313,22 @@ public final class ChatSessionTest {
             return "うん、ここで待とう。";
         }, new Listener());
         assert store.roles.size() == 4;
+    }
+
+    static void inlineDialogueReachesTheModelAsOneTurnWithNotationGuidance() throws Exception {
+        Store store = new Store();
+        ChatSession session = new ChatSession(store);
+        String text = "（会社の同期）\nおはよう\n（眠たそう）\n（心情）本当は少し緊張している\n（指示）やさしく声をかける";
+        Listener listener = new Listener();
+        session.reply(text, true, (instructions, input, delta) -> {
+            assert input.length() == 2 && input.getJSONObject(1).getString("role").equals("user");
+            assert input.getJSONObject(1).getString("content").equals(text);
+            assert instructions.contains("（会社の同期）") && instructions.contains("（眠たそう）")
+                    && instructions.contains("（指示）") && instructions.contains("（心情）")
+                    : "The model needs guidance for speaker changes, free directions and the two labels";
+            return "おはよう。眠そうだね、少し休む？";
+        }, listener);
+        assert store.texts.get(0).equals(text) && listener.users == 1 && listener.replies == 1;
     }
 
     static void hierarchySourcesReachExtractionAndIdleWorkMakesNoRequests() throws Exception {

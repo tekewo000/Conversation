@@ -18,7 +18,6 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -69,6 +68,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.Font
@@ -122,7 +122,6 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     var generateImages by mutableStateOf(false)
     var mediaDirectory by mutableStateOf<File?>(null)
     var onAttach by mutableStateOf<Runnable?>(null)
-    var onSendNote by mutableStateOf<Runnable?>(null)
     var streaming by mutableStateOf("")
     private var replying by mutableStateOf(false)
     private var replyKey = 0L
@@ -150,7 +149,9 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     private var pageDirection = 0
     private val menuFocus = FocusRequester()
     private val attachmentFocus = FocusRequester()
+    private val draftFocus = FocusRequester()
     private var attachmentMenu = false
+    private var returnToDraft = false
 
     class Panel(@JvmField val title: String) {
         @JvmField var key = title
@@ -209,6 +210,15 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
     }
 
     fun show(value: Panel) { hide(); panel = value; pageVersion++ }
+    fun insertNotation(label: String) {
+        val notation = "（${label}）"
+        draftField.edit {
+            val cursor = selection.min
+            replace(cursor, cursor, notation)
+            selection = TextRange(cursor + if (label.isEmpty()) 1 else notation.length)
+        }
+        returnToDraft = true
+    }
     fun hide() {
         panel?.let { value -> value.fields.filter { it.secret }.forEach { it.value = "" }; pageVersion++ }
         panel = null
@@ -434,10 +444,11 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                     onClick = { keyboard?.hide(); focus.clearFocus(); attachmentMenu = true; onAttach?.run() },
                     enabled = enabled && !sending, modifier = Modifier.size(48.dp).focusRequester(attachmentFocus),
                     colors = IconButtonDefaults.iconButtonColors(contentColor = colors.onSurfaceVariant)) {
-                    Icon(ConversationIcons.Add, contentDescription = "添付ファイルを追加")
+                    Icon(ConversationIcons.Add, contentDescription = "メッセージに追加")
                 }
                 BasicTextField(state = draftField, enabled = enabled, interactionSource = fieldInteractions,
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                        .focusRequester(draftFocus)
                         .semantics { contentDescription = "メッセージ入力" }.padding(horizontal = 4.dp, vertical = 12.dp),
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
                     cursorBrush = SolidColor(colors.primary), lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = 5),
@@ -452,8 +463,7 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
                         }
                     })
                 Box(Modifier.size(48.dp).clip(CircleShape)
-                    .combinedClickable(enabled = canSend, role = Role.Button, onClick = { onSend.run() },
-                        onLongClickLabel = "情景・メタ発言として送る", onLongClick = { onSendNote?.run() }),
+                    .clickable(enabled = canSend, role = Role.Button, onClick = { onSend.run() }),
                     contentAlignment = Alignment.Center) {
                     Icon(ConversationIcons.Send, contentDescription = "送信",
                         tint = if (canSend) colors.primary else colors.onSurfaceVariant.copy(alpha = 0.45f))
@@ -466,13 +476,18 @@ class ComposeUi(activity: ComponentActivity, private val onMenu: Runnable,
         val value = panel
         val inline = isInlineSheet(value)
         val closeFocus = remember { FocusRequester() }
+        val keyboard = LocalSoftwareKeyboardController.current
         var returnFocus by remember { mutableStateOf(false) }
         LaunchedEffect(value) {
             if (inline) {
                 closeFocus.requestFocus()
                 returnFocus = true
             } else if (returnFocus) {
-                if (attachmentMenu) attachmentFocus.requestFocus() else menuFocus.requestFocus()
+                if (returnToDraft) {
+                    returnToDraft = false
+                    draftFocus.requestFocus()
+                    keyboard?.show()
+                } else if (attachmentMenu) attachmentFocus.requestFocus() else menuFocus.requestFocus()
                 returnFocus = false
             }
         }

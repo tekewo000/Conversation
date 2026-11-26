@@ -27,7 +27,6 @@ public final class MainActivity extends ComponentActivity {
     private static native String nativeInit(byte[] storageDir, byte[] font, byte[] emojiFont);
     static native long nativeAddMessage(byte[] role, byte[] text);
     private static native long nativeAddReply(byte[] text, byte[] state);
-    private static native long nativeAddNote(byte[] kind, byte[] text);
     static native String nativeRebuildBatch(long afterId, long throughId);
     static native String nativeRebuildProfileBatch(long afterId, long throughId);
     static native String nativePublishRebuild();
@@ -169,19 +168,10 @@ public final class MainActivity extends ComponentActivity {
         if (activePerson != null) compose.setGenerateImages(getPreferences(MODE_PRIVATE).getBoolean("image_mode_" + activePerson.id, false));
         compose.setPersonName(activePerson == null ? "" : activePerson.displayName);
         compose.setOnIcon(this::showProfile);
-        compose.setOnSendNote(this::showNoteMenu);
         refreshPersonIcon();
         connection = new ChatGptConnection(this);
         imageCredentials = new ConnectionStore(this, "image-api");
         ChatSession.Store store = new ChatSession.Store() {
-            public long addNote(String kind, String text) throws Exception {
-                synchronized (storeGate) {
-                    requireCurrentPerson();
-                    long id = nativeAddNote(bytes(kind), bytes(text));
-                    if (id <= 0) throw new java.io.IOException(nativeLastError());
-                    return id;
-                }
-            }
             public long add(String role, String text) throws Exception {
                 synchronized (storeGate) {
                     requireCurrentPerson();
@@ -404,6 +394,11 @@ public final class MainActivity extends ComponentActivity {
     private void showAttachments() {
         if (busy || activePerson == null) return;
         ComposeUi.Panel panel = new ComposeUi.Panel("追加"); panel.sheet = true;
+        if (!compose.getGenerateImages()) {
+            panel.rows.add(new ComposeUi.Row("括弧を挿入", () -> compose.insertNotation("")));
+            panel.rows.add(new ComposeUi.Row("指示を挿入", () -> compose.insertNotation("指示")));
+            panel.rows.add(new ComposeUi.Row("心情を挿入", () -> compose.insertNotation("心情")));
+        }
         panel.rows.add(new ComposeUi.Row("画像・動画を選ぶ", () -> chooseAttachments(true)));
         panel.rows.add(new ComposeUi.Row("PDF・テキストを選ぶ", () -> chooseAttachments(false)));
         panel.rows.add(new ComposeUi.Row("画像を生成（有料API）", () -> compose.setGenerateImages(true)));
@@ -436,40 +431,6 @@ public final class MainActivity extends ComponentActivity {
         String text = draftMessage();
         if (text.trim().isEmpty()) return;
         runReply(text, true, compose.getGenerateImages());
-    }
-
-    private void showNoteMenu() {
-        if (busy || activePerson == null) return;
-        if (compose.getDraft().trim().isEmpty()) { showError("情景やメタ発言を入力してください。"); return; }
-        if (!compose.getAttachments().isEmpty()) { showError("情景・メタ発言は文章だけで送れます。添付を取り外してください。"); return; }
-        ComposeUi.Panel panel = new ComposeUi.Panel("返信なしで送る"); panel.sheet = true;
-        panel.message = "人物のセリフとは別の補足として保存し、次の返答と記憶の整理に反映します。";
-        panel.rows.add(new ComposeUi.Row("情景として送る", () -> sendNote("scene")));
-        panel.rows.add(new ComposeUi.Row("メタ発言として送る", () -> sendNote("meta")));
-        compose.show(panel);
-    }
-
-    private void sendNote(String kind) {
-        if (busy || activePerson == null) return;
-        final String text = compose.getDraft();
-        if (text.trim().isEmpty() || !compose.getAttachments().isEmpty()) return;
-        final PersonRegistry.Person person = activePerson;
-        setBusy(true); session.begin();
-        worker.execute(() -> {
-            try {
-                session.note(kind, text);
-                MemoryWork.enqueue(getApplicationContext());
-                ui(() -> {
-                    if (compose.getDraft().equals(text)) {
-                        compose.setDraft("");
-                        try { PersonState.put(activePerson.directory,"draft",""); } catch(java.io.IOException error) { ready=false; showError(safeError(error)); }
-                    }
-                    pageFirst = -1; scrollOnRefresh = true;
-                    refreshMessages(); scheduleGitSync();
-                });
-            } catch (Exception error) { ui(() -> showError(safeError(error))); }
-            finally { ui(() -> { if (activePerson != null && person.id.equals(activePerson.id)) setBusy(false); }); }
-        });
     }
 
     private void runReply(String text, boolean persistUser, boolean images) {

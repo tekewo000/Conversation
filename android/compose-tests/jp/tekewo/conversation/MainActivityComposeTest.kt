@@ -12,15 +12,13 @@ import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.onRoot
-import androidx.compose.ui.test.printToString
+import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
-import androidx.compose.ui.test.performTouchInput
-import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextClearance
@@ -465,47 +463,27 @@ class MainActivityComposeTest {
         assertEquals(0, snapshot.getJSONObject("continuity").getJSONArray("episodes").length())
     }
 
-    @Test fun longPressSavesSceneAndMetaWithoutReplyAndRebuildProgressKeepsHistory() {
+    @Test fun addMenuInsertsFreeBracketsAndLabelsIntoTheSameDraft() {
         val people = PersonRegistry(context.filesDir)
         previousPerson = people.active()?.id
         val person = people.stage(PersonDocument.named(name), null); people.commit(person)
         compose.activityRule.scenario.recreate()
-        val snapshot = MainActivity::class.java.getDeclaredMethod("nativeMessages", Int::class.javaPrimitiveType).apply { isAccessible = true }
-        compose.onNodeWithContentDescription("メッセージ入力").performTextInput("雨が降り始め、二人は軒下にいる")
-        compose.waitUntil(10_000) { compose.onAllNodes(hasContentDescription("送信") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithContentDescription("送信").performTouchInput { longClick() }
-        compose.onNodeWithText("情景として送る").performClick()
-        try {
-            compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("情景 · 返信なし")).fetchSemanticsNodes().isNotEmpty() }
-        } catch (failure: AssertionError) {
-            throw AssertionError("Note snapshot: ${snapshot.invoke(null, -1)}\nUI: ${compose.onRoot().printToString()}", failure)
-        }
-        compose.onNodeWithContentDescription("返答を入力中").assertDoesNotExist()
-        compose.onNodeWithContentDescription("メッセージ入力").performTextInput("次は静かな雰囲気で進める")
-        compose.waitUntil(10_000) { compose.onAllNodes(hasContentDescription("送信") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithContentDescription("送信").performTouchInput { longClick() }
-        compose.onNodeWithText("メタ発言として送る").performClick()
-        try {
-            compose.waitUntil(10_000) { compose.onAllNodes(androidx.compose.ui.test.hasText("メタ · 返信なし")).fetchSemanticsNodes().isNotEmpty() }
-        } catch (failure: Exception) {
-            throw AssertionError("Meta snapshot: ${snapshot.invoke(null, -1)}\nUI: ${compose.onRoot().printToString()}", failure)
-        }
-        val page = org.json.JSONObject(snapshot.invoke(null, -1) as String)
-        assertEquals(2, page.getInt("total"))
-        assertEquals("scene", page.getJSONArray("messages").getJSONObject(0).getString("annotation"))
-        assertEquals("meta", page.getJSONArray("messages").getJSONObject(1).getString("annotation"))
-        val add = MainActivity::class.java.getDeclaredMethod("nativeAddMessage", ByteArray::class.java, ByteArray::class.java).apply { isAccessible = true }
-        add.invoke(null, "assistant".toByteArray(), "過去の合成返答".toByteArray())
-        compose.activityRule.scenario.recreate()
-        openShortTermMemory()
-        compose.onNodeWithText("過去の記憶を階層に整理").assertExists()
-        compose.onNodeWithContentDescription("戻る").performClick()
-        compose.onNodeWithText("プロフィール").assertIsDisplayed()
-        compose.onNodeWithContentDescription("戻る").performClick()
-        MemoryRebuild(person.directory).request(3)
-        openShortTermMemory()
-        compose.onNodeWithText("過去の記憶を階層に整理中", substring = true).assertTextContains("0 / 3 発言", substring = true)
-        assertEquals(3, org.json.JSONObject(snapshot.invoke(null, -1) as String).getInt("total"))
+        val add = compose.onNodeWithContentDescription("メッセージに追加")
+        val draft = compose.onNodeWithContentDescription("メッセージ入力")
+        compose.waitUntil(10_000) { compose.onAllNodes(hasContentDescription("メッセージに追加") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
+        add.performClick()
+        compose.onNodeWithText("括弧を挿入").performClick()
+        draft.assertIsFocused().performTextInput("会社の同期")
+        draft.assertTextEquals("（会社の同期）")
+        draft.performSemanticsAction(SemanticsActions.SetSelection) { it(7, 7, false) }
+        draft.performTextInput("\nおはよう\n（眠たそう）\n")
+        add.performClick()
+        compose.onNodeWithText("心情を挿入").performClick()
+        draft.assertIsFocused().performTextInput("少し緊張している\n")
+        add.performClick()
+        compose.onNodeWithText("指示を挿入").performClick()
+        draft.assertIsFocused().performTextInput("やさしく声をかける")
+        draft.assertTextEquals("（会社の同期）\nおはよう\n（眠たそう）\n（心情）少し緊張している\n（指示）やさしく声をかける")
     }
 
     @Test fun paidImageApiHasItsOwnSettingsAndMaskedKeyField() {
@@ -579,7 +557,7 @@ class MainActivityComposeTest {
         previousGap = preferences.getInt("message_gap", 12)
         val person = people.stage(PersonDocument.named(name), null); people.commit(person)
         compose.activityRule.scenario.recreate()
-        compose.onNodeWithContentDescription("添付ファイルを追加").performClick()
+        compose.onNodeWithContentDescription("メッセージに追加").performClick()
         compose.onNodeWithText("画像を生成（有料API）").performClick()
         val bitmap = android.graphics.Bitmap.createBitmap(64, 32, android.graphics.Bitmap.Config.ARGB_8888)
         bitmap.eraseColor(android.graphics.Color.BLUE)
